@@ -29,8 +29,15 @@ install_one() {
   local src="$1" dest="$2"
 
   if [[ "${MODE}" == "copy" ]]; then
-    if [[ -e "${dest}" || -L "${dest}" ]]; then
-      rm -rf "${dest}"
+    # Back up real (non-symlink) content before replacing it — same guarantee
+    # as link mode. A symlink at DEST points into a repo checkout, so removing
+    # it loses nothing.
+    if [[ -e "${dest}" && ! -L "${dest}" ]]; then
+      rm -rf "${dest}.bak"
+      mv "${dest}" "${dest}.bak"
+      echo "backed up   ${dest} -> ${dest}.bak"
+    elif [[ -L "${dest}" ]]; then
+      rm -f "${dest}"
     fi
     cp -r "${src}" "${dest}"
     echo "copied  ${src} -> ${dest}"

@@ -40,8 +40,10 @@ Think through, before the first Agent call:
 1. **Subtask graph.** What is independent (→ parallel) vs. dependent (→ sequential)?
    Subtasks must not overlap: two workers touching the same file or answering the same
    question is a decomposition bug.
-2. **Routing.** Which tier does each subtask actually need (Step 2)? Route by the
-   *hardest judgment the subtask requires*, not by its size.
+2. **Routing.** Classify each subtask with the Step 2 complexity rubric and write the
+   routing plan down: subtask → class → agent. Route by the *hardest judgment the
+   subtask requires*, not by its size. Any subtask routed below Opus must name the
+   signal that makes it mechanical or well-specified — if you cannot name it, route up.
 3. **Acceptance criteria.** Write gradeable criteria per subtask *before* delegating
    (Step 4). If you cannot state what "done" looks like, the subtask is not ready to
    delegate — sharpen it or investigate first.
@@ -59,16 +61,41 @@ Think through, before the first Agent call:
 | `critic` | Opus 4.8, xhigh | adversarial verification of any deliverable against its acceptance criteria (fresh context, tries to refute, runs tests) | producing new work; style reviews |
 | you (Fable) | — | decomposition, integration, cross-cutting judgment, anything all four are wrong for | — |
 
+**Complexity → tier.** Classify every subtask before routing; when torn between two
+tiers, route **up**. The costs are asymmetric: an up-route wastes some quota; a
+down-route produces a confident, silent error — which then costs a verification round,
+a retry, and usually an escalation anyway. A complex task must never land on a weaker
+model to save quota.
+
+| Class | Signals (any one suffices) | Route |
+|---|---|---|
+| **Judgment** | open design space; ambiguity left to resolve; security implications; unknown root cause; conflicting constraints to weigh; quality assessment of *meaning* (audits/reviews of prose, design, policy, architecture); an error would silently mislead you | `architect` or `critic` (Opus) — never lower |
+| **Skilled execution** | complete spec exists; success is objectively checkable (tests, criteria); known patterns apply; bounded blast radius | `builder` (Sonnet) |
+| **Mechanical** | every step enumerable in advance; zero decisions remain; exact output format given; a wrong result is detectable on sight | `scout` (Haiku) |
+
+Hard floors — never routed below Opus, regardless of quota: architecture and technology
+decisions; risky-change planning; root-cause debugging; security-relevant work; final
+verification of production code; judgment-bearing review/audit lenses. A subtask that
+mixes classes is split; if it cannot be split, the whole subtask takes its highest
+class. Escalation is one-way — a subtask that failed at a tier never moves back down.
+
 **Haiku verdict**: yes, use it — it is the fastest and cheapest tier ("near-frontier
 performance", officially positioned for "sub-agent tasks") and preserves your
 Opus/Fable quota — but only inside its lane: mechanical, unambiguous, read-only tickets
-with an exact output format. The moment a subtask needs a judgment call, route to Sonnet.
+with an exact output format. The moment a subtask needs a judgment call, route to Sonnet
+at minimum — and re-check it against the Judgment row first.
+
+**The matrix binds every delegation channel** — Agent tool calls and Workflow
+`agent()` calls alike (see "Large fan-outs" for the Workflow-specific rule).
 
 **Model override**: the Agent tool's `model` parameter overrides an agent's frontmatter.
-Two sanctioned uses: `critic` with `model: sonnet` for cheap verification of low-risk
-deliverables, and `builder` with `model: opus` for a single unusually gnarly
-implementation ticket. Do not override `scout` upward — if it needs a stronger model,
-it was mis-routed.
+Up-routing is always allowed (`builder` with `model: opus` for one unusually gnarly
+implementation ticket). Down-routing `critic` to `model: sonnet` is allowed ONLY when
+all three hold: the deliverable is recon or an intermediate draft — not production code
+and not something the user acts on directly; deterministic checks exist and already
+passed; a missed defect would still be caught downstream before the user relies on the
+result. Down-routing is never a quota-saving device. Do not override `scout` upward —
+if it needs a stronger model, it was mis-routed.
 
 ## Step 3 — Delegate with task tickets
 
@@ -173,6 +200,22 @@ const results = await pipeline(items,
   (item) => agent(ticketFor(item), { agentType: 'builder', label: item }),
   (out, item) => agent(verifyTicket(out, item), { agentType: 'critic', label: `verify:${item}` }))
 ```
+
+**Routing is mandatory inside Workflow scripts — on every single `agent()` call.**
+An `agent()` call with neither `agentType` nor `model` inherits the session model —
+you, the orchestrator: the most expensive tier, running without any worker's tuned
+system prompt. The Workflow tool's own "default to omitting model" advice does NOT
+apply under this skill — it silently defeats the routing matrix. Rule: every `agent()`
+call carries `agentType: 'architect' | 'builder' | 'scout' | 'critic'` (preferred —
+model and tuned prompt come together), or at minimum an explicit `model`. Before
+launching a workflow, re-read the script and reject it if any `agent()` call lacks
+both. Orchestrator-tier workers are never spawned; work that Step 2 routes to "you"
+happens in the main loop.
+
+Pick `agentType` with the Step 2 complexity rubric, not by habit: judgment-bearing
+lenses (does this text / design / policy hold up?) are `critic` — Opus — even when
+there are ten of them in the sweep; `builder` covers spec-implementations; `scout`
+covers mechanical sweeps only.
 
 The same quality gates apply: every pipeline stage's ticket carries acceptance criteria,
 and `critic` verdicts gate what reaches the final report.
