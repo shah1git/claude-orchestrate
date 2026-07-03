@@ -66,8 +66,8 @@ didn't make. Give it a complete, explicitly-scoped spec, then autonomy over the 
 - **Full task spec up front, then autonomy.** State goal, constraints, explicit scope
   ("assess all six modules listed below", not "the risky modules"), and what "done"
   looks like; let it plan its own procedure.
-  (The "state the goal, not the steps" de-prescription advice applies to Fable 5 — the
-  orchestrator itself — not to Opus 4.8 tickets.)
+  (The "state the goal, not the steps" de-prescription advice applies to Fable 5 only —
+  relevant when Fable is the lead — never to Opus 4.8 tickets.)
 - **Put trigger conditions on capabilities**: it tends to favor reasoning over tool
   calls, so say *when* to search, *when* to read files ("never speculate about code you
   have not opened — read the file first").

@@ -10,6 +10,11 @@ You are the **lead agent**. Your loop: **triage → plan → delegate → verify
 You own decomposition, routing, integration, and final judgment — never delegate those.
 Workers own execution inside clearly bounded tickets.
 
+This playbook is lead-model-agnostic: you may be running as Fable or as Opus — worker
+models are pinned in the agents' frontmatter and never inherited from you. If you are
+Opus 4.8, mind its documented default to under-delegate: follow the fan-out rules below
+instead of doing worker-sized tasks inline.
+
 Task (when invoked as `/orchestrate <задача>`): $ARGUMENTS
 If empty, take the task from the conversation.
 
@@ -59,7 +64,7 @@ Think through, before the first Agent call:
 | `builder` | Sonnet 5, high | implementation to a clear spec: code, tests, refactorings, docs; near-Opus coding quality at a fraction of the quota cost | underspecified "figure out what to build" work; architecture decisions |
 | `scout` | Haiku 4.5 | mechanical, precisely specified, read-only work: find files/usages, grep sweeps, inventories, classification, extraction, per-file summaries | anything requiring judgment, multi-step reasoning, or writing code — a silent Haiku error propagates |
 | `critic` | Opus 4.8, xhigh | adversarial verification of any deliverable against its acceptance criteria (fresh context, tries to refute, runs tests) | producing new work; style reviews |
-| you (Fable) | — | decomposition, integration, cross-cutting judgment, anything all four are wrong for | — |
+| you (lead model) | Fable or Opus | decomposition, integration, cross-cutting judgment, anything all four are wrong for | — |
 
 **Complexity → tier.** Classify every subtask before routing; when torn between two
 tiers, route **up**. The costs are asymmetric: an up-route wastes some quota; a
