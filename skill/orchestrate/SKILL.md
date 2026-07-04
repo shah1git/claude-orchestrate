@@ -107,7 +107,10 @@ all three hold: the deliverable is recon or an intermediate draft — not produc
 and not something the user acts on directly; deterministic checks exist and already
 passed; a missed defect would still be caught downstream before the user relies on the
 result. Down-routing is never a quota-saving device. Do not override `scout` upward —
-if it needs a stronger model, it was mis-routed.
+if it needs a stronger model, it was mis-routed. The up-routing ceiling is
+`model: fable` — the lead-tier model as a worker: reserve it for the final escalation
+rung (Step 4) or the single hardest judgment lens in a task; it spends the most
+expensive quota and is never a routine route.
 
 ## Step 3 — Delegate with task tickets
 
@@ -150,10 +153,15 @@ Rules:
 **Working-tree discipline (write tickets).** Parallel builders share one checkout —
 plan around it:
 
-- Parallel writes only on **disjoint path sets**. If two subtasks must touch the same
-  file, chain them sequentially and pass the first diff as INPUT to the second. For
-  genuinely conflicting parallel work, spawn builders with `isolation: "worktree"` and
-  integrate the diffs yourself.
+- **Three or more concurrent writers → worktree isolation is mandatory**: spawn every
+  builder in the wave with `isolation: "worktree"` and integrate the diffs yourself,
+  regardless of how disjoint the path sets look. Structural isolation removes the
+  cross-contamination error class instead of policing it; the shared-checkout rules
+  below then apply only to waves of one or two writers.
+- Parallel writes on a shared checkout only on **disjoint path sets**. If two subtasks
+  must touch the same file, chain them sequentially and pass the first diff as INPUT to
+  the second. For genuinely conflicting parallel work, spawn builders with
+  `isolation: "worktree"` and integrate the diffs yourself.
 - During a parallel write wave, project-wide checks are unreliable — they compile
   neighbors' half-finished edits. Tell each builder to run *scoped* checks (its own
   test files, typecheck on touched files); the authoritative full-suite run happens
@@ -172,14 +180,32 @@ plan around it:
    deterministic checks (tests, typecheck, build, grep for forbidden patterns)
    → `critic` agent (LLM judgment in fresh context)
    → your own spot-check (last resort, most expensive).
+   Deterministic checks are a **prerequisite, not an alternative**: spawn `critic` only
+   after every code-gradeable criterion has already passed. A deterministic FAIL goes
+   straight back to the producer with the failing output attached — it consumes a retry
+   (point 4 below) but zero Opus tokens.
 3. **Mandatory `critic` pass** for: production code changes, anything security-relevant,
    and any deliverable the user will rely on without personally checking. Skippable for
    throwaway recon. The grader must not be the producer: critic sees only the deliverable
    + the ticket's acceptance criteria — not the producer's reasoning.
+   **Dual-lens rule — applied by you, automatically**: for highest-stakes deliverables —
+   production code headed for the main branch, anything published outside the team,
+   anything the user will act on without reading — spawn two critics in parallel with
+   distinct lenses: one graded on *correctness* (is it true / does it work), one on
+   *completeness* (does it cover the full stated scope). Accept only when both pass.
+   Grade every deliverable against these trigger conditions while planning (Step 1);
+   the user is never expected to request the second lens. Outside the trigger
+   conditions a single critic remains the default — the second lens doubles the most
+   expensive gate.
 4. **Escalation ladder** on a FAIL verdict:
    ① one retry by the same agent with the critic's findings attached →
-   ② escalate the model tier (haiku→sonnet→opus→handle it yourself) →
+   ② escalate the model tier (haiku→sonnet→opus→fable worker in a fresh
+   context→handle it yourself) →
    ③ report the blocker to the user with evidence. Never loop more than twice.
+   The fable rung exists because "handle it yourself" is *not* a fresh look: by the
+   time the ladder reaches you, your context carries every failed attempt. A worker
+   spawned with `model: fable` gives lead-tier judgment *plus* fresh-context
+   independence; you are the integration fallback, not the second opinion.
 5. **Evidence over assertion.** A worker's "done" claim counts only when backed by tool
    output you can see (test run, command output, quoted source). Unverified claims are
    treated as not done.
@@ -201,6 +227,12 @@ Final message to the user, in the user's language, leading with the outcome:
 2. **Scorecard** — subtasks total / passed first try / retried / escalated; verification
    coverage; test evidence present or not.
 3. **Notable findings and open risks** — only what changes what the user does next.
+
+Then append one JSONL record per delegated ticket to the routing telemetry log —
+`telemetry/routing-log.jsonl` next to this file (schema and recalibration thresholds:
+[references/quality.md](references/quality.md) §7). The log is what turns the Step 2
+rubric from a priori doctrine into a calibrated one; skipping it on "small" sessions
+is how the data never accumulates.
 
 ## Large fan-outs (≥ 5 similar items)
 

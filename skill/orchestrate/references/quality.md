@@ -22,7 +22,9 @@ Multidimensional is normal: correctness + scope + evidence, each independently c
 
 1. **Code-graded** (exact match, exit codes, grep, build/test/typecheck) — fastest, most
    reliable; always prefer when the criterion allows it. Design criteria to be
-   code-gradeable where possible.
+   code-gradeable where possible. Code-graded criteria are a *prerequisite gate*:
+   `critic` is spawned only after all of them have passed (SKILL.md Step 4) — a
+   deterministic FAIL returns to the producer at zero LLM cost.
 2. **LLM-graded** (`critic`) — for judgment criteria (does the plan address the risk?
    is the summary faithful to the source?). Reliable enough at scale *if* the rubric is
    explicit and the output is constrained (PASS/FAIL per criterion, not an essay).
@@ -118,3 +120,43 @@ Failures are reported, never smoothed over: a worker that skipped a step, a test
 still fails, a criterion that could not be checked — all appear in the final report as
 what they are. If the overall task did not reach "done", the report says so in the first
 sentence and lists what remains, with evidence.
+
+## 7. Routing telemetry — calibrating the Step 2 rubric
+
+The complexity→tier rubric ships a priori; this log makes it empirical. At the end of
+every orchestrated session (SKILL.md Step 5) the lead appends one record per
+**delegated** ticket to `telemetry/routing-log.jsonl` in the skill directory. The file
+is data, not doctrine — read it for recalibration, never load it into a ticket.
+
+One JSON object per line:
+
+```json
+{"date": "2026-07-04", "task": "de-version model labels", "ticket": "verify:v1.5",
+ "class": "judgment", "agent": "critic", "model": "opus",
+ "first_try": true, "retries": 0, "escalated_to": null, "verdict": "PASS", "note": ""}
+```
+
+Field rules: `class` ∈ `judgment | skilled | mechanical` (the Step 2 classes); `agent`
+is the agent type actually used (`architect | builder | scout | critic`), with `model`
+recording the effective model (differs from the frontmatter alias family only on an
+explicit override); `retries` counts ticket re-issues after any failure — deterministic
+pre-gate FAILs, critic FAILs, and NEEDS_CLARIFICATION re-issues alike; `first_try` is
+simply `retries == 0`; `escalated_to` names the tier that ultimately passed, `null` if
+none; `verdict` is the final verdict after all attempts; `note` is one short clause,
+filled only when it explains a FAIL, retry, or escalation.
+
+Recalibration — review whenever any tier accumulates ≥ 20 new records, and at every
+version bump at the latest:
+
+- `scout` first-try pass < 80% → its lane is too wide: tighten the Mechanical row's
+  signals, or stop routing classification-flavored sweeps to Haiku.
+- `builder` first-try pass < 80% → either tickets are underspecified (fix the ticket
+  template usage) or Skilled-execution signals admit judgment work — read the failing
+  records' notes before deciding which.
+- Recurring `escalated_to` out of any tier → the class boundary above it is drawn
+  wrong; move the recurring signal one row up in the Step 2 table.
+- `critic` FAIL rate on first-try deliverables persistently < 5% → the gate may be
+  over-applied to low-risk deliverables; revisit what "mandatory critic pass" covers —
+  but never weaken it for production code.
+
+The thresholds above are initial guesses; revise them here as data accumulates.
