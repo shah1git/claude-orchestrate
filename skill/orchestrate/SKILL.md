@@ -12,8 +12,8 @@ You own decomposition, routing, integration, and final judgment — never delega
 Workers own execution inside clearly bounded tickets.
 
 This playbook is lead-model-agnostic: you may be running as Fable or as Opus — worker
-models are pinned in the agents' frontmatter and never inherited from you. If you are
-Opus 4.8, mind its documented default to under-delegate: follow the fan-out rules below
+models are set in the agents' frontmatter and never inherited from you. If you are
+Opus, mind its documented default to under-delegate: follow the fan-out rules below
 instead of doing worker-sized tasks inline.
 
 Task (when invoked as `/orchestrate <задача>`): $ARGUMENTS
@@ -61,11 +61,17 @@ Think through, before the first Agent call:
 
 | Agent | Model / effort | Delegate | Do NOT delegate |
 |---|---|---|---|
-| `architect` | Opus 4.8, xhigh | system design, architecture & technology decisions, complex debugging / root-cause analysis, risk assessment, plans for risky changes | production code (it returns plans, not diffs); mechanical lookups |
-| `builder` | Sonnet 5, high | implementation to a clear spec: code, tests, refactorings, docs; near-Opus coding quality at a fraction of the quota cost | underspecified "figure out what to build" work; architecture decisions |
-| `scout` | Haiku 4.5 | mechanical, precisely specified, read-only work: find files/usages, grep sweeps, inventories, classification, extraction, per-file summaries | anything requiring judgment, multi-step reasoning, or writing code — a silent Haiku error propagates |
-| `critic` | Opus 4.8, xhigh | adversarial verification of any deliverable against its acceptance criteria (fresh context, tries to refute, runs tests) | producing new work; style reviews |
+| `architect` | Opus, xhigh | system design, architecture & technology decisions, complex debugging / root-cause analysis, risk assessment, plans for risky changes | production code (it returns plans, not diffs); mechanical lookups |
+| `builder` | Sonnet, high | implementation to a clear spec: code, tests, refactorings, docs; near-Opus coding quality at a fraction of the quota cost | underspecified "figure out what to build" work; architecture decisions |
+| `scout` | Haiku | mechanical, precisely specified, read-only work: find files/usages, grep sweeps, inventories, classification, extraction, per-file summaries | anything requiring judgment, multi-step reasoning, or writing code — a silent Haiku error propagates |
+| `critic` | Opus, xhigh | adversarial verification of any deliverable against its acceptance criteria (fresh context, tries to refute, runs tests) | producing new work; style reviews |
 | you (lead model) | Fable or Opus | decomposition, integration, cross-cutting judgment, anything all four are wrong for | — |
+
+Model names in this matrix are *families*, not versions: each worker's frontmatter binds
+it via a floating alias (`opus`, `sonnet`, `haiku`), so every run automatically uses the
+newest generation of that family. Generation-specific *behavioral* notes do not float —
+they live in [references/delegation.md](references/delegation.md) under an explicit
+"verified for" banner; re-verify them there when a new generation ships.
 
 **Complexity → tier.** Classify every subtask before routing; when torn between two
 tiers, route **up**. The costs are asymmetric: an up-route wastes some quota; a
@@ -130,14 +136,15 @@ Rules:
   - `scout` (Haiku): maximally explicit — enumerated steps, exact paths and commands, a
     literal example of the expected output, and an escape hatch ("if the instructions
     don't fit what you find, return NEEDS_CLARIFICATION with what you saw — do not guess").
-  - `builder` (Sonnet 5): complete spec up front in one turn; state instruction *scope*
+  - `builder` (Sonnet): complete spec up front in one turn; state instruction *scope*
     explicitly ("apply to every handler, not just the first"); it follows instructions
     literally and won't infer requests you didn't make.
-  - `architect` / `critic` (Opus 4.8): full spec up front — goal, constraints, explicit
+  - `architect` / `critic` (Opus): full spec up front — goal, constraints, explicit
     scope, and trigger conditions for tools ("search the web if currency matters").
-    Opus 4.8 follows instructions as literally as Sonnet 5 and will not generalize scope
+    Opus follows instructions as literally as Sonnet and will not generalize scope
     you did not state; grant it autonomy over the *how*, not ambiguity about the *what*.
-- Full templates, worked examples, and the per-model phrasing cheat-sheet:
+- Full templates, worked examples, the per-model phrasing cheat-sheet, and the model
+  generations those behavioral notes were verified against:
   [references/delegation.md](references/delegation.md).
 
 **Working-tree discipline (write tickets).** Parallel builders share one checkout —

@@ -3,10 +3,8 @@
 Source of truth for how the orchestrator writes task tickets. Grounded in Anthropic's
 published guidance: "How we built our multi-agent research system" (delegation anatomy,
 effort scaling), "Prompting best practices" (explicitness, context/motivation, examples,
-format control), and the per-model prompting pages for Opus 4.8 / Sonnet 5. Haiku 4.5
-has no dedicated prompting page — its section derives from the general best practices
-plus its official positioning ("near-frontier performance", "sub-agent tasks") in
-choosing-a-model.
+format control), and the per-model prompting pages for the generations named in the
+"verified for" banner of the cheat-sheet below.
 
 ## The ticket, field by field
 
@@ -16,7 +14,7 @@ choosing-a-model.
 | CONTEXT | Why the task matters, who consumes the result, how it fits the plan. Claude generalizes correctly from the *reason*: "the result feeds a security review, so completeness beats speed." | Worker makes locally reasonable, globally wrong tradeoffs |
 | INPUTS | Exact paths, symbols, line ranges, URLs, and relevant findings from other workers, restated (workers never see your conversation). | Worker re-derives or, worse, guesses your context |
 | OUTPUT | Exact deliverable format: structure, section names, table columns, language. If machine-consumed, show a literal example. | Unparseable or inconsistent deliverables |
-| TOOLS | Which tools to use and the *trigger conditions*: "if the answer depends on current information, search the web before answering rather than answering from memory." | Under-use of tools (esp. Opus 4.8) or endless searching |
+| TOOLS | Which tools to use and the *trigger conditions*: "if the answer depends on current information, search the web before answering rather than answering from memory." | Under-use of tools (esp. Opus) or endless searching |
 | BOUNDARIES | Out-of-scope list, files that must not change, stop conditions ("if the fix requires touching the schema, stop and report instead"). | Scope creep, duplicate work across workers, unrequested refactors |
 | ACCEPTANCE | Gradeable criteria (see quality.md). These are handed verbatim to `critic`. | Nothing to verify against; "done" becomes a vibe |
 
@@ -25,7 +23,18 @@ overlapping delegation is the #1 documented multi-agent failure (duplicated work
 
 ## Per-model phrasing cheat-sheet
 
-### `scout` — Haiku 4.5
+> **Verified for: Opus 4.8 · Sonnet 5 · Haiku 4.5 · Fable 5 (lead)** — checked
+> 2026-07-04. The agents' frontmatter binds each worker via a floating alias (`opus`,
+> `sonnet`, `haiku`), which always resolves to the newest generation of its family — a
+> new release is picked up with no edit anywhere. The *behavioral* notes below, however,
+> were verified against the specific generations named above and do **not** float: when
+> an alias starts resolving to a newer generation, re-verify each claim against
+> Anthropic's model-specific prompting pages (platform.claude.com/docs) and update this
+> banner. Haiku 4.5 has no dedicated prompting page — its section derives from the
+> general best practices plus its official positioning ("near-frontier performance",
+> "sub-agent tasks") in choosing-a-model.
+
+### `scout` — Haiku
 
 Haiku is fast and cheap but does not fill gaps in your instructions. Write the ticket as
 if for a capable executor with zero tolerance for ambiguity:
@@ -42,9 +51,9 @@ if for a capable executor with zero tolerance for ambiguity:
 - Keep tickets small: one question or one sweep per ticket. Ten small scout tickets in
   parallel beat one broad one.
 
-### `builder` — Sonnet 5
+### `builder` — Sonnet
 
-Sonnet 5 follows instructions **literally** and will not silently generalize an
+Sonnet follows instructions **literally** and will not silently generalize an
 instruction from one item to another, nor infer requests you didn't make:
 
 - **State scope explicitly**: "apply this to *every* endpoint in `routes/`, not just the
@@ -57,17 +66,17 @@ instruction from one item to another, nor infer requests you didn't make:
 - Include the anti-overengineering and anti-reward-hacking lines from its agent
   definition only if you observe drift — they are already in its system prompt.
 
-### `architect` / `critic` — Opus 4.8
+### `architect` / `critic` — Opus
 
-Opus 4.8 follows instructions **literally** — exactly like Sonnet 5, it does not
+Opus follows instructions **literally** — exactly like Sonnet, it does not
 generalize an instruction from one item to another and does not infer requests you
 didn't make. Give it a complete, explicitly-scoped spec, then autonomy over the *how*:
 
 - **Full task spec up front, then autonomy.** State goal, constraints, explicit scope
   ("assess all six modules listed below", not "the risky modules"), and what "done"
   looks like; let it plan its own procedure.
-  (The "state the goal, not the steps" de-prescription advice applies to Fable 5 only —
-  relevant when Fable is the lead — never to Opus 4.8 tickets.)
+  (The "state the goal, not the steps" de-prescription advice applies to Fable only —
+  relevant when Fable is the lead — never to Opus tickets.)
 - **Put trigger conditions on capabilities**: it tends to favor reasoning over tool
   calls, so say *when* to search, *when* to read files ("never speculate about code you
   have not opened — read the file first").
