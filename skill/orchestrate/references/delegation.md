@@ -21,6 +21,13 @@ format control), and the per-model prompting pages for the generations named in 
 Two workers must never share an OBJECTIVE or overlap on INPUTS-they-modify. Vague or
 overlapping delegation is the #1 documented multi-agent failure (duplicated work, gaps).
 
+**Seeding tickets from the clarification ledger.** When Step 0.5 ran a grill, its ledger is
+the source for these fields: sharpened TERMS become the exact vocabulary in
+OBJECTIVE/CONTEXT (so isolated workers share one meaning of "account"/"cancellation");
+resolved FORKS become BOUNDARIES; the confirmed SUCCESS condition decomposes into per-ticket
+ACCEPTANCE; a CODE contradiction found in the grill becomes an INPUT (the file:line). Copy a
+canonicalized term verbatim — never paraphrase a term the grill already pinned.
+
 ## Per-model phrasing cheat-sheet
 
 > **Verified for: Opus 4.8 · Sonnet 5 · Haiku 4.5 · Fable 5 (lead)** — checked

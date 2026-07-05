@@ -83,6 +83,12 @@ Interpretation rules for the orchestrator:
 - completeness — all requested aspects covered; empty results stated explicitly;
 - source quality — primary sources (code, official docs) over hearsay;
 - tool efficiency — sensible tool use, no fabricated-source chasing.
+- connective accuracy — for synthesis/summary deliverables, each claim's *strength* and
+  *causal/temporal shape* match the source, not just its nouns: quantifiers
+  (all/most/none/every/always/never/N%) and causal-temporal connectives
+  (therefore/because/so/when/after/leads to) are each supported by the cited source. An
+  overstated quantifier or an invented causal link is a defect even when every cited noun is
+  real — this is where summaries hallucinate. Apply it to the lead's own Step 5 report too.
 
 **Design / plan**:
 - addresses every requirement and constraint in the ticket;
@@ -108,6 +114,7 @@ The orchestrator's final report includes:
 | Escalated (tier raised or taken over) | n |
 | Verification coverage | verified deliverables / deliverables shipped into the result |
 | Deterministic evidence present | yes/no per code deliverable |
+| Token cost (by agent) | e.g. architect 82k / builder 62k / critic 54k — from each Agent result's `usage` block |
 
 Standing targets: verification coverage = 100% for production code; first-try pass ≥ 80%
 (persistently lower means tickets are underspecified — fix the tickets, not the workers);
@@ -133,7 +140,7 @@ One JSON object per line:
 ```json
 {"date": "2026-07-04", "task": "de-version model labels", "ticket": "verify:v1.5",
  "class": "judgment", "agent": "critic", "model": "opus",
- "first_try": true, "retries": 0, "escalated_to": null, "verdict": "PASS", "note": ""}
+ "first_try": true, "retries": 0, "escalated_to": null, "verdict": "PASS", "note": "", "tokens": 54154, "tool_uses": 8}
 ```
 
 Field rules: `class` ∈ `judgment | skilled | mechanical` (the Step 2 classes); `agent`
@@ -144,6 +151,13 @@ pre-gate FAILs, critic FAILs, and NEEDS_CLARIFICATION re-issues alike; `first_tr
 simply `retries == 0`; `escalated_to` names the tier that ultimately passed, `null` if
 none; `verdict` is the final verdict after all attempts; `note` is one short clause,
 filled only when it explains a FAIL, retry, or escalation.
+
+Optional cost fields — `tokens`, `tool_uses`, `duration_ms` — may be appended to any
+record. They are free: the harness reports them in each Agent result's `usage` block
+(`subagent_tokens` / `tool_uses` / `duration_ms`), so the lead already has them at
+synthesis time. Recording them lets the log calibrate *cost per class* — is a class
+routinely burning more than its tier is worth? — not just correctness; the two together
+are what make the Step 2 rubric empirical.
 
 Recalibration — review whenever any tier accumulates ≥ 20 new records, and at every
 version bump at the latest:

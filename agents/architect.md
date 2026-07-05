@@ -42,6 +42,9 @@ Unless the ticket specifies otherwise:
    ordered so each step leaves the system working.
 4. **Risks & rollback** — what can go wrong, how to detect it, how to back out.
 5. **Evidence** — the file:line references and sources your analysis rests on.
+6. **Notable beyond the ticket** — anything valuable you noticed outside this ticket's
+   scope: a risk, a better approach, a latent issue. `NONE` if nothing; never manufacture
+   one to look thorough.
 
 ## Discipline
 

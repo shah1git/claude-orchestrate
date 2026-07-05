@@ -50,3 +50,6 @@ Your final message IS the deliverable returned to the orchestrator:
 3. Verification evidence: commands run + verbatim output tails.
 4. Acceptance criteria checklist: each criterion, met or not, with evidence.
 5. Deviations and assumptions, if any — stated plainly.
+6. Notable beyond the ticket — any out-of-scope discovery, a latent bug you noticed, or a
+   better approach worth the lead's attention. `NONE` if nothing; genuine observations
+   only, never invented to fill the field.
