@@ -205,6 +205,17 @@ if it needs a stronger model, it was mis-routed. The up-routing ceiling is
 rung (Step 4) or the single hardest judgment lens in a task; it spends the most
 expensive quota and is never a routine route.
 
+**Provider dimension — optional overlay (Claude is the default).** The class→tier matrix
+above always fixes a *Claude* worker; provider is an orthogonal, opt-in choice made only
+after the class is set. Route to a non-Claude worker (OpenAI Codex, Google Gemini via
+Antigravity) ONLY for one of three named reasons — independent-lens verification; recon
+whose context exceeds a Claude window; or an explicit user preference for the Codex coding
+hand (opt-in — Claude `builder` stays the default coder) — AND only when its connector is
+detected present; otherwise the Claude default stands. Cross-provider is never a silent
+default, and a non-Claude worker is an MCP call by the lead, not a sub-agent. Full
+mechanics, the connector registry, and the detect-or-degrade rule:
+[references/cross-provider.md](references/cross-provider.md).
+
 ## Step 3 — Delegate with task tickets
 
 Workers start with a **fresh, isolated context** — they see none of your conversation
@@ -255,6 +266,11 @@ plan around it:
   must touch the same file, chain them sequentially and pass the first diff as INPUT to
   the second. For genuinely conflicting parallel work, spawn builders with
   `isolation: "worktree"` and integrate the diffs yourself.
+- A **Codex coding-hand** (references/cross-provider.md) is a writer like any builder: give
+  it `sandbox: workspace-write` and `cwd` set to a dedicated worktree, never
+  `danger-full-access`. Capture its diff from disk (`git diff`), not its self-report, and
+  gate it exactly like a Claude builder's diff — deterministic pre-checks then a *non-Codex*
+  critic (producer ≠ grader).
 - During a parallel write wave, project-wide checks are unreliable — they compile
   neighbors' half-finished edits. Tell each builder to run *scoped* checks (its own
   test files, typecheck on touched files); the authoritative full-suite run happens
@@ -290,6 +306,16 @@ plan around it:
    the user is never expected to request the second lens. Outside the trigger
    conditions a single critic remains the default — the second lens doubles the most
    expensive gate.
+
+   **Optional cross-model third lens (requires a connector — references/cross-provider.md).**
+   For a dual-lens-trigger deliverable, when architectural independence is worth the latency
+   — security-relevant code (its flagship documented use: a different-provider reviewer
+   whose biases don't overlap), or on user request — add one cross-model critic (Codex or
+   Gemini) as a *third* lens on the same deliverable + criteria, read-only. It is additive:
+   accept only when **both Claude lenses PASS and the cross-model lens raises no surviving
+   critical/major finding**. A cross-model lens can only tighten the gate, never replace a
+   Claude lens; its cost is the other subscription's quota plus one round-trip, not Claude
+   quota. If no connector is present, the standard two-Claude-lens gate applies unchanged.
 4. **Escalation ladder** on a FAIL verdict:
    ① one retry by the same agent with the critic's findings attached →
    ② escalate the model tier (haiku→sonnet→opus→fable worker in a fresh

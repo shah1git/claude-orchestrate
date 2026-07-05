@@ -21,6 +21,16 @@ in a fresh context that never sees the producer's own reasoning. Failures escala
 capped ladder (retry once → raise the model tier → report the blocker) rather than
 looping indefinitely.
 
+### Optional cross-provider layer
+
+By default the skill is fully self-contained and Claude-only. When the user has them wired,
+the lead can *optionally* delegate to non-Claude models via MCP — OpenAI Codex and Google
+Gemini (Antigravity) — for three named reasons only: an independent cross-model verification
+lens, big-context recon beyond a Claude window, or (opt-in) a Codex coding hand. It is
+capability-detected: absent a connector, every route falls back to the Claude default, so
+the Claude-only path always works. See
+[skill/orchestrate/references/cross-provider.md](skill/orchestrate/references/cross-provider.md).
+
 ## Install
 
 ```bash
