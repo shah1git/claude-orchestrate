@@ -28,6 +28,12 @@ resolved FORKS become BOUNDARIES; the confirmed SUCCESS condition decomposes int
 ACCEPTANCE; a CODE contradiction found in the grill becomes an INPUT (the file:line). Copy a
 canonicalized term verbatim — never paraphrase a term the grill already pinned.
 
+**No hedge words in a ticket.** "probably / likely / apparently / should be / I think / may"
+in a ticket marks unresolved recon, not a spec. Resolve each before dispatch — send a
+`scout`, read the file, or make the decision yourself — or promote it to an explicit line
+("Assumption: X holds; if it does not, stop and report"). A load-bearing hedge is a ticket
+defect: the isolated worker cannot tell your uncertainty from a requirement.
+
 ## Per-model phrasing cheat-sheet
 
 > **Verified for: Opus 4.8 · Sonnet 5 · Haiku 4.5 · Fable 5 (lead)** — checked
@@ -55,6 +61,12 @@ if for a capable executor with zero tolerance for ambiguity:
   or the task requires a judgment call, stop and return `NEEDS_CLARIFICATION:` followed
   by what you actually saw. Do not guess. An honest empty result ('found 0 matches') is a
   success, not a failure."
+- **Keep it to eyes, not head.** Scout verbs are *find / list / measure / quote / count /
+  cross-check / extract / classify-by-a-rule-you-give-it* — never *choose / decide /
+  recommend / rank / conclude* where the pick needs judgment. Applying an explicit
+  classification rule the ticket provides is mechanical (do it); a judgment choice among N
+  goes back as "all N with their attributes" for the lead to decide. Encode the boundary in
+  the ticket so it is explicit, not implied.
 - Keep tickets small: one question or one sweep per ticket. Ten small scout tickets in
   parallel beat one broad one.
 

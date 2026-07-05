@@ -175,3 +175,17 @@ Record the provider actually used so cross-provider routing calibrates too (qual
 optional `provider` ∈ `anthropic | openai | google` (default `anthropic` when omitted) and,
 when `provider != anthropic`, `xprovider_reason` ∈ `independent-lens | context-size |
 user-codex-pref`. The existing `model` field carries the effective model.
+
+## Known connector quirks (from live testing 2026-07-05)
+
+- **Cross-provider MCP calls return no token usage.** Unlike Claude sub-agents (whose
+  `usage` block reports `subagent_tokens`/`tool_uses`), the Codex/Gemini MCP responses carry
+  no token count. So the telemetry `tokens` field and the completion-card token figure are
+  `n/a` for `provider != anthropic` — record what you have (verdict, model), never invent a
+  token number.
+- **Gemini `agy` print-mode is model-locked to Flash.** In non-interactive/print mode the
+  Gemini connector ignored an explicit `model` param and ran `gemini-3.5-flash` regardless
+  (observed 2026-07-05). Consequence: the `gemini-critic` pin to `gemini-3.5-pro` may not be
+  deliverable through a print-mode connector — verify your connector actually honours
+  `model`, and if it does not, route the deep-reasoning critic lens to Codex (xhigh) instead
+  of assuming Gemini Pro ran. Flash still serves `gemini-recon` well.

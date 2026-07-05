@@ -271,6 +271,12 @@ plan around it:
   `danger-full-access`. Capture its diff from disk (`git diff`), not its self-report, and
   gate it exactly like a Claude builder's diff — deterministic pre-checks then a *non-Codex*
   critic (producer ≠ grader).
+- **Re-validate a pre-written spec against reality before dispatch.** If you drafted a
+  ticket's spec ahead of time — while an earlier ticket in the chain was still running — a
+  spec written against an *assumed* end-state can be stale by the time its turn comes.
+  Before dispatching it, reconcile in one line against the actual accumulated diff: does the
+  prior work match what this spec assumed? If not, update the spec first — a stale spec sends
+  a worker to build on a foundation that moved.
 - During a parallel write wave, project-wide checks are unreliable — they compile
   neighbors' half-finished edits. Tell each builder to run *scoped* checks (its own
   test files, typecheck on touched files); the authoritative full-suite run happens
@@ -333,6 +339,19 @@ plan around it:
    corrected ticket; a second such return means the ticket was mis-scoped — route the
    subtask one tier up or investigate yourself. Surface unresolved questions in your
    final report.
+7. **Whole-diff final review after a multi-writer wave.** Per-ticket critics verify each
+   deliverable in isolation; integration-seam defects — two individually-correct diffs that
+   conflict, a shared contract one ticket broke for another, a duplicated or double-applied
+   change — slip through per-ticket gates. After a multi-builder wave settles and every
+   per-ticket gate has passed, run one `critic` over the ENTIRE integrated diff with a
+   cross-cutting lens ("do these changes cohere; does any pair conflict; did a shared
+   assumption break") before the Step 5 synthesis. This is *additive* to the per-ticket
+   gates, not a replacement — and if the integrated result is itself highest-stakes (point 3's
+   triggers), it takes the **dual-lens** treatment, not a single critic. For a very large
+   integrated diff, focus the review on the **seams** — the interfaces between tickets — or
+   partition by subsystem, rather than pushing the whole blob through one critic's context.
+   Skip for single-writer changes. For highest-stakes waves an independent cross-model lens
+   (references/cross-provider.md) adds the most.
 
 Verdict schema, rubric templates (code / research / design), and the session scorecard:
 [references/quality.md](references/quality.md).
@@ -354,6 +373,16 @@ Before shipping, run the connective-tissue self-check on your own synthesis (qua
 every quantifier and causal/temporal connective in the report ("always", "therefore",
 "after", "most") must be supported by a worker deliverable or a source — summaries
 hallucinate in the binding words, not the nouns.
+
+**Surface a completion card as each agent returns — not only at the end.** When a delegated
+agent finishes, show the user a compact card: agent · model (effort) · tokens / tool-uses ·
+one-line outcome · problems, if any · its Notable (beyond the ticket) item **if it produced
+one** (`scout` is exempt — it reports `GAPS`, not Notable). Tokens/tool-uses come from the
+Agent result's `usage` block for Claude sub-agents; a **cross-provider MCP worker
+(Codex/Gemini) returns no usage** — mark those `n/a`, never invent a number. The rest is
+free — the worker's report already carries it — and surfacing it per-return keeps the user
+abreast of cost and findings as they happen, instead of only in the final scorecard. The
+end-of-run scorecard (quality.md §5) still aggregates; the cards are the running commentary.
 
 Then append one JSONL record per delegated ticket to the routing telemetry log —
 `telemetry/routing-log.jsonl` next to this file (schema and recalibration thresholds:

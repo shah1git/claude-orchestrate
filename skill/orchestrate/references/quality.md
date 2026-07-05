@@ -18,6 +18,12 @@ different model with no context grade the deliverable against them? If not, rewr
 
 Multidimensional is normal: correctness + scope + evidence, each independently checkable.
 
+**A check must be able to fail.** Design each criterion so a *broken* deliverable would
+visibly fail it: mentally break the work and confirm the check catches it. A green check
+that stays green on broken work is worse than no check — it manufactures false confidence.
+Prefer a criterion with a concrete failing case ("`grep -c X` returns 0", "the test for the
+edge case fails when the guard is removed") over one that can pass vacuously.
+
 ## 2. Grading hierarchy — choose the fastest reliable grader
 
 1. **Code-graded** (exact match, exit codes, grep, build/test/typecheck) — fastest, most
@@ -181,3 +187,25 @@ version bump at the latest:
   but never weaken it for production code.
 
 The thresholds above are initial guesses; revise them here as data accumulates.
+
+## 8. Incident journal — qualitative self-improvement
+
+The routing log (§7) is quantitative — it tells you *that* a class is mis-routed. The
+incident journal is its qualitative complement — it captures *why* a run went wrong so the
+playbook can be fixed, not just the symptom.
+
+Scope: this journal is for orchestration-**process** failures — a playbook rule let a
+mistake through: a misread ticket, a lost or empty worker report, a spec/reality divergence,
+a silently-wrong result that a gate missed, a worker that died mid-task. A **transient or
+external** failure — a flaky API, a network blip, a provider timeout, a connector quirk — is
+not a playbook defect and does not belong here; note it and move on. When a process mishap
+occurs, record one line immediately: what happened, its class, what it cost. Keep these in
+the session report and, for a durable trail, a running `telemetry/incidents.md` (optional,
+created lazily on the first incident).
+
+The rule: **2+ incidents of the same class is a *review signal*, not an automatic rewrite.**
+It means stop and judge whether a real playbook flaw is behind them — and if so, fix that
+rule (issue-style: the rule that let it happen, not the one instance). Let an observation
+settle across a couple of sightings before promoting it into the skill text — one-off noise
+is not a pattern, and you never rewrite the skill to route around a transient/external issue.
+This is how the playbook learns from its own *process* failures rather than repeating them.
