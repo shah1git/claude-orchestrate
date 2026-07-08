@@ -242,7 +242,13 @@ documented-only; re-verify on a later CLI version.
 > from the binary's gating function is unreachable via CLI). Remaining candidates, now
 > two: **headless/print mode suppresses team-tool injection** (both failed probes were
 > `-p`), or the **upstream remote gate** is off (would suppress everywhere). The one
-> untested cell — a human-attended interactive TTY session — distinguishes them. Also settled: `TaskCreate` has NO owner field (ASSUMED #1
+> untested cell — a human-attended interactive TTY session — distinguishes them.
+> **Re-check (same day, user-initiated):** third probe in the child session — the team
+> state dir for the session WAS provisioned on named spawn (partial machinery engages),
+> but the teammate again received only the definition's frontmatter tools. Three probes,
+> two session shapes, zero injections → the remote-gate / TUI-runtime hypothesis is now
+> the leading one. Standing order: re-run the cheap headless probe after each CLI
+> update; the channel stays documented-only until a probe shows team tools injected. Also settled: `TaskCreate` has NO owner field (ASSUMED #1
 > refuted) — assignment is `TaskUpdate {owner}` only, so the safe ordering is
 > **create → assign → only then spawn**, which removes the claim window structurally.
 > Positive transfer: the spawn-prompt TEAM RULES held — the worker refused to fabricate
