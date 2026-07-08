@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: Act as lead orchestrator for a complex task — decompose it, delegate subtasks to model-tiered worker agents (architect/Opus for design, builder/Sonnet for implementation, scout/Haiku for mechanical recon, critic/Opus for adversarial verification), enforce acceptance criteria and quality gates, then synthesize the results. Use when the user asks to orchestrate or distribute work across models or agents ("оркеструй", "раздай задачи агентам", "распредели между моделями", "запусти агентов", "orchestrate this"), or proactively for large multi-part tasks that decompose into independent subtasks — multi-file features, codebase audits, migrations, parallel research sweeps. Do NOT use for small single-focus tasks (one file, one question, a quick fix) — handle those directly without orchestration.
+description: Act as lead orchestrator for a complex task — decompose it, delegate subtasks to model-tiered worker agents (architect/Fable for design, builder/Sonnet for implementation, scout/Haiku for mechanical recon, critic/Opus for adversarial verification), enforce acceptance criteria and quality gates, then synthesize the results. Use when the user asks to orchestrate or distribute work across models or agents ("оркеструй", "раздай задачи агентам", "распредели между моделями", "запусти агентов", "orchestrate this"), or proactively for large multi-part tasks that decompose into independent subtasks — multi-file features, codebase audits, migrations, parallel research sweeps. Do NOT use for small single-focus tasks (one file, one question, a quick fix) — handle those directly without orchestration.
 argument-hint: [описание задачи]
 effort: xhigh
 ---
@@ -154,14 +154,14 @@ internals.)
 
 | Agent | Model / effort | Delegate | Do NOT delegate |
 |---|---|---|---|
-| `architect` | Opus, xhigh | system design, architecture & technology decisions, complex debugging / root-cause analysis, risk assessment, plans for risky changes | production code (it returns plans, not diffs); mechanical lookups |
+| `architect` | Fable, xhigh | system design, architecture & technology decisions, complex debugging / root-cause analysis, risk assessment, plans for risky changes | production code (it returns plans, not diffs); mechanical lookups |
 | `builder` | Sonnet, high | implementation to a clear spec: code, tests, refactorings, docs; near-Opus coding quality at a fraction of the quota cost | underspecified "figure out what to build" work; architecture decisions |
 | `scout` | Haiku | mechanical, precisely specified, read-only work: find files/usages, grep sweeps, inventories, classification, extraction, per-file summaries | anything requiring judgment, multi-step reasoning, or writing code — a silent Haiku error propagates |
 | `critic` | Opus, xhigh | adversarial verification of any deliverable against its acceptance criteria (fresh context, tries to refute, runs tests) | producing new work; style reviews |
 | you (lead model) | Fable or Opus | decomposition, integration, cross-cutting judgment, anything all four are wrong for | — |
 
 Model names in this matrix are *families*, not versions: each worker's frontmatter binds
-it via a floating alias (`opus`, `sonnet`, `haiku`), so every run automatically uses the
+it via a floating alias (`fable`, `opus`, `sonnet`, `haiku`), so every run automatically uses the
 newest generation of that family. Generation-specific *behavioral* notes do not float —
 they live in [references/delegation.md](references/delegation.md) under an explicit
 "verified for" banner; re-verify them there when a new generation ships.
@@ -174,7 +174,7 @@ model to save quota.
 
 | Class | Signals (any one suffices) | Route |
 |---|---|---|
-| **Judgment** | open design space; ambiguity left to resolve; security implications; unknown root cause; conflicting constraints to weigh; quality assessment of *meaning* (audits/reviews of prose, design, policy, architecture); an error would silently mislead you | `architect` or `critic` (Opus) — never lower |
+| **Judgment** | open design space; ambiguity left to resolve; security implications; unknown root cause; conflicting constraints to weigh; quality assessment of *meaning* (audits/reviews of prose, design, policy, architecture); an error would silently mislead you | `architect` (Fable) or `critic` (Opus) — never lower |
 | **Skilled execution** | complete spec exists; success is objectively checkable (tests, criteria); known patterns apply; bounded blast radius | `builder` (Sonnet) |
 | **Mechanical** | every step enumerable in advance; zero decisions remain; exact output format given; a wrong result is detectable on sight | `scout` (Haiku) |
 
@@ -201,9 +201,12 @@ and not something the user acts on directly; deterministic checks exist and alre
 passed; a missed defect would still be caught downstream before the user relies on the
 result. Down-routing is never a quota-saving device. Do not override `scout` upward —
 if it needs a stronger model, it was mis-routed. The up-routing ceiling is
-`model: fable` — the lead-tier model as a worker: reserve it for the final escalation
-rung (Step 4) or the single hardest judgment lens in a task; it spends the most
-expensive quota and is never a routine route.
+`model: fable` — the lead-tier model as a worker. It has exactly three sanctioned uses:
+`architect` (bound to it by design), the *correctness* lens of a highest-stakes dual-lens
+(point 3, Step 4), and the final escalation rung (Step 4). Beyond those three it is never
+a routine route — it spends the most expensive quota, and a `builder`/`scout` ticket never
+takes it at *routing* time (the Step 4 escalation ladder's fable rung stays open to any
+ticket that has already failed its way up the tiers).
 
 **Provider dimension — optional overlay (Claude is the default).** The class→tier matrix
 above always fixes a *Claude* worker; provider is an orthogonal, opt-in choice made only
@@ -246,10 +249,14 @@ Rules:
   - `builder` (Sonnet): complete spec up front in one turn; state instruction *scope*
     explicitly ("apply to every handler, not just the first"); it follows instructions
     literally and won't infer requests you didn't make.
-  - `architect` / `critic` (Opus): full spec up front — goal, constraints, explicit
-    scope, and trigger conditions for tools ("search the web if currency matters").
-    Opus follows instructions as literally as Sonnet and will not generalize scope
-    you did not state; grant it autonomy over the *how*, not ambiguity about the *what*.
+  - `architect` (Fable): state the **goal, constraints, and explicit scope** — then stop
+    prescribing: Fable performs best from the goal, not the steps, and an over-scripted
+    procedure actively hurts it. Trigger conditions for tools still help ("search the
+    web if currency matters").
+  - `critic` (Opus): full spec up front — deliverable, criteria verbatim, explicit
+    scope, and trigger conditions for tools. Opus follows instructions as literally as
+    Sonnet and will not generalize scope you did not state; grant it autonomy over the
+    *how*, not ambiguity about the *what*.
 - Full templates, worked examples, the per-model phrasing cheat-sheet, and the model
   generations those behavioral notes were verified against:
   [references/delegation.md](references/delegation.md).
@@ -308,6 +315,11 @@ plan around it:
    anything the user will act on without reading — spawn two critics in parallel with
    distinct lenses: one graded on *correctness* (is it true / does it work), one on
    *completeness* (does it cover the full stated scope). Accept only when both pass.
+   For these highest-stakes deliverables the *correctness* lens is spawned as `critic`
+   with `model: fable` — frontier judgment on the lens where a miss ships a defect; the
+   *completeness* lens stays on Opus. Two lenses, two models: their failure modes
+   decorrelate at the most expensive gate. (Phrase the Fable lens's ticket Fable-style —
+   goal, not steps; see delegation.md.)
    Grade every deliverable against these trigger conditions while planning (Step 1);
    the user is never expected to request the second lens. Outside the trigger
    conditions a single critic remains the default — the second lens doubles the most

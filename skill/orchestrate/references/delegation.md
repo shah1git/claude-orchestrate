@@ -36,9 +36,10 @@ defect: the isolated worker cannot tell your uncertainty from a requirement.
 
 ## Per-model phrasing cheat-sheet
 
-> **Verified for: Opus 4.8 · Sonnet 5 · Haiku 4.5 · Fable 5 (lead)** — checked
-> 2026-07-04. The agents' frontmatter binds each worker via a floating alias (`opus`,
-> `sonnet`, `haiku`), which always resolves to the newest generation of its family — a
+> **Verified for: Fable 5 (lead · architect · highest-stakes correctness lens) ·
+> Opus 4.8 · Sonnet 5 · Haiku 4.5** — checked 2026-07-08. The agents' frontmatter binds
+> each worker via a floating alias (`fable`, `opus`, `sonnet`, `haiku`), which always
+> resolves to the newest generation of its family — a
 > new release is picked up with no edit anywhere. The *behavioral* notes below, however,
 > were verified against the specific generations named above and do **not** float: when
 > an alias starts resolving to a newer generation, re-verify each claim against
@@ -85,26 +86,39 @@ instruction from one item to another, nor infer requests you didn't make:
 - Include the anti-overengineering and anti-reward-hacking lines from its agent
   definition only if you observe drift — they are already in its system prompt.
 
-### `architect` / `critic` — Opus
+### `architect` — Fable
 
-Opus follows instructions **literally** — exactly like Sonnet, it does not
-generalize an instruction from one item to another and does not infer requests you
-didn't make. Give it a complete, explicitly-scoped spec, then autonomy over the *how*:
+Fable is the lead-tier model: it performs best when given the **goal, not the steps** —
+an over-scripted procedure actively hurts it. Write the architect ticket as a contract,
+not a script:
 
-- **Full task spec up front, then autonomy.** State goal, constraints, explicit scope
-  ("assess all six modules listed below", not "the risky modules"), and what "done"
-  looks like; let it plan its own procedure.
-  (The "state the goal, not the steps" de-prescription advice applies to Fable only —
-  relevant when Fable is the lead — never to Opus tickets.)
-- **Put trigger conditions on capabilities**: it tends to favor reasoning over tool
-  calls, so say *when* to search, *when* to read files ("never speculate about code you
-  have not opened — read the file first").
+- **State the goal, constraints, and explicit scope** ("assess all six modules listed
+  below", not "the risky modules") and what "done" looks like — then stop: let it plan
+  its own procedure. De-prescription is the point of routing design work to Fable.
+- **Put trigger conditions on capabilities** where grounding or currency matters:
+  "search the web if the answer depends on current information"; "never speculate about
+  code you have not opened — read the file first."
 - **Grant micro-autonomy** to prevent it pausing to ask: "for minor choices, pick a
   reasonable option and note it; ask only for scope changes."
+
+### `critic` — Opus
+
+Opus follows instructions **literally** — exactly like Sonnet, it does not generalize an
+instruction from one item to another and does not infer requests you didn't make. Give it
+a complete, explicitly-scoped spec, then autonomy over the *how*:
+
+- **Full task spec up front.** State the deliverable, the acceptance criteria verbatim,
+  and explicit scope; let it plan its own verification procedure.
+- **Put trigger conditions on capabilities**: it tends to favor reasoning over tool
+  calls, so say *when* to re-run tests, *when* to read files ("never speculate about code
+  you have not opened — read the file first").
 - For review-type work, demand **coverage first**: "report every issue you find,
   including uncertain and low-severity ones, with a confidence level and severity each —
   a separate step will filter." Conservative-reporting instructions silently suppress
   its (excellent) recall.
+- On a highest-stakes dual-lens the *correctness* lens is spawned as `critic` with
+  `model: fable` (SKILL.md Step 4.3) — phrase that one ticket Fable-style: goal, not
+  steps.
 
 ## Worked examples
 

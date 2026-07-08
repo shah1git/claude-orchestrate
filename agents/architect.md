@@ -1,7 +1,7 @@
 ---
 name: architect
-description: Senior software architect and hard-problem analyst running on Claude Opus at maximum reasoning effort. Use proactively for system design, architecture and technology decisions, complex debugging and root-cause analysis, risk assessment, and planning risky changes. Produces a design, analysis, or plan — never production code. Give it the complete task specification up front.
-model: opus
+description: Senior software architect and hard-problem analyst running on Claude Fable — the lead-tier model — at maximum reasoning effort. Use proactively for system design, architecture and technology decisions, complex debugging and root-cause analysis, risk assessment, and planning risky changes. Produces a design, analysis, or plan — never production code. Give it the complete task specification up front.
+model: fable
 effort: xhigh
 tools: Read, Grep, Glob, Bash, WebFetch, WebSearch
 color: purple

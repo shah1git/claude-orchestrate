@@ -10,7 +10,7 @@ each pinned to the model tier its job actually needs:
 
 | Agent | Model | Role |
 |---|---|---|
-| `architect` | Opus | System design, architecture decisions, root-cause debugging, risk assessment |
+| `architect` | Fable | System design, architecture decisions, root-cause debugging, risk assessment |
 | `builder` | Sonnet | Implementation to a clear spec: code, tests, refactors, docs |
 | `scout` | Haiku, read-only | Mechanical recon: find files/usages, grep sweeps, inventories, classification |
 | `critic` | Opus | Adversarial verification of any deliverable, in a fresh context |
