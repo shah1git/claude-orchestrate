@@ -233,9 +233,16 @@ documented-only; re-verify on a later CLI version.
 > self-report). **Failed to manifest: team-tool injection** — the spawned worker received
 > NO TaskGet/TaskUpdate/SendMessage, i.e. it ran as a regular one-shot despite `name`;
 > checks (b)/(c)/(d) therefore moot in this session shape (decoy untouched but
-> unclaimable-by-construction — inconclusive, not passed). Candidate causes, unresolved:
-> child-session limitation (design ASSUMED #3), the upstream remote gate, or a
-> harness-path difference. Also settled: `TaskCreate` has NO owner field (ASSUMED #1
+> unclaimable-by-construction — inconclusive, not passed). Follow-up probes (same day)
+> narrowed the cause: a TOP-LEVEL `claude -p` process (nesting guards and the stale
+> `ANTHROPIC_API_KEY` stripped, flag inherited from settings) showed the SAME behavior —
+> named spawn accepted, teammate got only the definition's frontmatter tools,
+> `HAS_TEAM_TOOLS: no` — so the child-session hypothesis (ASSUMED #3) is ruled out as the
+> sole cause; and `--agent-teams` is rejected by the 2.1.205 option parser (the argv path
+> from the binary's gating function is unreachable via CLI). Remaining candidates, now
+> two: **headless/print mode suppresses team-tool injection** (both failed probes were
+> `-p`), or the **upstream remote gate** is off (would suppress everywhere). The one
+> untested cell — a human-attended interactive TTY session — distinguishes them. Also settled: `TaskCreate` has NO owner field (ASSUMED #1
 > refuted) — assignment is `TaskUpdate {owner}` only, so the safe ordering is
 > **create → assign → only then spawn**, which removes the claim window structurally.
 > Positive transfer: the spawn-prompt TEAM RULES held — the worker refused to fabricate
