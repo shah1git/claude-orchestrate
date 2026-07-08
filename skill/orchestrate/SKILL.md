@@ -410,8 +410,12 @@ Integration is your job — never ask a worker to merge other workers' outputs.
 Final message to the user, in the user's language, leading with the outcome:
 
 1. **Result** — what exists now / what was found, first sentence.
-2. **Scorecard** — subtasks total / passed first try / retried / escalated; verification
-   coverage; test evidence present or not.
+2. **Worker ledger + analytics** (quality.md §5) — one table row per delegated ticket
+   (agent · model & effort · time · tokens · verdict), then the aggregate scorecard
+   (first-try pass rate, retries/escalations, verification coverage, token cost by tier,
+   provider split, parallelism gain) closed by one to three sentences of interpretation
+   the numbers actually support. Figures come from `usage` blocks / harness
+   notifications; anything unreported is `n/a`, never invented.
 3. **Notable findings and open risks** — only what changes what the user does next.
    Fold in here each worker's **Notable (beyond the ticket)** items — out-of-scope
    discoveries, latent bugs, or better approaches they surfaced — keeping only what

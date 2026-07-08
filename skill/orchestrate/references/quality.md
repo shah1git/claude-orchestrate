@@ -108,9 +108,28 @@ have the judge reason first, then emit the verdict; a reviewer told to find gaps
 always find some — hence the calibration line in critic's prompt ("only gaps that affect
 correctness or the stated requirements; the rest are notes").
 
-## 5. Session scorecard
+## 5. Session scorecard — worker ledger + analytics
 
-The orchestrator's final report includes:
+The orchestrator's final report closes with two blocks, rendered in the user's language
+(standing user directive, 2026-07-09: per-agent results, «красиво и информативно»).
+The per-return completion cards (SKILL.md Step 5) are the running commentary; the ledger
+is the end-of-run aggregation — both, not either.
+
+**Block 1 — worker ledger.** One table row per delegated ticket, in dispatch order:
+
+| # | Ticket | Agent | Model (effort) | Time | Tokens | Tools | Verdict |
+|---|---|---|---|---|---|---|---|
+| 1 | inventory | scout | Haiku | 1m 40s | 61 133 | 60 | PASS ✓ |
+| 2 | S1-security | architect | Fable (xhigh) | 6m 12s | 99 517 | 37 | PASS ✓ — 1 miss, caught by cross-check |
+| 3 | verify:xmodel | codex-critic | GPT-5.5 · OpenAI (xhigh) | 1m 51s | ~9k | n/a | APPROVED ✓ |
+
+Data honesty: tokens / tool-uses come from the Agent result's `usage` block; time from
+the harness's task notification (or the bridge's `durationMs` for cross-provider calls).
+A surface that returns no figure gets `n/a` — never an invented number (the
+completion-card rule). A retried ticket keeps ONE row: both attempts' cost summed, the
+retry named in the verdict cell.
+
+**Block 2 — session analytics.** The aggregate metrics:
 
 | Metric | Value |
 |---|---|
@@ -120,7 +139,15 @@ The orchestrator's final report includes:
 | Escalated (tier raised or taken over) | n |
 | Verification coverage | verified deliverables / deliverables shipped into the result |
 | Deterministic evidence present | yes/no per code deliverable |
-| Token cost (by agent) | e.g. architect 82k / builder 62k / critic 54k — from each Agent result's `usage` block |
+| Token cost by tier | e.g. fable 480k (58%) / opus 210k (25%) / sonnet 95k (12%) / haiku 40k (5%) |
+| Provider split | e.g. anthropic 82% / openai 12% / google 6% — the quota-spread mandate made visible |
+| Parallelism gain | sum of worker durations vs. wall-clock, when ≥ 2 workers ran concurrently |
+
+Close the block with one to three sentences of *interpretation*, not merely numbers —
+only observations the ledger's own data supports (the §4 connective-tissue rule applies
+to analytics prose too): which class burned the most quota and whether its tier earned
+it; whether retries cluster on one agent type (a ticket-quality signal — §7 thresholds);
+how much Claude quota the cross-provider share offloaded.
 
 Standing targets: verification coverage = 100% for production code; first-try pass ≥ 80%
 (persistently lower means tickets are underspecified — fix the tickets, not the workers);
