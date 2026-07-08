@@ -235,19 +235,21 @@ a routine route — it spends the most expensive quota, and a `builder`/`scout` 
 takes it at *routing* time (the Step 4 escalation ladder's fable rung stays open to any
 ticket that has already failed its way up the tiers).
 
-**Provider dimension — optional overlay (Claude is the default).** The class→tier matrix
-above always fixes a *Claude* worker; provider is an orthogonal choice made only
-after the class is set. Route to a non-Claude worker (OpenAI Codex, Google Gemini via
-Antigravity) ONLY for one of four named reasons — independent-lens verification; recon
-whose context exceeds a Claude window; an explicit user preference for the Codex coding
-hand; or the **standing quota-spread preference** (recorded user directive, 2026-07-09:
-spread orchestration load across all the user's subscriptions — flips quality-equivalent
-lanes to cross-provider *by default*; judgment lanes and the primary grader never shift;
-cross-provider.md Use 4) — AND only when its connector is detected present; otherwise the
-Claude default stands. Cross-provider is never a *silent* default — every non-Claude route
-carries its named reason into telemetry — and a non-Claude worker is a lead-invoked
-bridge/MCP call, not a sub-agent. Full mechanics, the connector registry, and the
-detect-or-degrade rule:
+**Provider dimension — the lead's judgment call under a standing mandate.** The class→tier
+matrix above fixes the *class and quality bar*; provider is an orthogonal choice made
+after the class is set. Standing user mandate (2026-07-09; it replaces and voids the
+2026-07-05 "Codex = opt-in" decision): when their connectors are detected present,
+non-Claude workers (OpenAI Codex, Google Gemini via Antigravity) are **regular members of
+the routing pool**, routed by the lead's judgment. Two standing values drive that
+judgment: the *additional analytical angle* of an uncorrelated model (cross-model lens
+default-on for dual-lens deliverables — ADR-0001, self-preference bias) and *quota-spread*
+across the user's subscriptions (baseline lanes: cross-provider.md Use 4). Judgment routes
+providers, never quality: judgment-class tickets and the primary grader stay Claude (an
+external lens is additive, never a substitute), and a non-Claude worker is a lead-invoked
+bridge/MCP call, not a sub-agent. Routing is judgment-driven, never silent — every
+non-Claude route carries its named reason into telemetry; with no surface present, every
+route degrades to its Claude default. Full mechanics, connector registry, default lanes,
+and the detect-or-degrade rule:
 [references/cross-provider.md](references/cross-provider.md).
 
 ## Step 3 — Delegate with task tickets
@@ -356,11 +358,14 @@ plan around it:
    conditions a single critic remains the default — the second lens doubles the most
    expensive gate.
 
-   **Optional cross-model third lens (requires a connector — references/cross-provider.md).**
-   For a dual-lens-trigger deliverable, when architectural independence is worth the latency
-   — security-relevant code (its flagship documented use: a different-provider reviewer
-   whose biases don't overlap), or on user request — add one cross-model critic (Codex or
-   Gemini) as a *third* lens on the same deliverable + criteria, read-only. It is additive:
+   **Cross-model third lens — default-on when a connector is present
+   (references/cross-provider.md).** For a dual-lens-trigger deliverable, add one
+   cross-model critic (Codex or Gemini, alternating) as a *third* lens on the same
+   deliverable + criteria, read-only. Its documented value is architectural independence:
+   a different-provider reviewer whose biases don't overlap Claude's (ADR-0001,
+   self-preference bias) — under the standing mandate (2026-07-09) this lens is on by
+   default; skip only when latency genuinely dominates, stating the skip in one line of
+   the final report. It is additive:
    accept only when **both Claude lenses PASS and the cross-model lens raises no surviving
    critical/major finding**. A cross-model lens can only tighten the gate, never replace a
    Claude lens; its cost is the other subscription's quota plus one round-trip, not Claude

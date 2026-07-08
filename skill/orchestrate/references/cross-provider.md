@@ -1,11 +1,12 @@
-# Cross-provider: optional non-Claude workers (Codex, Gemini/Antigravity)
+# Cross-provider: non-Claude workers (Codex, Gemini/Antigravity)
 
-Source of truth for the OPTIONAL cross-provider layer. The orchestrate skill is
-**self-contained and Claude-only by default**: with no cross-provider surface present, every
-routing decision resolves to a Claude worker and the run completes normally. This layer lets
-the lead *additionally* delegate to non-Claude models — OpenAI Codex and Google Gemini (via
-Antigravity `agy`) — when a surface is detected and a named reason applies. Never a silent
-default.
+Source of truth for the cross-provider layer. Portability floor: with **no cross-provider
+surface present**, every routing decision resolves to a Claude worker and the run completes
+normally — the skill degrades to self-contained Claude-only. When surfaces ARE present
+(this machine: Codex + Antigravity `agy`), non-Claude workers are **regular members of the
+routing pool**, routed by the lead's judgment under the standing mandate below — not an
+exception layer. Judgment-driven, never silent: every non-Claude route carries a named
+reason into telemetry.
 
 Design rationale — including *why external agents are workers/cross-reviewers and never a
 second orchestrator* — lives in an external ADR, not here: **`/opt/tools/agent-bridge/ADR-0001-external-agents-as-workers.md`**.
@@ -104,27 +105,32 @@ here, so they are not pinnable; `Gemini 3.5 Pro` is not yet public at all.)
 Gradeable invariant: *with no cross-provider surface present, every routing decision resolves
 to a Claude worker and the run reaches a normal terminal report.*
 
-## When cross-provider is licensed — the four named reasons
+## When to route cross-provider — the lead's judgment under a standing mandate
 
-Chosen ONLY for one of these, never as a silent default:
+Standing user mandate (2026-07-09; it **replaces and voids** the 2026-07-05
+"Codex = opt-in" decision): provider routing is the **lead's judgment call** over the full
+pool of detected surfaces. Two standing values drive that judgment:
 
-1. **Independent-lens verification** — an uncorrelated critic on a highest-stakes deliverable
-   (flagship use: a different-provider reviewer whose blind spots don't overlap Claude's;
-   avoids self-preference bias — ADR-0001). → Use 1.
-2. **Context exceeds Claude** — the recon/research INPUT is too large for a Claude window. → Use 2.
-3. **Explicit user preference for the Codex coding hand** — opt-in; Claude `builder` (Sonnet)
-   remains the default coder. → Use 3. *(Portable form of the preference; on this machine it
-   is superseded by the standing directive below.)*
-4. **Standing quota-spread preference** — recorded user directive (2026-07-09): spread
-   orchestration load across all the user's subscriptions (Claude, ChatGPT/Codex, Google).
-   Flips quality-equivalent lanes to cross-provider *by default* — never down-routes
-   judgment. → Use 4.
+1. **Additional analytical angle** — an uncorrelated model whose blind spots don't overlap
+   Claude's (avoids self-preference bias — ADR-0001; the user independently holds this
+   view, and the ADR's evidence supports it). Flagship shape: the cross-model lens,
+   **default-on** for dual-lens deliverables. → Use 1.
+2. **Quota-spread** — orchestration load belongs on all the user's subscriptions (Claude,
+   ChatGPT/Codex, Google), not on Claude alone. Baseline allocation: the default-lane
+   table. → Use 4.
+
+Uses 1–4 below are worked shapes, not an exhaustive license — the lead may route outside
+them when judgment says so, logging the reason (`lead-judgment`). Judgment routes
+*providers*, never *quality*: the class→tier quality bar (SKILL.md Step 2), the never-shift
+invariants (Use 4), and the composition/gating rules are not overridable by this mandate.
 
 ## Use 1 — cross-model critic lens (read-only, additive THIRD lens)
 
-For a dual-lens-trigger deliverable (SKILL.md Step 4.3), when architectural independence is
-worth the latency (security-relevant code, or on user request), add ONE cross-model critic as
-a **third** lens on the same deliverable + acceptance criteria.
+For a dual-lens-trigger deliverable (SKILL.md Step 4.3), add ONE cross-model critic as a
+**third** lens on the same deliverable + acceptance criteria. Under the standing mandate
+this lens is **default-on whenever a surface is present** — skip it only when latency
+genuinely dominates the deliverable's stakes, and state the skip in one line of the final
+report.
 
 - **Call (structured, preferred)**: `node /opt/tools/agent-bridge/run-external-agent.mjs
   --tool codex --schema <verdict.json> --sandbox read-only --cwd <repo>`, prompt on **stdin** =
@@ -144,7 +150,8 @@ a **third** lens on the same deliverable + acceptance criteria.
 
 ## Use 2 — Gemini big-context recon (read-only alternative scout)
 
-For reason 2 only. **Call**: `--tool gemini --model "Gemini 3.5 Flash (High)"` (or the MCP
+For recon whose INPUT exceeds a Claude window — and, under the Use 4 baseline, the default
+web-recon lane. **Call**: `--tool gemini --model "Gemini 3.5 Flash (High)"` (or the MCP
 `ask-gemini`, which is Flash anyway), prompt = a **scout-contract** ticket (OBJECTIVE / INPUTS
 via `@file` where supported / exact bounded OUTPUT / read-only BOUNDARIES / ACCEPTANCE + the
 scout escape hatch `NEEDS_CLARIFICATION`, "0 matches is a valid answer"). For very high-volume
@@ -160,9 +167,10 @@ Claude-only path (SKILL.md Step 2).
   read/classify-by-a-given-rule only — no decide/recommend/design). A judgment-bearing sweep is
   never a Gemini scout; it routes to `architect`.
 
-## Use 3 — Codex coding hand (opt-in alternative builder; writes only in a worktree)
+## Use 3 — Codex coding hand (peer builder; writes only in a worktree)
 
-For reason 3 only — opt-in; Claude `builder` remains the default coder. **Call (preferred)**:
+A peer coding lane, chosen at routing time by lead judgment — the Use 4 baseline makes it
+the default for well-specified builder tickets when detected. **Call (preferred)**:
 `--tool codex --sandbox workspace-write --cwd <worktree>` via the bridge (structured result +
 `durationMs` + token count in `stderrTail`); MCP `mcp__codex__codex` is the interactive
 fallback. Params: prompt = a **builder-contract** ticket (full spec, explicit scope, "run
@@ -176,13 +184,13 @@ scoped checks yourself"); `cwd` = a dedicated **worktree** path (structural writ
 - **N1–N6 compatibility**: Codex-authored hunks flow into the same integrated-diff snapshot the
   whole-diff final review consumes — that review is author-agnostic.
 
-## Use 4 — standing quota-spread (default-on lanes; quality-equivalent only)
+## Use 4 — baseline allocation under the mandate (default-on lanes; quality-equivalent only)
 
-Recorded user directive (2026-07-09): «размазать нагрузку на все подписки» — spread
-orchestration load across all subscriptions. This is a *user-specific standing preference*
-(like the paths above, not a portable assumption of the skill). Under it, when detection
-(Step 2) finds the surface present, these lanes route cross-provider **by default** — no
-per-run user prompt needed:
+Baseline provider allocation under the standing mandate (2026-07-09): spread orchestration
+load across all subscriptions, with the lead's judgment free to depart from the table when
+a ticket's specifics warrant it. This is a *user-specific standing mandate* (like the paths
+above, not a portable assumption of the skill). When detection (Step 2) finds the surface
+present, these lanes route cross-provider **by default** — no per-run user prompt needed:
 
 | Lane (class) | Default route under quota-spread | Degrades to |
 |---|---|---|
@@ -191,7 +199,7 @@ per-run user prompt needed:
 | well-specified implementation tickets (builder-class) | `codex-code` (worktree, gates unchanged) | `builder` (Sonnet) |
 | third lens on dual-lens deliverables | `codex-critic` / `gemini-critic` — **alternate across deliverables** to spread over both external subscriptions | additive — omitted, two-Claude-lens gate stands |
 
-What NEVER shifts under quota-spread — quality is the routing invariant, quota is not:
+What NEVER shifts under the mandate — quality is the routing invariant, quota is not:
 
 - **judgment-class tickets** (`architect`/Fable) and the lead itself — no external model
   substitutes for the deep-reasoning lane (ADR-0001: externals are workers, not orchestrators);
@@ -209,7 +217,7 @@ Gates are provider-agnostic and unchanged: ticket contracts, deterministic pre-g
 producer≠grader, diff-from-disk for coding hands. Telemetry: `xprovider_reason:
 "quota-spread"`. If the user asks for maximum Claude quality on a specific run («только
 Claude», "Claude-only this run"), that per-run instruction overrides the standing
-preference for that run.
+mandate for that run.
 
 ## Cost, latency, telemetry
 
@@ -220,7 +228,8 @@ worktree cwd** for use 3; **never `danger-full-access`**.
 
 Telemetry (quality.md §7): record optional `provider` ∈ `anthropic | openai | google` (default
 `anthropic`) and, when `provider != anthropic`, `xprovider_reason` ∈ `independent-lens |
-context-size | user-codex-pref | quota-spread`. **Cost fields, by surface:** the **bridge** returns
+context-size | quota-spread | lead-judgment` (the last for judgment routes outside the
+Use 1–4 shapes; `user-codex-pref` is retired with the voided 2026-07-05 decision). **Cost fields, by surface:** the **bridge** returns
 `durationMs` always and, for Codex, a token count in `stderrTail` (~9k in the live test) —
 record those. The **MCP** path returns neither → leave `tokens` `n/a`; never invent a number.
 The completion-card token/effort figure follows the same rule.

@@ -168,8 +168,9 @@ are what make the Step 2 rubric empirical.
 Provider fields (optional) — `provider` ∈ `anthropic | openai | google` (default
 `anthropic` when omitted) records which provider actually ran the ticket; and when
 `provider != anthropic`, `xprovider_reason` ∈ `independent-lens | context-size |
-user-codex-pref` records why the cross-provider route was licensed (SKILL.md Step 2,
-references/cross-provider.md). Every existing record omits these and is read as `anthropic`
+quota-spread | lead-judgment` records why the cross-provider route was chosen (SKILL.md
+Step 2, references/cross-provider.md; `user-codex-pref` appears only in pre-mandate
+records and is retired). Every existing record omits these and is read as `anthropic`
 — backward-compatible.
 
 Channel field (optional) — `channel` ∈ `oneshot | workflow | team` (default `oneshot`
