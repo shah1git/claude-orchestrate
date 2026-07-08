@@ -125,6 +125,14 @@ Think through, before the first Agent call:
 4. **Design first when the shape is unclear.** For ambiguous or architecturally risky
    tasks, delegate the design itself to `architect`, review its plan yourself, then fan
    out `builder`s against the approved plan.
+5. **Verify the decomposition's own premises.** When the subtask graph rests on a factual
+   premise you drew from memory — not from the user, the code, or a worker's evidence —
+   verify it before building on it: one cheap delegation (a `scout` sweep, a web check by
+   the right tier) or your own Read. A false premise passes every downstream per-ticket
+   gate and still ships a wrong answer: the facts get audited, the question decomposition
+   doesn't. (Anthropic's plan-big-execute-small cookbook documents exactly this failure —
+   a memory-sourced list seated the wrong item at #10; all twenty downstream facts
+   verified, the answer was still wrong.)
 
 **Approval checkpoint — hold before the first delegation wave.** For high-stakes or
 expensive runs, present the plan and get explicit user approval before the first `Agent`
@@ -189,6 +197,22 @@ performance", officially positioned for "sub-agent tasks") and preserves your
 Opus/Fable quota — but only inside its lane: mechanical, unambiguous, read-only tickets
 with an exact output format. The moment a subtask needs a judgment call, route to Sonnet
 at minimum — and re-check it against the Judgment row first.
+
+**Coverage vs. discovery — sizing research fan-outs.** A *coverage* task — a fixed list of
+items, each needing mandatory reading — parallelizes cheaply: fan out cheap readers with
+bounded briefs. A *discovery* task — find the one answer in a large space — rewards
+frontier search intuition, and a cheap-reader split can narrow or hurt it. And when the
+raw material itself carries the judgment — nuance a summary would flatten — route the
+judgment-tier worker to read it directly: a cheap intermediate reader can summarize away
+exactly what mattered before the frontier tier ever sees it.
+
+**Web recon has no cheap Claude lane — route it explicitly.** `scout` has no web tools by
+design (a web-reading worker ingests untrusted content; that stays out of scout's local,
+read-only lane — do not bolt web tools onto it), and `builder` carries WebFetch but not
+WebSearch. Cheap web sweeps therefore route to `gemini-recon`
+(references/cross-provider.md) when that surface is present; the Claude-only paths are
+`builder` for fetch-known-URLs work and `architect`/`critic` where the reading itself
+needs judgment.
 
 **The matrix binds every delegation channel** — Agent tool calls and Workflow
 `agent()` calls alike (see "Large fan-outs" for the Workflow-specific rule).

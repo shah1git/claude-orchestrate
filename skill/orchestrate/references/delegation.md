@@ -69,7 +69,10 @@ if for a capable executor with zero tolerance for ambiguity:
   goes back as "all N with their attributes" for the lead to decide. Encode the boundary in
   the ticket so it is explicit, not implied.
 - Keep tickets small: one question or one sweep per ticket. Ten small scout tickets in
-  parallel beat one broad one.
+  parallel beat one broad one — **down to a floor**: every delegation carries fixed
+  overhead (spawn, context injection, report), so below some brief size splitting costs
+  more than it saves. Granularity has an optimum, not a monotone "smaller is better";
+  the telemetry's per-class cost fields (quality.md §7) are how you find it.
 
 ### `builder` — Sonnet
 
@@ -183,6 +186,9 @@ BOUNDARIES: Judge only against the stated criteria and correctness. Report gaps,
 ## Parallelization rules
 
 - Independent tickets → **one message, multiple Agent calls** (they run concurrently).
+- Mind the delegation floor cost: each worker pays fixed overhead before doing any work.
+  Merging two tiny tickets into one bounded brief is often cheaper than spawning twice —
+  split for independence and clarity, not for smallness itself.
 - 3–5 concurrent workers is the healthy default; more only for uniform sweeps (then
   prefer a Workflow pipeline — see SKILL.md).
 - Sequential only when output B genuinely consumes output A (design → build → verify).

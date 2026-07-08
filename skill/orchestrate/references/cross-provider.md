@@ -143,7 +143,11 @@ For reason 2 only. **Call**: `--tool gemini --model "Gemini 3.5 Flash (High)"` (
 `ask-gemini`, which is Flash anyway), prompt = a **scout-contract** ticket (OBJECTIVE / INPUTS
 via `@file` where supported / exact bounded OUTPUT / read-only BOUNDARIES / ACCEPTANCE + the
 scout escape hatch `NEEDS_CLARIFICATION`, "0 matches is a valid answer"). For very high-volume
-*mechanical* sweeps drop to `Gemini 3.5 Flash (Low)`.
+*mechanical* sweeps drop to `Gemini 3.5 Flash (Low)`. Note `gemini-recon` is also the
+designated home for *cheap web sweeps* generally: our Claude cheap tier has no web tools
+by design (scout is local read-only; builder has WebFetch but no WebSearch), so a
+coverage-style web verification task routes here, or to `builder`/`architect` on the
+Claude-only path (SKILL.md Step 2).
 
 - **Bound OUTPUT tightly** (N rows, exact table, distilled answer) — the huge context stays on
   Gemini's side; only the distilled result returns to the lead.
