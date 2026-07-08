@@ -104,7 +104,7 @@ here, so they are not pinnable; `Gemini 3.5 Pro` is not yet public at all.)
 Gradeable invariant: *with no cross-provider surface present, every routing decision resolves
 to a Claude worker and the run reaches a normal terminal report.*
 
-## When cross-provider is licensed — the three named reasons
+## When cross-provider is licensed — the four named reasons
 
 Chosen ONLY for one of these, never as a silent default:
 
@@ -113,7 +113,12 @@ Chosen ONLY for one of these, never as a silent default:
    avoids self-preference bias — ADR-0001). → Use 1.
 2. **Context exceeds Claude** — the recon/research INPUT is too large for a Claude window. → Use 2.
 3. **Explicit user preference for the Codex coding hand** — opt-in; Claude `builder` (Sonnet)
-   remains the default coder. → Use 3.
+   remains the default coder. → Use 3. *(Portable form of the preference; on this machine it
+   is superseded by the standing directive below.)*
+4. **Standing quota-spread preference** — recorded user directive (2026-07-09): spread
+   orchestration load across all the user's subscriptions (Claude, ChatGPT/Codex, Google).
+   Flips quality-equivalent lanes to cross-provider *by default* — never down-routes
+   judgment. → Use 4.
 
 ## Use 1 — cross-model critic lens (read-only, additive THIRD lens)
 
@@ -171,6 +176,41 @@ scoped checks yourself"); `cwd` = a dedicated **worktree** path (structural writ
 - **N1–N6 compatibility**: Codex-authored hunks flow into the same integrated-diff snapshot the
   whole-diff final review consumes — that review is author-agnostic.
 
+## Use 4 — standing quota-spread (default-on lanes; quality-equivalent only)
+
+Recorded user directive (2026-07-09): «размазать нагрузку на все подписки» — spread
+orchestration load across all subscriptions. This is a *user-specific standing preference*
+(like the paths above, not a portable assumption of the skill). Under it, when detection
+(Step 2) finds the surface present, these lanes route cross-provider **by default** — no
+per-run user prompt needed:
+
+| Lane (class) | Default route under quota-spread | Degrades to |
+|---|---|---|
+| web recon & big-context recon | `gemini-recon` (Flash High) | `builder`/`architect` per SKILL.md Step 2 |
+| high-volume mechanical sweeps whose material can be **inlined** in the prompt | `gemini-recon-cheap` (Flash Low) | `scout` (Haiku) |
+| well-specified implementation tickets (builder-class) | `codex-code` (worktree, gates unchanged) | `builder` (Sonnet) |
+| third lens on dual-lens deliverables | `codex-critic` / `gemini-critic` — **alternate across deliverables** to spread over both external subscriptions | additive — omitted, two-Claude-lens gate stands |
+
+What NEVER shifts under quota-spread — quality is the routing invariant, quota is not:
+
+- **judgment-class tickets** (`architect`/Fable) and the lead itself — no external model
+  substitutes for the deep-reasoning lane (ADR-0001: externals are workers, not orchestrators);
+- **the primary grader** — a Claude critic (Opus) still grades every gated deliverable; the
+  cross-model lens stays *additive* (Use 1 composition rule), so quota-spread can never
+  cause a false-accept;
+- **local repo file-walking recon** — bridge Gemini (`agy --print`) has no file access (see
+  the file-access note above), and Haiku is the cheapest Claude quota anyway; `scout` keeps
+  this lane. (Codex read-only *can* walk a repo, but spending the coding hand's quota on
+  mechanical recon inverts the point of the spread.)
+- **the escalation ladder** — a failed cross-provider ticket escalates to its named Claude
+  default (runtime-failure rule above), never sideways to another external provider.
+
+Gates are provider-agnostic and unchanged: ticket contracts, deterministic pre-gates,
+producer≠grader, diff-from-disk for coding hands. Telemetry: `xprovider_reason:
+"quota-spread"`. If the user asks for maximum Claude quality on a specific run («только
+Claude», "Claude-only this run"), that per-run instruction overrides the standing
+preference for that run.
+
 ## Cost, latency, telemetry
 
 Cross-provider calls spend the OTHER subscription's quota (a feature — offloads Claude quota
@@ -180,7 +220,7 @@ worktree cwd** for use 3; **never `danger-full-access`**.
 
 Telemetry (quality.md §7): record optional `provider` ∈ `anthropic | openai | google` (default
 `anthropic`) and, when `provider != anthropic`, `xprovider_reason` ∈ `independent-lens |
-context-size | user-codex-pref`. **Cost fields, by surface:** the **bridge** returns
+context-size | user-codex-pref | quota-spread`. **Cost fields, by surface:** the **bridge** returns
 `durationMs` always and, for Codex, a token count in `stderrTail` (~9k in the live test) —
 record those. The **MCP** path returns neither → leave `tokens` `n/a`; never invent a number.
 The completion-card token/effort figure follows the same rule.

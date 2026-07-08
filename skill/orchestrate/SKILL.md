@@ -236,14 +236,18 @@ takes it at *routing* time (the Step 4 escalation ladder's fable rung stays open
 ticket that has already failed its way up the tiers).
 
 **Provider dimension — optional overlay (Claude is the default).** The class→tier matrix
-above always fixes a *Claude* worker; provider is an orthogonal, opt-in choice made only
+above always fixes a *Claude* worker; provider is an orthogonal choice made only
 after the class is set. Route to a non-Claude worker (OpenAI Codex, Google Gemini via
-Antigravity) ONLY for one of three named reasons — independent-lens verification; recon
-whose context exceeds a Claude window; or an explicit user preference for the Codex coding
-hand (opt-in — Claude `builder` stays the default coder) — AND only when its connector is
-detected present; otherwise the Claude default stands. Cross-provider is never a silent
-default, and a non-Claude worker is an MCP call by the lead, not a sub-agent. Full
-mechanics, the connector registry, and the detect-or-degrade rule:
+Antigravity) ONLY for one of four named reasons — independent-lens verification; recon
+whose context exceeds a Claude window; an explicit user preference for the Codex coding
+hand; or the **standing quota-spread preference** (recorded user directive, 2026-07-09:
+spread orchestration load across all the user's subscriptions — flips quality-equivalent
+lanes to cross-provider *by default*; judgment lanes and the primary grader never shift;
+cross-provider.md Use 4) — AND only when its connector is detected present; otherwise the
+Claude default stands. Cross-provider is never a *silent* default — every non-Claude route
+carries its named reason into telemetry — and a non-Claude worker is a lead-invoked
+bridge/MCP call, not a sub-agent. Full mechanics, the connector registry, and the
+detect-or-degrade rule:
 [references/cross-provider.md](references/cross-provider.md).
 
 ## Step 3 — Delegate with task tickets
