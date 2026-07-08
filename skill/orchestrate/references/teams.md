@@ -6,8 +6,8 @@ one-shot or Workflow channel and the run completes normally. This channel exists
 narrow niche where worker *persistence* and *worker↔worker exchange* demonstrably pay;
 everywhere else it is over-process (core doctrine: the simplest system that works).
 
-> **Verified for: Claude Code 2.1.204 · agent-teams docs as of v2.1.178+ — checked
-> 2026-07-08.** The surface is experimental upstream and disabled by default; at design
+> **Verified for: Claude Code 2.1.204–2.1.205 · agent-teams docs as of v2.1.178+ —
+> checked 2026-07-08; phase-0 first run on 2.1.205 (results in the Pilot section).** The surface is experimental upstream and disabled by default; at design
 > time the flag was OFF in this environment and the binary verifiably carried the surface
 > (env-var string + SendMessage/TaskCreate/TaskUpdate/TaskList tool names). Facts marked
 > (docs) come from code.claude.com/docs/en/agent-teams and the CLI changelog and were not
@@ -223,8 +223,27 @@ both ways; (d) graceful shutdown; (e) note whether builder's `effort: high` fron
 the lead's effort applies, if observable. Any hard failure here → the channel stays
 documented-only; re-verify on a later CLI version.
 
+> **Phase 0 result — first run, 2026-07-08, CLI 2.1.205, flag ON, CHILD session
+> (`CLAUDE_CODE_CHILD_SESSION=1`).** Mixed; the channel stays **documented-only** pending
+> a re-run in a top-level interactive session. Verified: detection fires (env var set;
+> `~/.claude/teams/session-…` provisioned); the Agent tool accepts `name` at runtime
+> (absent from the rendered schema — trust the live schema); the `builder` definition's
+> tools and model bind exactly (teammate self-reported Sonnet + the frontmatter tool set);
+> effort is NOT observable from inside the worker (checklist (e): unanswerable by
+> self-report). **Failed to manifest: team-tool injection** — the spawned worker received
+> NO TaskGet/TaskUpdate/SendMessage, i.e. it ran as a regular one-shot despite `name`;
+> checks (b)/(c)/(d) therefore moot in this session shape (decoy untouched but
+> unclaimable-by-construction — inconclusive, not passed). Candidate causes, unresolved:
+> child-session limitation (design ASSUMED #3), the upstream remote gate, or a
+> harness-path difference. Also settled: `TaskCreate` has NO owner field (ASSUMED #1
+> refuted) — assignment is `TaskUpdate {owner}` only, so the safe ordering is
+> **create → assign → only then spawn**, which removes the claim window structurally.
+> Positive transfer: the spawn-prompt TEAM RULES held — the worker refused to fabricate
+> unavailable tool calls, reported honestly, went idle without picking up other work.
+
 **Phase 1 — two real runs** (one trigger A with ≥ 3 waves, one trigger B), telemetry per
-wave as above, user records `/usage` before/after each run.
+wave as above, user records `/usage` before/after each run. Phase 1 is gated on a CLEAN
+phase-0 re-run in a top-level interactive session (team-tool injection observed).
 
 **Keep/drop criterion (pre-committed):**
 - **KEEP** only if ALL hold across the pilot: (1) wave/hypothesis first-try pass rate
