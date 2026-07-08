@@ -115,6 +115,8 @@ Think through, before the first Agent call:
 1. **Subtask graph.** What is independent (→ parallel) vs. dependent (→ sequential)?
    Subtasks must not overlap: two workers touching the same file or answering the same
    question is a decomposition bug.
+   A graph showing ≥ 3 dependent waves on one subsystem, or a competing-hypothesis
+   investigation, may qualify for the experimental team channel — see "Agent teams" below.
 2. **Routing.** Classify each subtask with the Step 2 complexity rubric and write the
    routing plan down: subtask → class → agent. Route by the *hardest judgment the
    subtask requires*, not by its size. Any subtask routed below Opus must name the
@@ -214,8 +216,9 @@ WebSearch. Cheap web sweeps therefore route to `gemini-recon`
 `builder` for fetch-known-URLs work and `architect`/`critic` where the reading itself
 needs judgment.
 
-**The matrix binds every delegation channel** — Agent tool calls and Workflow
-`agent()` calls alike (see "Large fan-outs" for the Workflow-specific rule).
+**The matrix binds every delegation channel** — Agent tool calls, Workflow
+`agent()` calls, and team spawns alike (see "Large fan-outs" and "Agent teams" for the
+channel-specific rules).
 
 **Model override**: the Agent tool's `model` parameter overrides an agent's frontmatter.
 Up-routing is always allowed (`builder` with `model: opus` for one unusually gnarly
@@ -415,14 +418,16 @@ agent finishes, show the user a compact card: agent · model (effort) · tokens 
 one-line outcome · problems, if any · its Notable (beyond the ticket) item **if it produced
 one** (`scout` is exempt — it reports `GAPS`, not Notable). Tokens/tool-uses come from the
 Agent result's `usage` block for Claude sub-agents; a **cross-provider MCP worker
-(Codex/Gemini) returns no usage** — mark those `n/a`, never invent a number. The rest is
+(Codex/Gemini) returns no usage**, and a **team-channel teammate likewise returns no
+`usage` block to the lead** — mark both `n/a`, never invent a number. The rest is
 free — the worker's report already carries it — and surfacing it per-return keeps the user
 abreast of cost and findings as they happen, instead of only in the final scorecard. The
 end-of-run scorecard (quality.md §5) still aggregates; the cards are the running commentary.
 
 Then append one JSONL record per delegated ticket to the routing telemetry log —
 `telemetry/routing-log.jsonl` next to this file (schema and recalibration thresholds:
-[references/quality.md](references/quality.md) §7). The log is what turns the Step 2
+[references/quality.md](references/quality.md) §7; records carry the delegation
+`channel` — `oneshot | workflow | team`). The log is what turns the Step 2
 rubric from a priori doctrine into a calibrated one; skipping it on "small" sessions
 is how the data never accumulates. Include the token / tool-use figures from each Agent
 result's `usage` block in the record (quality.md §7).
@@ -457,3 +462,43 @@ covers mechanical sweeps only.
 
 The same quality gates apply: every pipeline stage's ticket carries acceptance criteria,
 and `critic` verdicts gate what reaches the final report.
+
+## Agent teams — experimental third channel (narrow niche)
+
+When the agent-teams surface is enabled (detect with one Bash call:
+`printenv CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` non-empty; absent → the degradation
+below, never a run-blocking error), a third delegation channel exists alongside one-shot
+sub-agents and Workflow pipelines: persistent teammates with a shared task list and
+named inter-agent messaging. It is experimental upstream and under a falsifiable pilot
+here — full doctrine, protocols, spawn addendum, and the pre-committed keep/drop
+criterion: [references/teams.md](references/teams.md).
+
+**Exactly two triggers** (everything else stays one-shot / Workflow):
+1. **Persistent build** — ≥ 3 dependent implementation waves on one subsystem where
+   consecutive tickets would re-read substantially the same file set: context
+   re-acquisition, not implementation, dominates the one-shot chain's cost. Team:
+   1–2 `builder`-definition teammates.
+2. **Competing hypotheses** — an unknown root cause with 2–3 plausible, distinguishable
+   hypotheses rewarding adversarial cross-examination. Team: 2–3 `architect`-definition
+   hypothesis-holders; the lead adjudicates.
+
+**Hard rules (non-negotiable):** `critic` is always OUTSIDE the team — every verification
+is a one-shot fresh-context sub-agent; task assignment is lead-only — an unassigned,
+unblocked task must never exist in the shared list (that is all self-claiming can grab)
+and every spawn prompt forbids claiming; worker↔worker messages only for the two named
+patterns in teams.md (structured hypothesis debate; one-round interface handshake, cc the
+lead) — everything else flows through you; `scout` never joins a team, and teammates never
+spawn sub-agents or teammates.
+
+Quality gates are unchanged and mapped per wave (acceptance criteria before dispatch,
+deterministic pre-gate on the disk diff, outside critic, escalation ladder with
+"retire the teammate, continue one-shot" as rung ②) — and the Step 4.7 whole-diff review
+applies to every multi-wave team run, including single-writer ones: wave seams are writer
+seams. Context hygiene: every wave ticket restates all constraints (teammate memory is
+never a source of truth); reconcile the teammate's stated assumptions against the actual
+diff before each wave; retire-and-respawn with a verified handoff summary after ~3 waves
+or on drift signs. Choosing this channel always fires the Step 1 approval checkpoint.
+Telemetry records carry `channel: "team"` plus `teammate` and `wave` (quality.md §7).
+Degradation when absent: trigger 1 → a sequential one-shot `builder` chain with full
+context restated per wave; trigger 2 → parallel one-shot `architect` investigations, lead
+adjudicates.

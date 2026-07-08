@@ -193,4 +193,7 @@ BOUNDARIES: Judge only against the stated criteria and correctness. Report gaps,
   prefer a Workflow pipeline — see SKILL.md).
 - Sequential only when output B genuinely consumes output A (design → build → verify).
 - Do not have workers message each other or share files as a coordination channel; all
-  coordination flows through you.
+  coordination flows through you. (This binds the one-shot and Workflow channels. The
+  experimental team channel sanctions exactly two worker↔worker patterns — structured
+  hypothesis debate and a one-round interface handshake, cc the lead — defined in
+  references/teams.md; everything else there still flows through the lead.)

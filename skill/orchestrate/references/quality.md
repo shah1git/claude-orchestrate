@@ -172,6 +172,15 @@ user-codex-pref` records why the cross-provider route was licensed (SKILL.md Ste
 references/cross-provider.md). Every existing record omits these and is read as `anthropic`
 — backward-compatible.
 
+Channel field (optional) — `channel` ∈ `oneshot | workflow | team` (default `oneshot`
+when omitted; every existing record predates the field and is read as `oneshot` —
+backward-compatible) records which delegation channel ran the ticket. For
+`channel: "team"` records add `teammate` (the teammate's name) and `wave` (1-based
+integer): one record per wave- or hypothesis-ticket, not per teammate lifetime. Teammates
+return no `usage` block to the lead — omit `tokens` rather than inventing it; a
+lead-measured `duration_ms` (wall-clock) is fine. Team-channel records feed the pilot's
+pre-committed keep/drop criterion (references/teams.md).
+
 Recalibration — review whenever any tier accumulates ≥ 20 new records, and at every
 version bump at the latest:
 
