@@ -32,22 +32,34 @@ surfaces**, and choosing the wrong one is the mistake to avoid:
 | Surface | Use it for | How | Gives back |
 |---|---|---|---|
 | **MCP tools** (`codex mcp-server`, `gemini-mcp-tool`) | quick, **interactive** "ask a second opinion" | `mcp__codex__codex`, `mcp__gemini-cli__ask-gemini` | prose in the lead's context; **no token/duration metadata; no strict schema** |
-| **agent-bridge** (`run-external-agent.mjs`) | **structured, machine-checkable verdicts** in a pipeline; the Codex coding hand | `node /opt/tools/agent-bridge/run-external-agent.mjs --tool codex\|gemini …` | clean JSON `{ok, output, durationMs, model, command, stderrTail}` — schema-validated |
+| **agent-bridge** (`run-external-agent.mjs`) | **structured, machine-checkable verdicts** in a pipeline; the Codex coding hand | `node /opt/tools/agent-bridge/run-external-agent.mjs --tool codex\|gemini …` | clean JSON `{ok, output, durationMs, model, usage, sessionId, sandboxViolations, command, stderrTail}` — schema-validated |
 
 **Why the bridge for structured work (not MCP):** Codex's `--output-schema` is **silently
-ignored while MCP is active** (codex bug #15451), so a strict `APPROVED/WARNING/BLOCKED`
-verdict is only reliable through `codex exec --output-schema` — which is what the bridge runs.
+ignored while MCP is active** (codex bug #15451 — closed upstream 2026-07-09 with no
+documented fix visible on the issue). This machine doesn't have MCP configured for Codex, so
+the bug's precondition doesn't even apply here — but the underlying argument still holds: a
+strict `APPROVED/WARNING/BLOCKED` verdict is only reliable through `codex exec --output-schema`
+— which is what the bridge runs.
 Verified live 2026-07-06: bridge Codex returned a schema-valid verdict and even reviewed a repo
 file itself; bridge Gemini ran `agy --print --model "Gemini 3.1 Pro (High)"` and honoured the
 model. The MCP `ask-gemini` path, by contrast, is model-locked to Flash in print mode — fine
 for recon, wrong for a Pro-tier critic.
 
-> **File access differs by tool.** Bridge `--tool codex` (`codex exec`) is an *agent* that
-> reads files in its `cwd` sandbox itself — point it at a repo and it opens what it needs.
-> Bridge `--tool gemini` (`agy --print`) is a *single-shot* completion with **no file access** —
-> paste any file content into the prompt (or `@file` where supported); telling it to "read X"
-> just hangs (observed: a file-review prompt with no inlined content timed out). So: Codex for
-> repo-grounded review, Gemini for prompts whose material is already inline.
+> **File access — bridge v2 gives Gemini a repo too, via a copy, not a permission.** Bridge
+> `--tool codex` (`codex exec`) is an *agent* that reads files in its `cwd` sandbox itself —
+> point it at a repo and it opens what it needs, unchanged. Bridge `--tool gemini` (`agy
+> --print`) now gets file access as well when `--cwd` is passed: the bridge copies `--cwd`
+> into a throwaway staging directory (excluding `.git`, `node_modules`, `.venv`, `__pycache__`,
+> `dist`, `build`; 200 MB cap) and hands agy that copy via `--add-dir`, so it can open real file
+> content there. The isolation is **structural (a copy), not behavioural** — agy's own
+> restriction modes (`--mode plan`, its own `--sandbox`) are NOT a safety net for this: tested
+> live 2026-07-09, they proved non-deterministic (the same scenario sometimes honoured
+> read-only, sometimes wrote to disk anyway). So `read-only` (default) never lets agy touch the
+> real directory; whatever it creates or edits lives and dies with the copy, reported
+> best-effort in `sandboxViolations`. Bare `agy --print` invoked with no `--add-dir` at all still
+> has no file access — paste content inline (or `@file` where supported) for those calls. So:
+> Codex for repo-grounded review as before; Gemini is now also repo-grounded through the
+> bridge's staging copy, or inline-prompt when no `--cwd` is given.
 
 ## Connector registry
 
@@ -70,11 +82,14 @@ and the Codex CLI's own default — never pin from a press announcement. (Lesson
 `Gemini 3.5 Pro` and `gemini-3.1-flash-lite` are announced/plausible but **not in `agy models`**
 here, so they are not pinnable; `Gemini 3.5 Pro` is not yet public at all.)
 
-> **Verified for — checked 2026-07-06 against `codex login status` + `agy models` (agy 1.0.16):**
+> **Verified for — checked 2026-07-06, re-checked 2026-07-09 against `codex login status` +
+> `agy models` (agy 1.1.0, was 1.0.16 — model roster unchanged):**
 > - **Codex**: logged in via ChatGPT; CLI default model floats to the current top (`gpt-5.5`
 >   family). Reasoning effort `low | medium | high | xhigh` via `--config model_reasoning_effort=…`
 >   (bridge) or `config:{…}` (MCP). Bridge auto-converts a JSON Schema to Codex-strict
->   (all properties → `required`, `additionalProperties:false`).
+>   (all properties → `required`, `additionalProperties:false`). Bridge v2 also returns
+>   structured `usage` (`input_tokens`, `cached_input_tokens`, `output_tokens`,
+>   `reasoning_output_tokens`) and `sessionId` (`thread_id`, for `--resume`) for Codex calls.
 > - **Gemini via `agy`**: reasoning effort is baked into the **model name suffix** —
 >   `(High) | (Medium) | (Low)`. Models present in `agy models`: `Gemini 3.5 Flash (H/M/L)`,
 >   `Gemini 3.1 Pro (L/H)` (agy also proxies `Claude Sonnet/Opus 4.6 (Thinking)`, `GPT-OSS 120B`).
@@ -91,10 +106,16 @@ here, so they are not pinnable; `Gemini 3.5 Pro` is not yet public at all.)
 
 ## Detection & graceful degradation
 
-- **Detection** (once per capability at Step 2): a bridge capability is *available* iff
-  `/opt/tools/agent-bridge/run-external-agent.mjs` is present and the underlying CLI is logged
-  in (`codex login status` / `agy models` succeed); an MCP capability iff its tool is in the
-  lead's tool set. Record availability in the routing plan.
+- **Detection** (once per capability at Step 2): a single call, `node
+  /opt/tools/agent-bridge/run-external-agent.mjs --detect` (no `--tool` needed), returns JSON
+  covering both CLIs in one shot — `codex.present`/`codex.loggedIn`/`codex.version` and
+  `gemini.present`/`gemini.models` — and always exits 0, so absence is data, not an error. A
+  bridge capability is *available* iff the bridge script is present and the relevant CLI reports
+  present+logged-in in that JSON; an MCP capability iff its tool is in the lead's tool set.
+  Record availability in the routing plan. **Fallback** (if `--detect` itself is unavailable,
+  e.g. an older bridge): the old three-check method — presence of
+  `/opt/tools/agent-bridge/run-external-agent.mjs` plus `codex login status` / `agy models`
+  succeeding individually.
 - **Degradation**: if a route selects a cross-provider capability that detection finds absent,
   fall back to its named Claude default (registry, last column), note it in one line of the
   final report, and proceed. Absence is never a run-blocking error.
@@ -140,7 +161,9 @@ report.
   this is *distinct* from our critic's prose PASS/FAIL verdict (quality.md §3); the lead maps
   `BLOCKED`/`WARNING`-with-a-real-scenario onto a FAIL. For a Gemini lens use `--tool gemini
   --model "Gemini 3.1 Pro (High)"` (schema is best-effort in-prompt; check `ok`). Read the
-  parsed `output`.
+  parsed `output`. **`--resume` is forbidden here**: a critic's context must be fresh-by-
+  construction (producer≠grader depends on it), and `--resume` is reserved for the coding hand
+  (Use 3) alone.
 - **Call (quick, interactive)**: `mcp__codex__codex` (read-only, effort xhigh) — prose only,
   no strict verdict; use when you just want a fast second opinion, not a gated verdict.
 - **Composition**: **additive** — accept only when **both Claude lenses PASS AND the cross-model
@@ -172,7 +195,7 @@ Claude-only path (SKILL.md Step 2).
 A peer coding lane, chosen at routing time by lead judgment — the Use 4 baseline makes it
 the default for well-specified builder tickets when detected. **Call (preferred)**:
 `--tool codex --sandbox workspace-write --cwd <worktree>` via the bridge (structured result +
-`durationMs` + token count in `stderrTail`); MCP `mcp__codex__codex` is the interactive
+`durationMs` + structured `usage` token counts); MCP `mcp__codex__codex` is the interactive
 fallback. Params: prompt = a **builder-contract** ticket (full spec, explicit scope, "run
 scoped checks yourself"); `cwd` = a dedicated **worktree** path (structural write-scoping);
 **never `danger-full-access`**; effort **high** (xhigh only for a genuinely hard ticket).
@@ -181,6 +204,10 @@ scoped checks yourself"); `cwd` = a dedicated **worktree** path (structural writ
   deterministic pre-gate; then a **Claude critic** (or a *different* cross-provider critic) —
   **never a Codex critic on Codex's own work** (producer≠grader). Codex-builder + Claude-critic
   is automatically both producer≠grader AND cross-provider verification.
+- **Multi-turn refinement**: take `sessionId` from the bridge's output and pass it back via
+  `--resume <id>` (or `--resume-last`) to send a follow-up fix into the *same* Codex thread
+  instead of re-briefing from scratch. This is the coding hand's privilege only — see the
+  `--resume` ban for critics in Use 1.
 - **N1–N6 compatibility**: Codex-authored hunks flow into the same integrated-diff snapshot the
   whole-diff final review consumes — that review is author-agnostic.
 
@@ -206,10 +233,13 @@ What NEVER shifts under the mandate — quality is the routing invariant, quota 
 - **the primary grader** — a Claude critic (Opus) still grades every gated deliverable; the
   cross-model lens stays *additive* (Use 1 composition rule), so quota-spread can never
   cause a false-accept;
-- **local repo file-walking recon** — bridge Gemini (`agy --print`) has no file access (see
-  the file-access note above), and Haiku is the cheapest Claude quota anyway; `scout` keeps
-  this lane. (Codex read-only *can* walk a repo, but spending the coding hand's quota on
-  mechanical recon inverts the point of the spread.)
+- **local repo file-walking recon** — `scout` keeps this lane, not because bridge Gemini lacks
+  file access anymore (it doesn't — see the file-access note above), but because the bridge's
+  staging copy gets expensive for large repos (copy time, 200 MB cap) and Haiku is the cheapest
+  Claude quota anyway; the economics favour `scout`, not a capability gap. For *targeted*
+  file-level review (a handful of files, not a whole-repo walk), `gemini-critic` via the
+  staging copy is now a viable route. (Codex read-only *can* also walk a repo, but spending the
+  coding hand's quota on mechanical recon inverts the point of the spread.)
 - **the escalation ladder** — a failed cross-provider ticket escalates to its named Claude
   default (runtime-failure rule above), never sideways to another external provider.
 
@@ -229,10 +259,14 @@ worktree cwd** for use 3; **never `danger-full-access`**.
 Telemetry (quality.md §7): record optional `provider` ∈ `anthropic | openai | google` (default
 `anthropic`) and, when `provider != anthropic`, `xprovider_reason` ∈ `independent-lens |
 context-size | quota-spread | lead-judgment` (the last for judgment routes outside the
-Use 1–4 shapes; `user-codex-pref` is retired with the voided 2026-07-05 decision). **Cost fields, by surface:** the **bridge** returns
-`durationMs` always and, for Codex, a token count in `stderrTail` (~9k in the live test) —
-record those. The **MCP** path returns neither → leave `tokens` `n/a`; never invent a number.
-The completion-card token/effort figure follows the same rule.
+Use 1–4 shapes; `user-codex-pref` is retired with the voided 2026-07-05 decision). **Cost
+fields, by surface:** the **bridge** returns `durationMs` always and, for Codex, a structured
+`usage` field (bridge v2 — parsed from the `--json` event stream: `input_tokens`,
+`cached_input_tokens`, `output_tokens`, `reasoning_output_tokens`; supersedes the old
+`stderrTail`-scrape approach) — record those. Gemini still reports no usage data (`usage: null`
+in the bridge output) — leave `tokens` `n/a` for it. The **MCP** path returns neither →
+leave `tokens` `n/a`; never invent a number. The completion-card token/effort figure follows
+the same rule.
 
 ## Reserve, not baseline — pal/clink
 
