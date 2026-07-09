@@ -69,8 +69,9 @@ the Claude default it degrades to when no surface is present.
 
 | Capability | Use | Bridge (structured) | MCP (interactive) | Degrades to |
 |---|---|---|---|---|
-| `codex-critic` | cross-model lens | `--tool codex --schema <verdict> --sandbox read-only --cwd <repo>` | `mcp__codex__codex` (read-only) | Claude dual-lens |
-| `codex-code` | coding hand | `--tool codex --sandbox workspace-write --cwd <worktree>` | `mcp__codex__codex` (workspace-write) | `builder` (Sonnet) |
+| `codex-critic` | cross-model lens | `--tool codex --model gpt-5.6-sol --effort xhigh --schema <verdict> --sandbox read-only --cwd <repo>` | `mcp__codex__codex` (read-only) | Claude dual-lens |
+| `codex-code` | coding hand | `--tool codex --model gpt-5.6-terra --effort high --sandbox workspace-write --cwd <worktree>` | `mcp__codex__codex` (workspace-write) | `builder` (Sonnet) |
+| `codex-recon` | cheap repo-grounded recon with shell | `--tool codex --model gpt-5.6-luna --effort medium --sandbox read-only --cwd <repo>` | `mcp__codex__codex` (read-only) | `scout` (file-only) / `builder` (needs shell) |
 | `gemini-critic` | cross-model lens (alt) | `--tool gemini --model "Gemini 3.1 Pro (High)"` | `mcp__gemini-cli__ask-gemini` (Flash-only in print) | Claude dual-lens |
 | `gemini-recon` | big-context recon | `--tool gemini --model "Gemini 3.5 Flash (High)"` | `mcp__gemini-cli__ask-gemini` | `scout` (Haiku) |
 | `gemini-recon-cheap` | high-volume mechanical recon | `--tool gemini --model "Gemini 3.5 Flash (Low)"` | `mcp__gemini-cli__ask-gemini` | `scout` (Haiku) |
@@ -82,27 +83,54 @@ and the Codex CLI's own default — never pin from a press announcement. (Lesson
 `Gemini 3.5 Pro` and `gemini-3.1-flash-lite` are announced/plausible but **not in `agy models`**
 here, so they are not pinnable; `Gemini 3.5 Pro` is not yet public at all.)
 
-> **Verified for — checked 2026-07-06, re-checked 2026-07-09 against `codex login status` +
-> `agy models` (agy 1.1.0, was 1.0.16 — model roster unchanged):**
-> - **Codex**: logged in via ChatGPT; CLI default model floats to the current top (`gpt-5.5`
->   family). Reasoning effort `low | medium | high | xhigh` via `--config model_reasoning_effort=…`
->   (bridge) or `config:{…}` (MCP). Bridge auto-converts a JSON Schema to Codex-strict
->   (all properties → `required`, `additionalProperties:false`). Bridge v2 also returns
->   structured `usage` (`input_tokens`, `cached_input_tokens`, `output_tokens`,
->   `reasoning_output_tokens`) and `sessionId` (`thread_id`, for `--resume`) for Codex calls.
+> **Verified for — checked 2026-07-09 (GPT-5.6 GA day) against the Codex CLI's own model
+> catalog (`~/.codex/models_cache.json`, client 0.144.0) plus live bridge calls; Gemini
+> re-checked same day via `agy models` (agy 1.1.0 — roster unchanged):**
+> - **Codex**: logged in via ChatGPT; the catalog exposes the **GPT-5.6 family (GA
+>   2026-07-09)** — `gpt-5.6-sol` (flagship), `gpt-5.6-terra` (balanced), `gpt-5.6-luna`
+>   (fast/cheap) — all with a **372k context window** (up from 272k; `gpt-5.5` remains
+>   listed). All three answered live on this plan (verified 2026-07-09: Sol via `codex exec`,
+>   Terra and Luna through the bridge). The 5.6 reasoning-effort ladder is
+>   `low | medium | high | xhigh | max | ultra` (`max` — deeper single-thread reasoning than
+>   xhigh; `ultra` — max plus auto-delegation to ~4 parallel sub-agents, a quota multiplier;
+>   **Luna has no ultra**). Effort is pinned per call via the bridge's **`--effort`** flag
+>   (added 2026-07-09) or `-c model_reasoning_effort=…` (direct CLI) / `config:{…}` (MCP).
+>   **Config-inheritance hazard:** `~/.codex/config.toml` pins the owner's interactive
+>   default to `terra` + effort **`ultra`** — a routed call that omits `--effort` silently
+>   inherits ultra and its multi-agent cost, so **every routed Codex call must pin both
+>   `--model` and `--effort` explicitly.** Bridge behavior otherwise unchanged: JSON Schema
+>   auto-strictified, structured `usage` + `sessionId` returned.
 > - **Gemini via `agy`**: reasoning effort is baked into the **model name suffix** —
 >   `(High) | (Medium) | (Low)`. Models present in `agy models`: `Gemini 3.5 Flash (H/M/L)`,
 >   `Gemini 3.1 Pro (L/H)` (agy also proxies `Claude Sonnet/Opus 4.6 (Thinking)`, `GPT-OSS 120B`).
 >   **`Gemini 3.5 Pro` is not public / not listed** — use `Gemini 3.1 Pro (High)` for the
 >   reasoning lens until 3.5 Pro actually ships, then re-verify and update this banner.
 
+Codex pins are now **explicit slugs, not the floating CLI default**: the config default is
+the owner's interactive choice (`terra` + `ultra` — wrong effort profile for our lanes), and
+OpenAI declares Sol/Terra/Luna *durable capability tiers* that advance on their own cadence —
+so the tier slug is the stable thing to pin, re-verified against the catalog on each
+generation bump (same "family, not version" policy as our Claude aliases).
+
 | Capability | Model (verified available) | Effort | Why |
 |---|---|---|---|
-| `codex-critic` | Codex CLI default (`gpt-5.5` family, floats) | **xhigh** | adversarial verification — mirrors our Opus-xhigh critic |
-| `codex-code` | Codex CLI default (coding) | **high** (xhigh only for a hard ticket) | implementation to spec — mirrors builder/Sonnet-high; escalate effort before model |
+| `codex-critic` | **`gpt-5.6-sol`** | **xhigh** (`max` by lead judgment for the hardest verdicts) | adversarial verification — mirrors our Opus-xhigh critic; Sol is the frontier coding/cybersecurity tier (SOTA on agentic code-review at GA) |
+| `codex-code` | **`gpt-5.6-terra`** | **high** (escalation: terra-xhigh → sol high/xhigh) | implementation to spec — Terra sits at/above frontier on the Coding Agent Index at ~¼ the cost; mirrors builder/Sonnet-high |
+| `codex-recon` | **`gpt-5.6-luna`** | **medium** (`low` for bulk) | cheap repo-grounded *agentic* recon **with shell** in a read-only sandbox; native cwd file access, no staging copy (Luna ≈ Opus 4.8 on coding index at the family's lowest price) |
 | `gemini-critic` | **`Gemini 3.1 Pro (High)`** | High (in the name) | deep-reasoning cross-model lens (3.5 Pro not public yet) |
 | `gemini-recon` | **`Gemini 3.5 Flash (High)`** | High | big-context recon workhorse (1M ctx, cheap, fast) |
 | `gemini-recon-cheap` | **`Gemini 3.5 Flash (Low)`** | Low | high-volume mechanical sweeps — the Haiku-lane cross-provider scout |
+
+**Effort ladder & the `ultra` policy (2026-07-09).** `max` is a plain escalation step —
+deeper reasoning, still one thread; usable anywhere xhigh is, by lead judgment. `ultra` makes
+Codex internally coordinate ~4 parallel sub-agents. It is permitted as a *worker-internal
+accelerator*: the ticket surface does not change (one ticket in, one deliverable out, our
+gates unchanged), so ADR-0001's "workers, never a second orchestrator" holds — the worker
+parallelizes inside itself, it does not direct our pipeline. But it is never a baseline:
+it multiplies quota spend by roughly its agent count. Reserve it, by explicit lead judgment
+with a logged reason (`effort: ultra` in telemetry), for a builder ticket that is genuinely
+hard AND latency-sensitive. On **critic lanes ultra is not used at all**: its sub-agents are
+the same model, so it buys cost, not lens independence — xhigh/`max` is the critic ceiling.
 
 ## Detection & graceful degradation
 
@@ -154,7 +182,8 @@ genuinely dominates the deliverable's stakes, and state the skip in one line of 
 report.
 
 - **Call (structured, preferred)**: `node /opt/tools/agent-bridge/run-external-agent.mjs
-  --tool codex --schema <verdict.json> --sandbox read-only --cwd <repo>`, prompt on **stdin** =
+  --tool codex --model gpt-5.6-sol --effort xhigh --schema <verdict.json> --sandbox read-only
+  --cwd <repo>`, prompt on **stdin** =
   the deliverable + the ticket's ACCEPTANCE verbatim + "try to refute; a finding needs a
   concrete failure scenario." Verdict schema = **the bridge's machine-checkable shape**
   (`status ∈ APPROVED|WARNING|BLOCKED`, `summary`, `issues[]`; see the agent-bridge README) —
@@ -186,19 +215,24 @@ Claude-only path (SKILL.md Step 2).
 
 - **Bound OUTPUT tightly** (N rows, exact table, distilled answer) — the huge context stays on
   Gemini's side; only the distilled result returns to the lead.
-- **N1–N6 compatibility**: a Gemini recon ticket inherits the scout **verb whitelist** (recon/
-  read/classify-by-a-given-rule only — no decide/recommend/design). A judgment-bearing sweep is
-  never a Gemini scout; it routes to `architect`.
+- **N1–N6 compatibility**: any cross-provider recon ticket (Gemini here, or `codex-recon`/Luna
+  from the registry) inherits the scout **verb whitelist** (recon/read/classify-by-a-given-rule
+  only — no decide/recommend/design; for `codex-recon`, "run this named check/script and report
+  its output" is within the whitelist — executing a *given* command is mechanical, choosing
+  which check matters is not). A judgment-bearing sweep is never a cross-provider scout; it
+  routes to `architect`.
 
 ## Use 3 — Codex coding hand (peer builder; writes only in a worktree)
 
 A peer coding lane, chosen at routing time by lead judgment — the Use 4 baseline makes it
 the default for well-specified builder tickets when detected. **Call (preferred)**:
-`--tool codex --sandbox workspace-write --cwd <worktree>` via the bridge (structured result +
-`durationMs` + structured `usage` token counts); MCP `mcp__codex__codex` is the interactive
-fallback. Params: prompt = a **builder-contract** ticket (full spec, explicit scope, "run
-scoped checks yourself"); `cwd` = a dedicated **worktree** path (structural write-scoping);
-**never `danger-full-access`**; effort **high** (xhigh only for a genuinely hard ticket).
+`--tool codex --model gpt-5.6-terra --effort high --sandbox workspace-write --cwd <worktree>`
+via the bridge (structured result + `durationMs` + structured `usage` token counts); MCP
+`mcp__codex__codex` is the interactive fallback. Params: prompt = a **builder-contract**
+ticket (full spec, explicit scope, "run scoped checks yourself"); `cwd` = a dedicated
+**worktree** path (structural write-scoping); **never `danger-full-access`**; effort **high**
+— for a genuinely hard ticket escalate terra-xhigh, then `gpt-5.6-sol` high/xhigh; `ultra`
+only under the policy above (hard AND latency-sensitive, logged reason).
 
 - After return: read the diff **from disk** (`git diff`), never Codex's self-report; run the
   deterministic pre-gate; then a **Claude critic** (or a *different* cross-provider critic) —
@@ -223,8 +257,9 @@ present, these lanes route cross-provider **by default** — no per-run user pro
 |---|---|---|
 | web recon & big-context recon | `gemini-recon` (Flash High) | `builder`/`architect` per SKILL.md Step 2 |
 | high-volume mechanical sweeps whose material can be **inlined** in the prompt | `gemini-recon-cheap` (Flash Low) | `scout` (Haiku) |
-| well-specified implementation tickets (builder-class) | `codex-code` (worktree, gates unchanged) | `builder` (Sonnet) |
-| third lens on dual-lens deliverables | `codex-critic` / `gemini-critic` — **alternate across deliverables** to spread over both external subscriptions | additive — omitted, two-Claude-lens gate stands |
+| mechanical repo sweeps that need **shell execution** (run a linter/script, count via command — never scout's lane, it has no shell) | `codex-recon` (Luna, medium) | `builder` (Sonnet) |
+| well-specified implementation tickets (builder-class) | `codex-code` (Terra high, worktree, gates unchanged) | `builder` (Sonnet) |
+| third lens on dual-lens deliverables | `codex-critic` (Sol xhigh) / `gemini-critic` — **alternate across deliverables** to spread over both external subscriptions | additive — omitted, two-Claude-lens gate stands |
 
 What NEVER shifts under the mandate — quality is the routing invariant, quota is not:
 
@@ -233,13 +268,16 @@ What NEVER shifts under the mandate — quality is the routing invariant, quota 
 - **the primary grader** — a Claude critic (Opus) still grades every gated deliverable; the
   cross-model lens stays *additive* (Use 1 composition rule), so quota-spread can never
   cause a false-accept;
-- **local repo file-walking recon** — `scout` keeps this lane, not because bridge Gemini lacks
-  file access anymore (it doesn't — see the file-access note above), but because the bridge's
-  staging copy gets expensive for large repos (copy time, 200 MB cap) and Haiku is the cheapest
-  Claude quota anyway; the economics favour `scout`, not a capability gap. For *targeted*
+- **local repo file-walking recon** — `scout` keeps this lane as the *default*, not because
+  cross-provider file access is missing (bridge Gemini reads via the staging copy; Codex reads
+  its `cwd` natively), but on economics: Haiku is the cheapest quota of all, and Gemini's
+  staging copy gets expensive for large repos (copy time, 200 MB cap). For *targeted*
   file-level review (a handful of files, not a whole-repo walk), `gemini-critic` via the
-  staging copy is now a viable route. (Codex read-only *can* also walk a repo, but spending the
-  coding hand's quota on mechanical recon inverts the point of the spread.)
+  staging copy is a viable route. With GPT-5.6 the old "don't spend the coding hand's quota
+  on recon" argument is retired for Codex: `codex-recon` (Luna) is the family's designated
+  cheap tier, so routing a sweep there — when it needs shell, or when Claude quota is tight
+  (`xprovider_reason: quota-spread`) — no longer inverts the spread. Pure file-walking still
+  defaults to `scout`.
 - **the escalation ladder** — a failed cross-provider ticket escalates to its named Claude
   default (runtime-failure rule above), never sideways to another external provider.
 
@@ -253,8 +291,11 @@ mandate for that run.
 
 Cross-provider calls spend the OTHER subscription's quota (a feature — offloads Claude quota
 when it's tight) at the cost of added latency and operation outside Claude Code's sandbox.
-Sandbox defaults are least-privilege: **read-only** for uses 1 and 2; **workspace-write +
-worktree cwd** for use 3; **never `danger-full-access`**.
+Sandbox defaults are least-privilege: **read-only** for uses 1 and 2 and for `codex-recon`;
+**workspace-write + worktree cwd** for use 3; **never `danger-full-access`** — and note the
+owner's `~/.codex/config.toml` sets `sandbox_mode = "danger-full-access"` globally for
+*interactive* use, which the bridge structurally overrides: it always passes an explicit
+`--sandbox` and accepts only `read-only|workspace-write`.
 
 Telemetry (quality.md §7): record optional `provider` ∈ `anthropic | openai | google` (default
 `anthropic`) and, when `provider != anthropic`, `xprovider_reason` ∈ `independent-lens |
