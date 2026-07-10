@@ -332,7 +332,9 @@ plan around it:
    gradeable ("`npm test` passes; no file outside `src/auth/` modified; every public
    function has a docstring"), never vibes ("code is good").
 2. **Verification hierarchy** — use the fastest reliable grader:
-   deterministic checks (tests, typecheck, build, grep for forbidden patterns)
+   deterministic checks (tests, typecheck, build, grep for forbidden patterns; for a
+   UI-facing deliverable also a live run of the primary flow — real event handlers
+   fired, not just a green build: quality.md §4)
    → `critic` agent (LLM judgment in fresh context)
    → your own spot-check (last resort, most expensive).
    Deterministic checks are a **prerequisite, not an alternative**: spawn `critic` only

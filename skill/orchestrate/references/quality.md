@@ -79,6 +79,15 @@ Interpretation rules for the orchestrator:
 - deterministic: tests pass (output shown), typecheck/build pass, diff confined to the
   ticket's named paths (graded against the per-ticket diff snapshot — see SKILL.md
   "Working-tree discipline" — never against global git status during a parallel wave);
+- deterministic, **UI-facing changes**: the primary user flow is exercised *live* — a
+  scripted browser/DOM interaction, or a hand click-through when scripting is
+  impractical — so the real event handlers fire before acceptance. tsc, build, and code
+  review (all three lenses) do not substitute for runtime event-handler behavior: the
+  2026-07-09 live-FileList reset passed every static gate and failed on the first real
+  click (§8, incident 1);
+- deterministic, **probes**: a negative-path probe must assert *who answered* — body
+  shape or an identifying header — never the status code alone. A 404-expected check
+  "passes" identically when routing is broken (§8, incident 2);
 - judgment: implements the approved plan (not a workaround), no hard-coded values that
   only satisfy the tests, no unrequested refactoring, edge cases from the ticket covered.
 
@@ -184,6 +193,28 @@ pre-gate FAILs, critic FAILs, and NEEDS_CLARIFICATION re-issues alike; `first_tr
 simply `retries == 0`; `escalated_to` names the tier that ultimately passed, `null` if
 none; `verdict` is the final verdict after all attempts; `note` is one short clause,
 filled only when it explains a FAIL, retry, or escalation.
+
+**Canonical `verdict` vocabulary** (pinned 2026-07-11, after the free-text field drifted
+into 27 spellings in one week and the first analysis pass had to normalize them by
+script). Exactly one of seven values:
+
+| Value | Means |
+|---|---|
+| `PASS` | accepted as delivered |
+| `PASS_WITH_NOTES` | accepted; minor notes carried forward |
+| `FAIL_FIXED` | a gate failed (deterministic, critic, or cross-model lens); findings fixed and re-verified within the run — the gate *working* |
+| `FAIL` | final failure: blocker reported, or deliverable unusable/incomplete |
+| `PASS_THEN_FAIL` | passed every gate, defect surfaced after acceptance — an **escaped defect**; when process-caused it pairs with an incident-journal entry (§8) |
+| `MISROUTE` | a lead routing error voided the ticket |
+| `SKIPPED` | never ran (surface absent, ticket obsoleted) |
+
+Severity counts, round history, and lens details go in `note` — never into new verdict
+spellings. The vocabulary exists to make two things countable across sessions: the
+gate-yield (`FAIL_FIXED` / all gated) and the escape rate (`PASS_THEN_FAIL` +
+process-caused incidents / all accepted). Legacy note: records written before 2026-07-11
+used two field generations (`ts`/`subagent`/`outcome`/`notes`/`routed_to`); all were
+migrated to the canonical names on 2026-07-11, with each original verdict's payload
+preserved as a `[was: …]` suffix in `note`.
 
 Optional cost fields — `tokens`, `tool_uses`, `duration_ms` — may be appended to any
 record. They are free: the harness reports them in each Agent result's `usage` block

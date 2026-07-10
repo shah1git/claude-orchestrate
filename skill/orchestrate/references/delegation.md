@@ -68,6 +68,15 @@ if for a capable executor with zero tolerance for ambiguity:
   classification rule the ticket provides is mechanical (do it); a judgment choice among N
   goes back as "all N with their attributes" for the lead to decide. Encode the boundary in
   the ticket so it is explicit, not implied.
+- **A completeness claim needs two angles.** For any inventory / usage-map / "find all
+  X" ticket, the ticket itself must specify at least two *independent* sweep angles —
+  e.g. grep the API caller AND grep the UI control; the import path AND the symbol
+  name — plus a reconciliation step: items found by one angle but not the other are
+  listed explicitly, never silently merged. Scout's report format already requires
+  `SEARCHES RUN`; grade against it. A `GAPS: none` from a single-angle sweep is an
+  unverified coverage claim, not evidence of completeness — the lead treats it as
+  unverified before building a plan on it (2026-07-11 picker incident: 4 of 9 sites
+  missed by a one-angle sweep the plan then trusted; §8, incident 4).
 - Keep tickets small: one question or one sweep per ticket. Ten small scout tickets in
   parallel beat one broad one — **down to a floor**: every delegation carries fixed
   overhead (spawn, context injection, report), so below some brief size splitting costs
@@ -133,14 +142,19 @@ CONTEXT: We are planning its replacement with the new typed API client; the arch
   exact usage map to size the migration. Completeness matters more than speed.
 INPUTS: Repository root /opt/acme-shop. Search terms: "LegacyHttpClient", "legacyHttpClient", "legacy_http".
 TOOLS: Grep for the sweeps, Read for classification context. (Scout has no shell access.)
-STEPS: 1) Grep each term case-insensitively across src/. 2) For each hit record file,
-  line, and enclosing function/component name (Read the surrounding lines). 3) Classify
-  each hit: api-call | type-import | comment | config.
+STEPS: 1) Grep each term case-insensitively across src/. 2) Second angle: Grep the
+  import path "lib/legacy-http" across src/ — a file importing it that matched no term
+  in step 1 is a hit too. 3) For each hit record file, line, and enclosing
+  function/component name (Read the surrounding lines). 4) Classify each hit:
+  api-call | type-import | comment | config. 5) Reconcile the angles: list every file
+  found by only one of them.
 OUTPUT: A markdown table: | file | line | symbol | class |. One row per hit, sorted by file.
   Example row: | src/lib/crm.ts | 42 | syncOrder() | api-call |
+  After the table, one line per single-angle-only file (or "reconciliation: both angles agree").
 BOUNDARIES: Read-only. Do not propose fixes. Do not search outside /opt/acme-shop.
-ACCEPTANCE: Every term searched (show the search patterns run); zero-hit terms reported
-  as zero; table parses; classifications only from the four allowed values.
+ACCEPTANCE: Every term searched (show the search patterns run); both angles run and
+  reconciled, single-angle-only files listed; zero-hit terms reported as zero; table
+  parses; classifications only from the four allowed values.
 If the repo layout does not match these instructions, return NEEDS_CLARIFICATION with what
 you actually saw. Do not guess. "0 matches" is a valid, successful answer.
 ```
