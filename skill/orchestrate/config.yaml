@@ -1,0 +1,255 @@
+# =============================================================================
+# /orchestrate — операционный конфиг маршрутизации (введён в v2.12)
+# =============================================================================
+# Этот файл — ЕДИНСТВЕННЫЙ источник истины для перечисленных здесь настроек.
+# Проза скилла (SKILL.md, references/*) хранит метод и обоснования; значения —
+# здесь. При конфликте прозы и конфига побеждает конфиг.
+#
+# Правила редактирования (для человека и для лида):
+#   1. Правь смело — файл для этого и существует. Лид перечитывает его при
+#      каждом запуске оркестрации (SKILL.md, раздел «Config»).
+#   2. При содержательной правке подними `version` на единицу. Забытый бамп
+#      не страшен: телеметрия штампует записи отпечатком v<version>+<sha256:7>,
+#      и хеш выдаст незабампленную правку.
+#   3. Новую МОДЕЛЬ в cross_provider не пиновать, пока она не проверена живьём
+#      по каталогу коннектора (правило «pin only what the connector exposes»,
+#      references/cross-provider.md). Если конфиг опережает баннер верификации —
+#      сначала проверка, потом первый маршрутизированный вызов.
+#   4. Модели/эффорты четырёх Claude-агентов здесь НЕ дублируются: их источник
+#      истины — фронтматтер agents/*.md (architect=fable/xhigh, builder=
+#      sonnet/high, scout=haiku, critic=opus/xhigh) — это точка, где пины
+#      реально исполняются харнессом. Меняешь их — меняй там.
+#
+# Провенанс: каждая запись routing-log.jsonl несёт поле config с отпечатком
+# этого файла на момент диспетча; при первом появлении нового отпечатка лид
+# кладёт полную копию в telemetry/config-snapshots/<отпечаток>.yaml.
+# Так любая строка журнала разворачивается в точный конфиг, её породивший.
+# =============================================================================
+
+version: 1
+updated: 2026-07-11
+
+# -----------------------------------------------------------------------------
+# Маршрутизация: класс подзадачи -> агент (SKILL.md Step 2).
+# Классифицируй КАЖДУЮ подзадачу до маршрутизации; достаточно одного сигнала.
+# -----------------------------------------------------------------------------
+routing:
+  # При сомнении между двумя классами — маршрутизируй ВВЕРХ: up-route стоит
+  # немного квоты, down-route даёт уверенную тихую ошибку (дороже в итоге).
+  tie_break: up
+
+  classes:
+    judgment:                    # -> architect (Fable) или critic (Opus), никогда ниже
+      route: [architect, critic]
+      signals:
+        - open design space
+        - ambiguity left to resolve
+        - security implications
+        - unknown root cause
+        - conflicting constraints to weigh
+        - quality assessment of meaning (audits/reviews of prose, design, policy, architecture)
+        - an error would silently mislead the lead
+    skilled:                     # -> builder (Sonnet)
+      route: [builder]
+      signals:
+        - complete spec exists
+        - success is objectively checkable (tests, criteria)
+        - known patterns apply
+        - bounded blast radius
+    mechanical:                  # -> scout (Haiku); только read-only, без суждений
+      route: [scout]
+      signals:
+        - every step enumerable in advance
+        - zero decisions remain
+        - exact output format given
+        - a wrong result is detectable on sight
+
+  # Жёсткие полы: никогда не ниже Opus, независимо от квоты.
+  hard_floors:
+    - architecture and technology decisions
+    - risky-change planning
+    - root-cause debugging
+    - security-relevant work
+    - final verification of production code
+    - judgment-bearing review/audit lenses
+
+  escalation:
+    # Лестница на FAIL: ① ретрай тем же агентом с находками критика ->
+    # ② тир вверх (свежий контекст) -> ③ блокер-отчёт пользователю.
+    ladder: [retry-same-agent, escalate-tier, report-blocker]
+    max_attempts_per_subtask: 2    # третий провал = блокер-отчёт, не ретрай
+    tiers: [haiku, sonnet, opus, fable]
+    one_way: true                  # упавшая наверх подзадача вниз не возвращается
+
+  overrides:
+    # model-параметр Agent-вызова поверх фронтматтера: вверх — всегда можно.
+    up_routing: always-allowed
+    # Потолок up-routing — model: fable; ровно три санкционированных применения.
+    fable_ceiling_uses:
+      - architect (bound by design)
+      - correctness lens of a highest-stakes dual-lens
+      - final escalation rung
+    # Даунгрейд critic до sonnet — только при ВСЕХ трёх условиях сразу.
+    critic_downgrade_requires_all:
+      - deliverable is recon or an intermediate draft (not production code, not acted on directly)
+      - deterministic checks exist and already passed
+      - a missed defect is still caught downstream before the user relies on the result
+
+# -----------------------------------------------------------------------------
+# Веера и рабочее дерево (SKILL.md Step 3).
+# -----------------------------------------------------------------------------
+fan_out:
+  healthy_default: [3, 5]          # типичный здоровый параллелизм
+  workflow_preferred_from: 5       # >= N однотипных элементов -> Workflow-пайплайн
+  worktree_isolation_from_writers: 3   # >= N параллельных писателей -> worktree обязателен
+
+# -----------------------------------------------------------------------------
+# Гейты качества (SKILL.md Step 4, quality.md).
+# -----------------------------------------------------------------------------
+gates:
+  # Триггеры двойной линзы (высшие ставки): любой -> два критика параллельно
+  # (корректность на fable + полнота на opus).
+  dual_lens_triggers:
+    - production code headed for the main branch
+    - anything published outside the team
+    - anything the user will act on without reading
+  dual_lens_correctness_model: fable
+  # Кросс-модельная третья линза при обнаруженном коннекторе: default-on;
+  # пропуск только когда латентность реально доминирует — с указанием в отчёте.
+  cross_model_third_lens: default-on
+  # v2.11: для UI-деливераблов живой прогон основного сценария — в детерминированном
+  # гейте (реальные обработчики событий, не только зелёная сборка).
+  ui_live_check: required
+  # v2.11: негативная проба обязана удостоверять, КТО ответил (тело/заголовок),
+  # а не только код статуса.
+  probe_responder_identity: required
+  # Ревью всего интегрированного диффа после волны из >= N писателей.
+  whole_diff_review_from_writers: 2
+
+# -----------------------------------------------------------------------------
+# Кросс-провайдерные лейны (references/cross-provider.md).
+# Постоянный мандат 2026-07-09: провайдер — решение лида; качество не сдвигается.
+# Модели пиновать только проверенные по каталогу коннектора (правило 3 шапки).
+# -----------------------------------------------------------------------------
+cross_provider:
+  enabled: auto-detect             # bridge --detect; нет поверхности -> Claude-дефолты
+
+  lanes:
+    codex-critic:                  # кросс-модельная линза (зеркало Opus-xhigh критика)
+      model: gpt-5.6-sol
+      effort: xhigh                # `max` — по решению лида для труднейших вердиктов
+      sandbox: read-only
+    codex-code:                    # кодинг-рука (зеркало builder/Sonnet-high)
+      model: gpt-5.6-terra
+      effort: high
+      escalation: [terra-xhigh, sol-high, sol-xhigh]
+      sandbox: workspace-write     # cwd = выделенный worktree; никогда danger-full-access
+    codex-recon:                   # дешёвая репо-разведка С shell (read-only)
+      model: gpt-5.6-luna
+      effort: medium
+      bulk_effort: low
+      sandbox: read-only
+    gemini-critic:                 # альтернативная кросс-линза
+      model: "Gemini 3.1 Pro (High)"
+    gemini-recon:                  # большой контекст / веб-разведка
+      model: "Gemini 3.5 Flash (High)"
+    gemini-recon-cheap:            # высокообъёмная механика
+      model: "Gemini 3.5 Flash (Low)"
+
+  # Базовое распределение под quota-spread (Use 4): лейн -> дефолтный маршрут.
+  defaults:
+    web_recon: gemini-recon
+    big_context_recon: gemini-recon
+    inline_mechanical_sweeps: gemini-recon-cheap    # материал влезает в промпт
+    shell_mechanical_sweeps: codex-recon            # нужен shell (у scout его нет)
+    well_specified_builder_tickets: codex-code
+    third_lens:
+      alternate: [codex-critic, gemini-critic]      # чередовать: Sol — самое узкое окно кредитов
+
+  # Что НЕ сдвигается мандатом никогда (качество — инвариант, квота — нет):
+  never_shift:
+    - judgment-class tickets (architect/Fable) and the lead itself
+    - the primary grader (a Claude critic grades every gated deliverable)
+    - local repo file-walking recon defaults to scout (economics)
+    - the escalation ladder (failed cross-provider ticket escalates to its Claude default)
+
+  ultra_policy:
+    critic_lanes: never            # суб-агенты той же модели покупают стоимость, не независимость
+    builder_condition: genuinely hard AND latency-sensitive
+    log_reason: required           # effort: ultra в телеметрии с записанной причиной
+
+# -----------------------------------------------------------------------------
+# Замены при НЕДОСТУПНОСТИ модели (SKILL.md Step 2, «Availability fallbacks»).
+#
+# Недоступность — кончилось окно лимитов, не оплачена подписка, коннектор
+# отсутствует/разлогинен, поверхность отвечает ошибкой — это НЕ провал качества:
+# попытки лестницы эскалации (routing.escalation) она не расходует, и вердикт
+# тикета от неё не портится. Правило направления: замена никогда не опускается
+# ниже пола качества класса — только «вбок» (равный тир другого провайдера)
+# или «вверх» (дороже, но не хуже).
+#
+# Чтение цепочки: первый ДОСТУПНЫЙ элемент выигрывает; последний элемент —
+# терминальное поведение, когда недоступно всё:
+#   report-blocker  — честный блокер-отчёт пользователю (работа не имитируется)
+#   lead-inline     — лид делает подзадачу сам, в главном цикле
+#   skip-third-lens — линза аддитивна: гейт двух Claude-линз стоит и без неё;
+#                     пропуск отмечается одной строкой в финальном отчёте
+# Каждый сработавший рерут штампуется в телеметрию полями fallback_from /
+# fallback_reason (quality.md §7).
+# -----------------------------------------------------------------------------
+availability:
+  fallbacks:
+    # Claude-агенты (недоступность тира Claude):
+    architect: [fable, opus, report-blocker]            # judgment-пол — Opus; ниже нельзя
+    critic:    [opus, fable, report-blocker]            # первичный грейдер — всегда Claude:
+                                                        # внешней моделью НЕ заменяется
+    builder:   [sonnet, codex-code, opus, lead-inline]  # вбок на Terra, затем вверх
+    scout:     [haiku, gemini-recon-cheap, sonnet, lead-inline]
+                                                        # вбок на Flash Low — только если материал
+                                                        # инлайнится/стейджится; иначе сразу вверх
+    # Кросс-провайдерные лейны (недоступность внешней поверхности):
+    codex-critic:      [codex-critic, gemini-critic, skip-third-lens]
+    gemini-critic:     [gemini-critic, codex-critic, skip-third-lens]
+    codex-code:        [codex-code, builder]
+    codex-recon:       [codex-recon, builder]           # нужен shell -> builder, не scout
+    gemini-recon:      [gemini-recon, codex-recon, builder]
+    gemini-recon-cheap: [gemini-recon-cheap, scout]
+
+  # Словарь причин для fallback_reason (телеметрия):
+  reasons: [quota-window, subscription, connector-absent, connector-error]
+
+# -----------------------------------------------------------------------------
+# Пороги перекалибровки (quality.md §5, §7). Начальные догадки — правь по данным.
+# -----------------------------------------------------------------------------
+thresholds:
+  first_try_pass_min: 0.80         # ниже — тикеты недоспецифицированы: чини тикеты, не воркеров
+  recalibrate_after_records_per_tier: 20   # накопил тир столько записей -> ревизия рубрики
+  critic_fail_rate_review_below: 0.05      # стабильно ниже — гейт, возможно, переприменяется
+  incident_review_signal: 2        # >= N инцидентов одного класса -> сигнал ревизии правила (§8)
+
+# -----------------------------------------------------------------------------
+# Телеметрия (quality.md §7).
+# -----------------------------------------------------------------------------
+telemetry:
+  log: telemetry/routing-log.jsonl
+  stamp_records_with_config: true  # поле config: "v<version>+<sha256:7>" в каждой записи
+  snapshot_dir: telemetry/config-snapshots
+
+# -----------------------------------------------------------------------------
+# Кандидаты на будущие ручки — пока живут в прозе или не параметризованы вовсе.
+# Раздел — карта того, что ЕЩЁ можно вынести сюда; вынос кандидата = бамп version
+# + правка соответствующей прозы (значение из прозы убирается, остаётся ссылка).
+# -----------------------------------------------------------------------------
+# candidates:
+#   grill_depth_matrix:     таблица «тир x неоднозначность» глубины грилла (Step 0.5)
+#   approval_checkpoint:    условия чекпойнта одобрения плана до первой волны (Step 1)
+#   effort_per_class:       reasoning-эффорт воркеров по классам тикетов (сейчас — во
+#                           фронтматтере агентов и пинах лейнов; сводная ручка возможна)
+#   session_budget:         потолок токенов/кредитов на оркестрированный прогон
+#   scout_two_angle:        обязательность двух ракурсов инвентаризации (v2.11 — сейчас
+#                           правило прозы delegation.md; можно сделать переключаемым)
+#   team_channel:           триггеры/лимиты экспериментального канала teams (teams.md;
+#                           пока под флагом окружения и собственным пилотом)
+#   verdict_vocabulary:     словарь вердиктов телеметрии (quality.md §7) — сознательно
+#                           НЕ ручка: словарь должен быть стабильным, чтобы записи
+#                           разных недель оставались сравнимыми

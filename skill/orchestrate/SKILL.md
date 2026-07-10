@@ -27,6 +27,25 @@ context-exceeding work. Anthropic's measurements: multi-agent systems use ~15× 
 tokens of a chat interaction, and ~4× the tokens of doing the work directly as a single
 agent — the task's value must justify the spend.
 
+## Config — the runtime tunables ([config.yaml](config.yaml))
+
+The operative routing parameters — class signals, hard floors, escalation caps, fan-out
+limits, gate triggers, cross-provider pins and default lanes, recalibration thresholds —
+live in **config.yaml**, one human-editable file next to this playbook, shared by the
+lead and the user. **Read it before Step 0 of every orchestrated run.** Division of
+labor: the prose keeps the *method and the why*; the config keeps the *values* — a value
+present in config is edited there, never here, and on any prose/config conflict the
+config wins. (The four Claude agents' model/effort pins are the one exception: their
+source of truth stays in `agents/*.md` frontmatter — the enforcement point — as the
+config's header note says.)
+
+Provenance — how telemetry knows which config produced which record: compute the
+fingerprint `v<version>+<first 7 of sha256>` (one Bash line:
+`echo "v$(grep -m1 '^version:' config.yaml | cut -d' ' -f2)+$(sha256sum config.yaml | cut -c1-7)"`);
+if `telemetry/config-snapshots/` has no file named after that fingerprint, copy
+config.yaml there as `<fingerprint>.yaml`; stamp every routing-log record of the run
+with `config: "<fingerprint>"` (quality.md §7).
+
 ## Step 0 — Triage: scale effort to complexity
 
 | Tier | Signals | Setup |
@@ -182,17 +201,18 @@ down-route produces a confident, silent error — which then costs a verificatio
 a retry, and usually an escalation anyway. A complex task must never land on a weaker
 model to save quota.
 
-| Class | Signals (any one suffices) | Route |
-|---|---|---|
-| **Judgment** | open design space; ambiguity left to resolve; security implications; unknown root cause; conflicting constraints to weigh; quality assessment of *meaning* (audits/reviews of prose, design, policy, architecture); an error would silently mislead you | `architect` (Fable) or `critic` (Opus) — never lower |
-| **Skilled execution** | complete spec exists; success is objectively checkable (tests, criteria); known patterns apply; bounded blast radius | `builder` (Sonnet) |
-| **Mechanical** | every step enumerable in advance; zero decisions remain; exact output format given; a wrong result is detectable on sight | `scout` (Haiku) |
+The three classes and their routes: **Judgment** (the space is open, or an error would
+silently mislead you) → `architect`/`critic`, never lower; **Skilled execution**
+(complete spec, objectively checkable) → `builder`; **Mechanical** (enumerable steps,
+zero decisions, a wrong result visible on sight) → `scout`. The operative signal lists —
+any one signal suffices to claim the class — live in config.yaml `routing.classes` and
+are edited there.
 
-Hard floors — never routed below Opus, regardless of quota: architecture and technology
-decisions; risky-change planning; root-cause debugging; security-relevant work; final
-verification of production code; judgment-bearing review/audit lenses. A subtask that
-mixes classes is split; if it cannot be split, the whole subtask takes its highest
-class. Escalation is one-way — a subtask that failed at a tier never moves back down.
+Hard floors — never routed below Opus, regardless of quota — are the config.yaml
+`routing.hard_floors` list (architecture decisions, security, root-cause debugging,
+final verification of production code, and kin). A subtask that mixes classes is split;
+if it cannot be split, the whole subtask takes its highest class. Escalation is one-way
+— a subtask that failed at a tier never moves back down.
 
 **Haiku verdict**: yes, use it — it is the fastest and cheapest tier ("near-frontier
 performance", officially positioned for "sub-agent tasks") and preserves your
@@ -251,6 +271,21 @@ non-Claude route carries its named reason into telemetry; with no surface presen
 route degrades to its Claude default. Full mechanics, connector registry, default lanes,
 and the detect-or-degrade rule:
 [references/cross-provider.md](references/cross-provider.md).
+
+**Availability fallbacks — unavailability is not failure.** A model being *unavailable* —
+quota window exhausted, subscription lapsed, connector absent or logged out, the surface
+erroring on contact — is an availability event, not a quality event: it consumes **no**
+attempts on the Step 4 escalation ladder and says nothing about the deliverable. Reroute
+instead, along the ordered chain in config.yaml `availability.fallbacks` (one chain per
+agent and per cross-provider lane; edited there): the first *available* element wins.
+Direction rule the chains must respect (and edits to them too): a fallback never drops
+below the class's quality floor — sideways to an equal tier of another provider, or up,
+never down (the primary grader stays Claude even here; a fully-additive third lens may
+terminally degrade to `skip-third-lens`, stated in one line of the final report). Each
+terminal element is an honest behavior, not a substitute model: `report-blocker`,
+`lead-inline`, `skip-third-lens`. A reroute that fired is stamped into the ticket's
+telemetry record as `fallback_from` + `fallback_reason` (quality.md §7) — that is how
+quota pressure becomes visible in the data instead of silently reshaping routing.
 
 ## Step 3 — Delegate with task tickets
 
@@ -346,10 +381,11 @@ plan around it:
    throwaway recon. The grader must not be the producer: critic sees only the deliverable
    + the ticket's acceptance criteria — not the producer's reasoning.
    **Dual-lens rule — applied by you, automatically**: for highest-stakes deliverables —
-   production code headed for the main branch, anything published outside the team,
-   anything the user will act on without reading — spawn two critics in parallel with
-   distinct lenses: one graded on *correctness* (is it true / does it work), one on
-   *completeness* (does it cover the full stated scope). Accept only when both pass.
+   the trigger list lives in config.yaml `gates.dual_lens_triggers` (production code
+   headed for main, published outside the team, acted on without reading) — spawn two
+   critics in parallel with distinct lenses: one graded on *correctness* (is it true /
+   does it work), one on *completeness* (does it cover the full stated scope). Accept
+   only when both pass.
    For these highest-stakes deliverables the *correctness* lens is spawned as `critic`
    with `model: fable` — frontier judgment on the lens where a miss ships a defect; the
    *completeness* lens stays on Opus. Two lenses, two models: their failure modes

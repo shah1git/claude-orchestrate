@@ -76,7 +76,18 @@ the Claude default it degrades to when no surface is present.
 | `gemini-recon` | big-context recon | `--tool gemini --model "Gemini 3.5 Flash (High)"` | `mcp__gemini-cli__ask-gemini` | `scout` (Haiku) |
 | `gemini-recon-cheap` | high-volume mechanical recon | `--tool gemini --model "Gemini 3.5 Flash (Low)"` | `mcp__gemini-cli__ask-gemini` | `scout` (Haiku) |
 
+The bridge calls above show the *shape*; the model/effort values substituted at routing
+time come from config.yaml `cross_provider.lanes` (the skill root), which is where lane
+pins are edited.
+
 ## Model & effort pins — verify against the connector, not the web
+
+**The operative pins live in config.yaml `cross_provider.lanes` (skill root) and are
+edited there** — this section is the *verification provenance*: which models and efforts
+were confirmed actually available, when, and against what evidence. The two must move
+together in one direction only: if config pins something this section's banner has not
+verified, verify against the connector first (and update the banner), then route the
+first call — a config edit is never by itself evidence of availability.
 
 **Pin only models the connector actually exposes.** Check `agy models` (Gemini/Antigravity)
 and the Codex CLI's own default — never pin from a press announcement. (Lesson, 2026-07-06:
@@ -164,8 +175,12 @@ family bump (same policy as delegation.md banners).
   `/opt/tools/agent-bridge/run-external-agent.mjs` plus `codex login status` / `agy models`
   succeeding individually.
 - **Degradation**: if a route selects a cross-provider capability that detection finds absent,
-  fall back to its named Claude default (registry, last column), note it in one line of the
-  final report, and proceed. Absence is never a run-blocking error.
+  walk that lane's ordered fallback chain in config.yaml `availability.fallbacks` (the
+  registry's "Degrades to" column shows the same terminal Claude default; the operative,
+  user-editable chain is the config's), note the reroute in one line of the final report,
+  stamp `fallback_from`/`fallback_reason` into the ticket's telemetry record, and proceed.
+  Absence is never a run-blocking error, and an availability reroute consumes no escalation
+  attempts (SKILL.md Step 2, "Availability fallbacks").
 - **Runtime failure** (present but the call errors / times out / `ok:false`): treat as a worker
   FAIL feeding the escalation ladder (Step 4) — ① one retry → ② escalate to the Claude default
   → ③ report the blocker. A cross-provider failure never escapes the ladder. Two named Codex

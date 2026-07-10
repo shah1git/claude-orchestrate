@@ -158,10 +158,10 @@ to analytics prose too): which class burned the most quota and whether its tier 
 it; whether retries cluster on one agent type (a ticket-quality signal — §7 thresholds);
 how much Claude quota the cross-provider share offloaded.
 
-Standing targets: verification coverage = 100% for production code; first-try pass ≥ 80%
-(persistently lower means tickets are underspecified — fix the tickets, not the workers);
-escalations are a routing signal (recurring scout escalations = you are giving Haiku
-judgment work).
+Standing targets: verification coverage = 100% for production code; first-try pass at or
+above the config.yaml `thresholds.first_try_pass_min` floor (persistently lower means
+tickets are underspecified — fix the tickets, not the workers); escalations are a routing
+signal (recurring scout escalations = you are giving Haiku judgment work).
 
 ## 6. Honest failure protocol
 
@@ -182,7 +182,8 @@ One JSON object per line:
 ```json
 {"date": "2026-07-04", "task": "de-version model labels", "ticket": "verify:v1.5",
  "class": "judgment", "agent": "critic", "model": "opus",
- "first_try": true, "retries": 0, "escalated_to": null, "verdict": "PASS", "note": "", "tokens": 54154, "tool_uses": 8}
+ "first_try": true, "retries": 0, "escalated_to": null, "verdict": "PASS", "note": "",
+ "config": "v1+a1b2c3d", "tokens": 54154, "tool_uses": 8}
 ```
 
 Field rules: `class` ∈ `judgment | skilled | mechanical` (the Step 2 classes); `agent`
@@ -231,6 +232,22 @@ Step 2, references/cross-provider.md; `user-codex-pref` appears only in pre-mand
 records and is retired). Every existing record omits these and is read as `anthropic`
 — backward-compatible.
 
+Fallback fields (optional) — when an availability reroute fired (SKILL.md Step 2,
+"Availability fallbacks"), the record carries `fallback_from` (the agent/lane originally
+routed) and `fallback_reason` ∈ `quota-window | subscription | connector-absent |
+connector-error` (the config.yaml `availability.reasons` vocabulary); `agent`/`model`
+record what actually ran. An availability reroute consumes no `retries` and does not
+touch `escalated_to` — those measure quality, this measures quota pressure.
+
+Config field — every record carries `config: "v<version>+<hash7>"`, the fingerprint of
+the skill's config.yaml at dispatch time: its `version:` value plus the first 7 hex
+characters of the file's sha256 (the SKILL.md "Config" section gives the one-liner). On
+first sight of a new fingerprint the lead copies the file to
+`telemetry/config-snapshots/<fingerprint>.yaml`, so every record resolves to the exact
+config bytes that routed it — even outside git history. Records before 2026-07-11
+predate the config and legitimately omit the field. This is what lets recalibration
+(below) separate "the rubric misroutes" from "the rubric changed mid-sample".
+
 Channel field (optional) — `channel` ∈ `oneshot | workflow | team` (default `oneshot`
 when omitted; every existing record predates the field and is read as `oneshot` —
 backward-compatible) records which delegation channel ran the ticket. For
@@ -240,21 +257,22 @@ return no `usage` block to the lead — omit `tokens` rather than inventing it; 
 lead-measured `duration_ms` (wall-clock) is fine. Team-channel records feed the pilot's
 pre-committed keep/drop criterion (references/teams.md).
 
-Recalibration — review whenever any tier accumulates ≥ 20 new records, and at every
-version bump at the latest:
+Recalibration — the numeric thresholds live in config.yaml `thresholds` (at pin time:
+first-try floor 0.80, review after 20 records per tier, critic-FAIL-rate floor 0.05) and
+are revised *there* as data accumulates. Review whenever any tier crosses the
+record-count threshold, and at every version bump at the latest:
 
-- `scout` first-try pass < 80% → its lane is too wide: tighten the Mechanical row's
-  signals, or stop routing classification-flavored sweeps to Haiku.
-- `builder` first-try pass < 80% → either tickets are underspecified (fix the ticket
-  template usage) or Skilled-execution signals admit judgment work — read the failing
-  records' notes before deciding which.
+- `scout` first-try pass below the floor → its lane is too wide: tighten the mechanical
+  class's signals (config.yaml `routing.classes.mechanical`), or stop routing
+  classification-flavored sweeps to Haiku.
+- `builder` first-try pass below the floor → either tickets are underspecified (fix the
+  ticket template usage) or the skilled-execution signals admit judgment work — read the
+  failing records' notes before deciding which.
 - Recurring `escalated_to` out of any tier → the class boundary above it is drawn
-  wrong; move the recurring signal one row up in the Step 2 table.
-- `critic` FAIL rate on first-try deliverables persistently < 5% → the gate may be
-  over-applied to low-risk deliverables; revisit what "mandatory critic pass" covers —
-  but never weaken it for production code.
-
-The thresholds above are initial guesses; revise them here as data accumulates.
+  wrong; move the recurring signal one class up in config.yaml `routing.classes`.
+- `critic` FAIL rate on first-try deliverables persistently below its floor → the gate
+  may be over-applied to low-risk deliverables; revisit what "mandatory critic pass"
+  covers — but never weaken it for production code.
 
 ## 8. Incident journal — qualitative self-improvement
 
