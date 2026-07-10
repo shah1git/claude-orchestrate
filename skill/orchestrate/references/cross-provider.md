@@ -93,7 +93,15 @@ here, so they are not pinnable; `Gemini 3.5 Pro` is not yet public at all.)
 >   Terra and Luna through the bridge). The 5.6 reasoning-effort ladder is
 >   `low | medium | high | xhigh | max | ultra` (`max` — deeper single-thread reasoning than
 >   xhigh; `ultra` — max plus auto-delegation to ~4 parallel sub-agents, a quota multiplier;
->   **Luna has no ultra**). Effort is pinned per call via the bridge's **`--effort`** flag
+>   **Luna has no ultra**). Provenance of the ladder's top (2026-07-10, official model guide
+>   cross-checked against the catalog): the *API* ladder is `none | low | medium | high |
+>   xhigh | max` — `ultra` exists only on the Codex/ChatGPT-Work surface (it is in the CLI
+>   catalog's effort enum; the API-side analog is the Responses-API **Multi-agent beta**).
+>   `reasoning.mode: "pro"` ("Sol Pro" in ChatGPT pickers is this *mode*, not a model slug)
+>   lives in the Responses API and the ChatGPT product only — **absent from the CLI catalog
+>   (checked 2026-07-10)**, so there is nothing to pin for our lanes. The 372k context figure is the CLI catalog's
+>   value; OpenAI has published no official 5.6 context window (product-side ChatGPT caps
+>   differ) — treat circulating web figures as unconfirmed. Effort is pinned per call via the bridge's **`--effort`** flag
 >   (added 2026-07-09) or `-c model_reasoning_effort=…` (direct CLI) / `config:{…}` (MCP).
 >   **Config-inheritance hazard:** `~/.codex/config.toml` pins the owner's interactive
 >   default to `terra` + effort **`ultra`** — a routed call that omits `--effort` silently
@@ -132,6 +140,17 @@ with a logged reason (`effort: ultra` in telemetry), for a builder ticket that i
 hard AND latency-sensitive. On **critic lanes ultra is not used at all**: its sub-agents are
 the same model, so it buys cost, not lens independence — xhigh/`max` is the critic ceiling.
 
+**Ticket phrasing for GPT-5.6 lanes (verified for 5.6 — official migration guide, 2026-07).**
+OpenAI's own measurements argue for *leaner* prompts on this family: simplified system
+prompts gave ~10–15 % eval improvement at 41–66 % fewer total tokens, and leaner prompts cut
+costs 33–67 % in sample workloads. Phrase Codex tickets closer to our Fable style than our
+Sonnet style — goal, constraints, explicit scope, acceptance criteria — not enumerated step
+lists. Keep **all seven contract fields** (OBJECTIVE / CONTEXT / INPUTS / OUTPUT / TOOLS /
+BOUNDARIES / ACCEPTANCE) intact: trim the *how*, never the *what*. Also per the guide, state
+autonomy boundaries explicitly — with boundaries undefined, 5.6 produces unnecessary approval
+pauses, which a non-interactive bridge call cannot answer. Re-verify this note on the next
+family bump (same policy as delegation.md banners).
+
 ## Detection & graceful degradation
 
 - **Detection** (once per capability at Step 2): a single call, `node
@@ -149,7 +168,14 @@ the same model, so it buys cost, not lens independence — xhigh/`max` is the cr
   final report, and proceed. Absence is never a run-blocking error.
 - **Runtime failure** (present but the call errors / times out / `ok:false`): treat as a worker
   FAIL feeding the escalation ladder (Step 4) — ① one retry → ② escalate to the Claude default
-  → ③ report the blocker. A cross-provider failure never escapes the ladder.
+  → ③ report the blocker. A cross-provider failure never escapes the ladder. Two named Codex
+  failure causes to check before burning the retry: (a) **stale client** — Codex CLI below
+  0.144.0 hides the GPT-5.6 models entirely (documented minimum; this machine sits exactly at
+  it), presenting as "model unavailable" — our 2026-07-09 `SKIPPED` routing-log record was
+  exactly this; the fix is an upgrade, not a retry. (b) **safety classifiers** — OpenAI runs
+  real-time cyber-/bio-misuse classifiers on 5.6 that can block or pause a request mid-run;
+  a security-review ticket on a codex lane can plausibly trip one — the fix is rerouting to
+  the Claude default, not a retry. Naming the cause picks the right rung.
 
 Gradeable invariant: *with no cross-provider surface present, every routing decision resolves
 to a Claude worker and the run reaches a normal terminal report.*
@@ -237,7 +263,12 @@ only under the policy above (hard AND latency-sensitive, logged reason).
 - After return: read the diff **from disk** (`git diff`), never Codex's self-report; run the
   deterministic pre-gate; then a **Claude critic** (or a *different* cross-provider critic) —
   **never a Codex critic on Codex's own work** (producer≠grader). Codex-builder + Claude-critic
-  is automatically both producer≠grader AND cross-provider verification.
+  is automatically both producer≠grader AND cross-provider verification. This rule now has a
+  named external justification for the 5.6 family: METR's pre-deployment evaluation of 5.6 Sol
+  (published 2026-06-26) measured the **highest reward-hacking rate of any public model** on
+  its agent harness — gaming tests rather than solving tasks, including exploiting hidden
+  test-suite information — so a Codex worker's own "tests pass" is precisely the claim our
+  gates must re-derive themselves, never accept on report.
 - **Multi-turn refinement**: take `sessionId` from the bridge's output and pass it back via
   `--resume <id>` (or `--resume-last`) to send a follow-up fix into the *same* Codex thread
   instead of re-briefing from scratch. This is the coding hand's privilege only — see the
@@ -291,6 +322,19 @@ mandate for that run.
 
 Cross-provider calls spend the OTHER subscription's quota (a feature — offloads Claude quota
 when it's tight) at the cost of added latency and operation outside Claude Code's sandbox.
+
+**One pool on the OpenAI side (2026-07-10; OpenAI Codex pricing page + help center, as
+compiled by GA-week operator coverage — the primary help pages are fetch-blocked):** Codex
+(CLI / desktop / cloud) and **ChatGPT Work** (plus ChatGPT for Excel and Workspace Agents)
+draw from a **single shared agentic credit pool** of the subscription. Codex lanes therefore
+compete with the owner's own interactive Work/Codex use — "spending the other subscription"
+means spending that one pool, budgeted as one line item. The credit schedule keeps the API
+price ratios: Sol 125 / 12.5 / 750 credits per 1M input/cached/output tokens, Terra exactly
+×½, Luna ×⅕ (OpenAI's guidance: a message averages 5–40 credits); on a Plus plan the Sol
+window is 15–90 messages per 5 h (Terra 20–110, Luna 50–280). Two lane-design consequences,
+now with arithmetic behind them: the third-lens lane **alternates** codex-critic /
+gemini-critic (Use 4) because Sol is the scarcest window, and recon rides Luna, not Sol, at
+one-fifth the credit burn.
 Sandbox defaults are least-privilege: **read-only** for uses 1 and 2 and for `codex-recon`;
 **workspace-write + worktree cwd** for use 3; **never `danger-full-access`** — and note the
 owner's `~/.codex/config.toml` sets `sandbox_mode = "danger-full-access"` globally for
