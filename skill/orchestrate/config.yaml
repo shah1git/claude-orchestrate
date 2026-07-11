@@ -26,8 +26,8 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 1
-updated: 2026-07-11
+version: 2
+updated: 2026-07-11    # v2: cross-lane pilots block (role-polygon 2026-07-11 evidence)
 
 # -----------------------------------------------------------------------------
 # Маршрутизация: класс подзадачи -> агент (SKILL.md Step 2).
@@ -165,6 +165,23 @@ cross_provider:
     well_specified_builder_tickets: codex-code
     third_lens:
       alternate: [codex-critic, gemini-critic]      # чередовать: Sol — самое узкое окно кредитов
+
+  # Пилоты кросс-лейнов (введены v2 по итогам полигона ролей 2026-07-11,
+  # benchmark/RESULTS.md). «Пилот» = лейн получает реальный трафик под
+  # телеметрическим наблюдением; при накоплении exit_after_records записей с
+  # прохождением, сопоставимым с Claude-дефолтом, — отдельным решением
+  # пользователя лейн либо ЗАКРЕПЛЯЕТСЯ дефолтом, либо откатывается. Пилот
+  # ничего не меняет в качестве: judgment-класс и первичный грейдер остаются
+  # Claude (never_shift ниже). Основание — эмпирика полигона, не догадка.
+  pilots:
+    exit_after_records: 10           # порог решения по каждому лейну
+    on_pilot:
+      codex-recon:   {evidence: "scout t1/t2 1.0/1.0, no sandbox violations", as: "shell recon + scout availability fallback"}
+      codex-code:    {evidence: "builder t1 11/11 hidden, t2 15/15 char + 30/30 fixture, 0 oob", as: "well_specified_builder_tickets default + builder fallback"}
+      codex-critic:  {evidence: "critic 8/8 planted defects, 0 FP, read-only clean", as: "preferred cross-model third lens (ahead of gemini-critic)"}
+    not_on_pilot:
+      gemini-critic:      "incident #5 (2 sightings): bridge misfires on read-only review; not piloted"
+      gemini-recon-cheap: "scout t2 passed only via ask-gemini MCP inlined; bridge path unreliable — keep as fallback, not promoted"
 
   # Что НЕ сдвигается мандатом никогда (качество — инвариант, квота — нет):
   never_shift:

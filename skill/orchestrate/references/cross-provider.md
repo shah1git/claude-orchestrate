@@ -45,6 +45,25 @@ file itself; bridge Gemini ran `agy --print --model "Gemini 3.1 Pro (High)"` and
 model. The MCP `ask-gemini` path, by contrast, is model-locked to Flash in print mode — fine
 for recon, wrong for a Pro-tier critic.
 
+> **Bridge Gemini is unreliable for read-only *contracts* — regressed 2026-07-11 (incident
+> #5, 2nd sighting).** The 2026-07-06 note above verified that the bridge honours the *model*;
+> it did not verify that Gemini honours a *read-only-review* instruction. In the role-polygon
+> benchmark the bridge Gemini path failed both uses: as a scout it returned an interactive
+> greeting ("terminal commands are enabled… how can I help?") instead of running the inlined
+> task; as a critic (`Gemini 3.1 Pro (High)`) it **edited the deliverable** (swapped `eval` for
+> an `ast` evaluator) instead of returning a findings list — no gradeable verdict. This repeats
+> the earlier routing-log `MISFIRE(committed instead of review)`. Both are contract failures,
+> not model-quality failures (it detected the defect while "fixing" it). Rule of thumb:
+> - **Cross-model third lens → prefer `codex-critic` (Sol)** over `gemini-critic` when the only
+>   Gemini path is the bridge; Sol returned a clean read-only findings list (8/8) under
+>   `sandbox: read-only` with no violations.
+> - **When Gemini is the right lens anyway** (its distinct angle is wanted), reach it via the
+>   **`ask-gemini` MCP with material inlined in the prompt**, not the bridge — that path did
+>   honour a read-only extraction task (scout t2, 17/17). Accept its Flash-in-print model lock.
+> - Treat any bridge-Gemini output that *isn't* the requested read-only artefact as a MISFIRE,
+>   not a finding; do not let a bridge-Gemini "fix" reach disk (its `--cwd` is a throwaway copy,
+>   so it cannot — but never promote its edits).
+
 > **File access — bridge v2 gives Gemini a repo too, via a copy, not a permission.** Bridge
 > `--tool codex` (`codex exec`) is an *agent* that reads files in its `cwd` sandbox itself —
 > point it at a repo and it opens what it needs, unchanged. Bridge `--tool gemini` (`agy
@@ -72,7 +91,7 @@ the Claude default it degrades to when no surface is present.
 | `codex-critic` | cross-model lens | `--tool codex --model gpt-5.6-sol --effort xhigh --schema <verdict> --sandbox read-only --cwd <repo>` | `mcp__codex__codex` (read-only) | Claude dual-lens |
 | `codex-code` | coding hand | `--tool codex --model gpt-5.6-terra --effort high --sandbox workspace-write --cwd <worktree>` | `mcp__codex__codex` (workspace-write) | `builder` (Sonnet) |
 | `codex-recon` | cheap repo-grounded recon with shell | `--tool codex --model gpt-5.6-luna --effort medium --sandbox read-only --cwd <repo>` | `mcp__codex__codex` (read-only) | `scout` (file-only) / `builder` (needs shell) |
-| `gemini-critic` | cross-model lens (alt) | `--tool gemini --model "Gemini 3.1 Pro (High)"` | `mcp__gemini-cli__ask-gemini` (Flash-only in print) | Claude dual-lens |
+| `gemini-critic` | cross-model lens (alt) — ⚠ bridge unreliable for review (incident #5); prefer `codex-critic`, or `ask-gemini` MCP inlined | `--tool gemini --model "Gemini 3.1 Pro (High)"` | `mcp__gemini-cli__ask-gemini` (Flash-only in print) | Claude dual-lens |
 | `gemini-recon` | big-context recon | `--tool gemini --model "Gemini 3.5 Flash (High)"` | `mcp__gemini-cli__ask-gemini` | `scout` (Haiku) |
 | `gemini-recon-cheap` | high-volume mechanical recon | `--tool gemini --model "Gemini 3.5 Flash (Low)"` | `mcp__gemini-cli__ask-gemini` | `scout` (Haiku) |
 

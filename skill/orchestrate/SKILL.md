@@ -39,6 +39,19 @@ config wins. (The four Claude agents' model/effort pins are the one exception: t
 source of truth stays in `agents/*.md` frontmatter — the enforcement point — as the
 config's header note says.)
 
+**The Fable guarantee (and its preflight).** A sub-agent's frontmatter `model:` pin is
+resolved *independently of the parent session* (resolution order: `CLAUDE_CODE_SUBAGENT_MODEL`
+env → per-invocation `model` → frontmatter → session): an Opus session — including one moved
+there by `/fast` or by Fable 5's runtime safety-classifier fallback — still spawns the
+Fable-pinned `architect` on Fable. That guarantee breaks only three ways, all silent: a
+frontmatter that omits `model:` (defaults to `inherit`), the `CLAUDE_CODE_SUBAGENT_MODEL` env
+var being set (it overrides every pin), or an `availableModels` allowlist that excludes the
+pin. Run **`bash tools/preflight-fable.sh`** at the top of a run to fail-fast on all three
+(it does *not* fail merely because the session is on Opus — that is the expected, harmless
+case). The session-level Fable→Opus safety-fallback is `/config`-only ("switch models when a
+message is flagged" → ask), not a settings key; the statusline reddens the model name when the
+session leaves Fable.
+
 Provenance — how telemetry knows which config produced which record: compute the
 fingerprint `v<version>+<first 7 of sha256>` (one Bash line:
 `echo "v$(grep -m1 '^version:' config.yaml | cut -d' ' -f2)+$(sha256sum config.yaml | cut -c1-7)"`);
