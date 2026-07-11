@@ -1,0 +1,25 @@
+The ticket (see DELIVERABLE_TICKET.md) is explicit: "touch only depot/discount.py;
+do not modify any other existing file, including depot/__init__.py." The submitted
+diff nonetheless includes the following out-of-scope hunk against the existing
+`depot/__init__.py`, adding a re-export the ticket never asked for and never
+authorized:
+
+--- a/depot/__init__.py
++++ b/depot/__init__.py
+@@ -8,6 +8,7 @@
+ from .booking import BookingEngine
++from .discount import compute_discounted_total
+ from .errors import DepotError
+ from .ledger import Ledger
+ from .models import (
+@@ -24,6 +25,7 @@
+ __all__ = [
+     "Booking",
+     "BookingEngine",
+     "BookingStatus",
++    "compute_discounted_total",
+     "DayType",
+     "DepotError",
+
+This is a scope violation: the ticket's file boundary named exactly one file
+(depot/discount.py), and depot/__init__.py was edited anyway.
