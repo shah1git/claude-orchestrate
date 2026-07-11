@@ -1,0 +1,104 @@
+[
+  {
+    "file": "tariff.py",
+    "name": "RATE_THEODOLITE",
+    "category": "RATE",
+    "value": "Decimal(\"1500.00\")"
+  },
+  {
+    "file": "tariff.py",
+    "name": "RATE_GNSS_ROVER",
+    "category": "RATE",
+    "value": "Decimal(\"3500.00\")"
+  },
+  {
+    "file": "tariff.py",
+    "name": "RATE_LEVEL",
+    "category": "RATE",
+    "value": "Decimal(\"900.00\")"
+  },
+  {
+    "file": "tariff.py",
+    "name": "RATE_TOTAL_STATION",
+    "category": "RATE",
+    "value": "Decimal(\"2800.00\")"
+  },
+  {
+    "file": "tariff.py",
+    "name": "RATE_DRONE_PHOTO",
+    "category": "RATE",
+    "value": "Decimal(\"4200.00\")"
+  },
+  {
+    "file": "tariff.py",
+    "name": "COEF_FIELD_DAY",
+    "category": "COEF",
+    "value": "Decimal(\"1.00\")"
+  },
+  {
+    "file": "tariff.py",
+    "name": "COEF_OFFICE_DAY",
+    "category": "COEF",
+    "value": "Decimal(\"0.60\")"
+  },
+  {
+    "file": "tariff.py",
+    "name": "COEF_WEEKEND_EXTRA",
+    "category": "COEF",
+    "value": "Decimal(\"1.20\")"
+  },
+  {
+    "file": "tariff.py",
+    "name": "CAP_LONG_BOOKING_THRESHOLD_DAYS",
+    "category": "CAP",
+    "value": "10"
+  },
+  {
+    "file": "tariff.py",
+    "name": "CAP_TOTAL_THEODOLITE",
+    "category": "CAP",
+    "value": "Decimal(\"12000.00\")"
+  },
+  {
+    "file": "tariff.py",
+    "name": "CAP_TOTAL_GNSS_ROVER",
+    "category": "CAP",
+    "value": "Decimal(\"28000.00\")"
+  },
+  {
+    "file": "tariff.py",
+    "name": "CAP_TOTAL_LEVEL",
+    "category": "CAP",
+    "value": "Decimal(\"7000.00\")"
+  },
+  {
+    "file": "tariff.py",
+    "name": "CAP_TOTAL_TOTAL_STATION",
+    "category": "CAP",
+    "value": "Decimal(\"22000.00\")"
+  },
+  {
+    "file": "tariff.py",
+    "name": "CAP_TOTAL_DRONE_PHOTO",
+    "category": "CAP",
+    "value": "Decimal(\"33000.00\")"
+  },
+  {
+    "file": "booking.py",
+    "name": "CAP_MAX_KIT_SIZE",
+    "category": "CAP",
+    "value": "6"
+  },
+  {
+    "file": "booking.py",
+    "name": "RATE_LATE_RETURN_PENALTY_PER_DAY",
+    "category": "RATE",
+    "value": "Decimal(\"500.00\")"
+  },
+  {
+    "file": "booking.py",
+    "name": "COEF_DAMAGE_SURCHARGE",
+    "category": "COEF",
+    "value": "Decimal(\"1.50\")"
+  }
+]

@@ -1,0 +1,152 @@
+[
+  {
+    "file": "booking.py",
+    "line": 78,
+    "code": "DEP-016",
+    "message": "kit of {len(serials)} instruments exceeds the maximum kit size of {CAP_MAX_KIT_SIZE}"
+  },
+  {
+    "file": "booking.py",
+    "line": 81,
+    "code": "DEP-015",
+    "message": "instrument '{instrument.serial}' is not cleared for booking (state={instrument.state.value})"
+  },
+  {
+    "file": "booking.py",
+    "line": 82,
+    "code": "DEP-020",
+    "message": "instrument '{instrument.serial}' already has an active booking"
+  },
+  {
+    "file": "booking.py",
+    "line": 103,
+    "code": "DEP-017",
+    "message": "booking '{booking.booking_id}' must be RESERVED to be issued, was {booking.status.value}"
+  },
+  {
+    "file": "booking.py",
+    "line": 111,
+    "code": "DEP-018",
+    "message": "booking '{booking.booking_id}' must be ISSUED to be returned, was {booking.status.value}"
+  },
+  {
+    "file": "booking.py",
+    "line": 121,
+    "code": "DEP-019",
+    "message": "booking '{booking.booking_id}' must be RESERVED to be cancelled, was {booking.status.value}"
+  },
+  {
+    "file": "compat.py",
+    "line": 36,
+    "code": "DEP-012",
+    "message": "kit must contain at least one instrument"
+  },
+  {
+    "file": "compat.py",
+    "line": 38,
+    "code": "DEP-014",
+    "message": "unknown instrument class '{instrument_class}' encountered while checking kit compatibility"
+  },
+  {
+    "file": "compat.py",
+    "line": 41,
+    "code": "DEP-013",
+    "message": "kit contains incompatible instrument classes: {sorted(c.value for c in pair)}"
+  },
+  {
+    "file": "ledger.py",
+    "line": 50,
+    "code": "DEP-021",
+    "message": "ledger operation name must not be empty"
+  },
+  {
+    "file": "ledger.py",
+    "line": 51,
+    "code": "DEP-022",
+    "message": "ledger subject id must not be empty"
+  },
+  {
+    "file": "ledger.py",
+    "line": 74,
+    "code": "DEP-023",
+    "message": "ledger records are immutable and cannot be removed"
+  },
+  {
+    "file": "quarantine.py",
+    "line": 51,
+    "code": "DEP-008",
+    "message": "instrument '{instrument.serial}' must be RECEIVED to begin inspection, was {instrument.state.value}"
+  },
+  {
+    "file": "quarantine.py",
+    "line": 57,
+    "code": "DEP-009",
+    "message": "instrument '{instrument.serial}' must be PENDING_CHECK to resolve inspection, was {instrument.state.value}"
+  },
+  {
+    "file": "quarantine.py",
+    "line": 71,
+    "code": "DEP-010",
+    "message": "instrument '{instrument.serial}' must be QUARANTINE_ACTIVE to be released, was {instrument.state.value}"
+  },
+  {
+    "file": "quarantine.py",
+    "line": 74,
+    "code": "DEP-011",
+    "message": "instrument '{instrument.serial}' has only spent {elapsed_days} of {required_days} required quarantine days"
+  },
+  {
+    "file": "registry.py",
+    "line": 37,
+    "code": "DEP-001",
+    "message": "serial '{serial}' does not match required format XX-9999"
+  },
+  {
+    "file": "registry.py",
+    "line": 39,
+    "code": "DEP-002",
+    "message": "serial '{serial}' does not carry the '{expected_prefix}' prefix required for {instrument_class.value}"
+  },
+  {
+    "file": "registry.py",
+    "line": 57,
+    "code": "DEP-003",
+    "message": "serial '{serial}' is already registered"
+  },
+  {
+    "file": "registry.py",
+    "line": 64,
+    "code": "DEP-004",
+    "message": "instrument '{serial}' not found in registry"
+  },
+  {
+    "file": "reports.py",
+    "line": 46,
+    "code": "DEP-024",
+    "message": "no ledger records found for subject '{subject_id}'"
+  },
+  {
+    "file": "reports.py",
+    "line": 60,
+    "code": "DEP-025",
+    "message": "unknown report type '{report_type}'"
+  },
+  {
+    "file": "tariff.py",
+    "line": 82,
+    "code": "DEP-005",
+    "message": "day plan must contain at least one day"
+  },
+  {
+    "file": "tariff.py",
+    "line": 83,
+    "code": "DEP-006",
+    "message": "no tariff rate defined for instrument class {instrument_class}"
+  },
+  {
+    "file": "tariff.py",
+    "line": 84,
+    "code": "DEP-007",
+    "message": "day plan of {len(day_plan)} days exceeds the maximum bookable horizon of {MAX_BOOKING_HORIZON_DAYS} days"
+  }
+]

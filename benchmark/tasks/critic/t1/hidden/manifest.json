@@ -1,0 +1,66 @@
+[
+  {
+    "id": 1,
+    "class": "logic-error",
+    "file": "code/discount.py",
+    "line": 75,
+    "statement": "apply_flat_code_discount(amount, code_discount_percent) returns `amount - code_discount_percent`, subtracting the promo code's percentage figure directly as if it were a RUB amount instead of computing `amount * code_discount_percent / 100`; called from compute_discounted_total for any non-'PCT:' promo_code (e.g. \"10\"), it removes a flat 10 RUB from the total instead of 10% of it, so the discount is wrong for essentially every base_total other than exactly 100.00.",
+    "severity": "major"
+  },
+  {
+    "id": 2,
+    "class": "security",
+    "file": "code/discount.py",
+    "line": 90,
+    "statement": "parse_legacy_discount_code calls `eval(expr)` on `expr`, the substring of the caller-supplied `code` string after the \"PCT:\" prefix, executing arbitrary Python expressions (and, via builtins available to eval, arbitrary code) from untrusted promo-code input instead of parsing it as a restricted numeric percentage.",
+    "severity": "critical"
+  },
+  {
+    "id": 3,
+    "class": "spec-violation",
+    "file": "code/discount.py",
+    "line": 103,
+    "statement": "compute_loyalty_discount_amount quantizes the loyalty-discount amount to two decimal places (ROUND_HALF_UP) before it is subtracted from base_total in compute_discounted_total, i.e. rounding happens at an intermediate step rather than exactly once at the end of compute_discounted_total as the ticket and module docstring require; e.g. for base_total=Decimal('1000.05') and the GOLD rate (0.10), this intermediate rounding yields a final total of 900.04 instead of the 900.05 obtained by rounding the full-precision computation once at the end.",
+    "severity": "major"
+  },
+  {
+    "id": 4,
+    "class": "vacuous-test",
+    "file": "code/test_discount.py",
+    "line": 45,
+    "statement": "test_compute_loyalty_discount_amount_runs calls compute_loyalty_discount_amount(Decimal('1000.00'), 20) and asserts only `result is not None`; since the function always returns a Decimal produced by .quantize(...) and can never return None, this assertion is vacuously true regardless of whether the computed discount amount is correct, giving false confidence that the GOLD-tier discount arithmetic is covered.",
+    "severity": "minor"
+  },
+  {
+    "id": 5,
+    "class": "boundary-error",
+    "file": "code/discount.py",
+    "line": 54,
+    "statement": "loyalty_tier uses `if total_bookings > TIER_PLATINUM_MIN_BOOKINGS: return \"PLATINUM\"` where the module's own docstring defines PLATINUM as starting 'at TIER_PLATINUM_MIN_BOOKINGS and above' (i.e. inclusive, `>=`); with `>`, a customer with exactly total_bookings == 30 (TIER_PLATINUM_MIN_BOOKINGS) is wrongly classified as GOLD (10% off) instead of PLATINUM (15% off), an off-by-one at the tier boundary.",
+    "severity": "major"
+  },
+  {
+    "id": 6,
+    "class": "false-claim-in-report",
+    "file": "REPORT.md",
+    "line": 19,
+    "statement": "REPORT.md's 'Safety bound' section claims total discount 'never exceeds 20% of the base fare, because the highest loyalty tier (PLATINUM) caps the loyalty component at 15% and promo codes are capped at 5%'; this is false because parse_legacy_discount_code evaluates a caller-supplied expression via eval() with no upper bound (e.g. code=\"PCT:1000\" yields a 1000% 'discount'), and apply_flat_code_discount treats a plain numeric promo code as a flat RUB amount, not a percentage, so neither promo-code path is actually capped at 5% and the overall 20% ceiling does not hold.",
+    "severity": "major"
+  },
+  {
+    "id": 7,
+    "class": "integration-seam",
+    "file": "code/discount.py",
+    "line": 131,
+    "statement": "compute_discounted_total calls `tariff.compute_total(start_date, instrument_class, day_plan)`, but depot.tariff.compute_total's documented signature is `compute_total(instrument_class, start_date, day_plan)`; the first two positional arguments are swapped, so at the real seam this raises DepotError('DEP-006', ...) ('no tariff rate defined for instrument class <date>') for every call, even though discount.py reads as correct in isolation.",
+    "severity": "critical"
+  },
+  {
+    "id": 8,
+    "class": "out-of-boundary-change",
+    "file": "code/__init__.py.patch",
+    "line": 11,
+    "statement": "The submitted diff includes a hunk against depot/__init__.py (`+from .discount import compute_discounted_total`, plus adding \"compute_discounted_total\" to __all__) even though DELIVERABLE_TICKET.md's file boundary explicitly restricts the change to depot/discount.py only and explicitly forbids modifying depot/__init__.py; this is a scope violation.",
+    "severity": "minor"
+  }
+]
