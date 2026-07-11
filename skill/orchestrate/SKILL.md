@@ -107,7 +107,21 @@ Trivial never grills — an ambiguous "trivial" task was mis-triaged; re-triage.
   or a couple of free-form questions. No artifacts unless a term genuinely needs pinning.
 - **Full** — the relentless one-question-at-a-time grill (method, doc policy, ledger
   schema, CONTEXT.md / ADR formats, source attribution:
-  [references/clarify.md](references/clarify.md)).
+  [references/clarify.md](references/clarify.md)). **Operationalize the full grill by
+  invoking the `grill-with-docs` skill** (Skill tool) — it *is* the one-at-a-time,
+  challenge-against-the-domain, update-docs-inline session this row describes; don't
+  hand-roll a substitute when the skill exists.
+
+**Standing preference for this project (owner, 2026-07-11): open with the grill, and when
+in doubt grill more, not less.** On a `/orchestrate` invocation for anything above Trivial,
+default to running `grill-with-docs` *before* the Step 1 plan — the owner expects the run
+to begin with a real grill, not a couple of `AskUserQuestion` passes. Down-shift to Light
+only when the request is genuinely crisp (no Step 0.5 ambiguity signal, "done" already
+statable as a gradeable criterion); if you catch yourself skipping the grill to move
+faster, that is the mistake this note exists to stop. The grill is still lead-only,
+main-loop work (workers can't ask the user), and its stop condition is unchanged: stop the
+moment remaining questions no longer change the decomposition or any ticket's
+INPUTS / BOUNDARIES / ACCEPTANCE.
 
 **How many questions — your judgment, not a quota.** There is no fixed number. In a full
 grill you ask one open question at a time and keep going until the stop condition below is
