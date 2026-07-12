@@ -21,6 +21,29 @@ duplicate its reasoning.
 > fall back to an MCP surface (interactive only) or to the Claude-only default. Paths here are
 > environment-specific (this machine's layout), not a portable assumption.
 
+## Auth principle — subscription OAuth first (config v5; omp case study, 2026-07-12)
+
+External surfaces authenticate through the **provider's official CLI logged into the
+user's subscription** (Codex CLI ← ChatGPT/Codex plan; Gemini CLI / Antigravity ← Google
+account) — never through metered API keys by default. Verified live 2026-07-12: both
+current lanes already run this way (bridge `--detect`: codex `loggedIn: true`; gemini
+surface present with its model catalog). Why this is the default, not a convenience:
+
+- **zero marginal cost** — the subscriptions are already paid; quota-spread moves work
+  onto them without opening a new bill;
+- **separate quota windows** — subscription pools are independent of API-tier limits,
+  which is the entire point of the spread;
+- **no key custody** — the vendor CLI holds and refreshes its own tokens; nothing in our
+  config to rotate or leak.
+
+Caveats the lead must respect: subscription pools are **opaque and shared** (Codex and
+ChatGPT Work draw one pool — a lane can go dark mid-run; the availability fallbacks cover
+it), and a headless CLI login can expire. An expired login is `fallback_reason:
+connector-error`/`subscription` in telemetry plus a request to the user to re-login —
+never a silent switch to an API key. A metered API key is a deliberate, owner-approved
+exception with its reason logged. Future connectors (e.g., Grok Build CLI) attach by the
+same rule: subscription OAuth surface first.
+
 ## Two surfaces — pick by what you need back
 
 A cross-provider "worker" is **the lead invoking an external CLI from the main loop** (only

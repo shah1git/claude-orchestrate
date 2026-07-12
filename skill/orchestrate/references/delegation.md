@@ -28,6 +28,16 @@ resolved FORKS become BOUNDARIES; the confirmed SUCCESS condition decomposes int
 ACCEPTANCE; a CODE contradiction found in the grill becomes an INPUT (the file:line). Copy a
 canonicalized term verbatim — never paraphrase a term the grill already pinned.
 
+**Pass references between dependent tickets, not transcripts.** When ticket B builds on
+ticket A's output, B's INPUTS carry *references* — file paths, the diff on disk, a report
+file — plus at most a three-line statement of what A established; never a paste of A's
+full report. Every re-narration is a lossy re-compression by a different narrator (the
+game-of-telephone failure; the omp case study's DAG solves it the same way — downstream
+stages receive links, not transcripts). Disk artifacts also stay provenance-checkable
+(quality.md research rubric) and remain authoritative when a narration drifts. Existing
+rules are instances of this one: "pass the first diff as INPUT to the second" (SKILL.md
+Step 3), per-ticket diff snapshots, Codex diff-from-disk.
+
 **No hedge words in a ticket.** "probably / likely / apparently / should be / I think / may"
 in a ticket marks unresolved recon, not a spec. Resolve each before dispatch — send a
 `scout`, read the file, or make the decision yourself — or promote it to an explicit line
