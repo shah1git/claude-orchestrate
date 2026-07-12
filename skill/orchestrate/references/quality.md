@@ -97,7 +97,13 @@ Interpretation rules for the orchestrator:
   actually says it;
 - completeness — all requested aspects covered; empty results stated explicitly;
 - source quality — primary sources (code, official docs) over hearsay;
-- tool efficiency — sensible tool use, no fabricated-source chasing.
+- tool efficiency — sensible tool use, no fabricated-source chasing;
+- provenance — the deliverable is demonstrably the worker's *own work on the ticket's
+  INPUTS*: analysis claims carry evidence obtainable only by doing the work
+  (input-traceable offsets/symbols, intermediate artifacts), and the grader asks "could
+  this have been copied from an existing artifact?" A correct-looking result appropriated
+  from a neighboring agent's output is a FAIL, not a PASS (§8, incident 6) — it poisons
+  lane calibration and silently diverges the moment the input changes.
 - connective accuracy — for synthesis/summary deliverables, each claim's *strength* and
   *causal/temporal shape* match the source, not just its nouns: quantifiers
   (all/most/none/every/always/never/N%) and causal-temporal connectives

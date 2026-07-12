@@ -222,8 +222,9 @@ pool of detected surfaces. Two standing values drive that judgment:
 
 1. **Additional analytical angle** — an uncorrelated model whose blind spots don't overlap
    Claude's (avoids self-preference bias — ADR-0001; the user independently holds this
-   view, and the ADR's evidence supports it). Flagship shape: the cross-model lens,
-   **default-on** for dual-lens deliverables. → Use 1.
+   view, and the ADR's evidence supports it). Flagship shape: the cross-model lens on
+   dual-lens deliverables — **opt-in by lead judgment since config v3** (owner decision
+   2026-07-12; formerly default-on). → Use 1.
 2. **Quota-spread** — orchestration load belongs on all the user's subscriptions (Claude,
    ChatGPT/Codex, Google), not on Claude alone. Baseline allocation: the default-lane
    table. → Use 4.
@@ -236,10 +237,13 @@ invariants (Use 4), and the composition/gating rules are not overridable by this
 ## Use 1 — cross-model critic lens (read-only, additive THIRD lens)
 
 For a dual-lens-trigger deliverable (SKILL.md Step 4.3), add ONE cross-model critic as a
-**third** lens on the same deliverable + acceptance criteria. Under the standing mandate
-this lens is **default-on whenever a surface is present** — skip it only when latency
-genuinely dominates the deliverable's stakes, and state the skip in one line of the final
-report.
+**third** lens on the same deliverable + acceptance criteria. Since config v3 (owner
+decision 2026-07-12; formerly default-on) this lens is **opt-in by lead judgment**: invoke
+it when the independent angle is worth one round-trip — the lens sits on the critical path
+of every highest-stakes gate, and the 2026-07-11 polygon saw the gemini bridge misfire 2/2.
+When invoked, prefer `codex-critic` (polygon: 8/8 planted defects, 0 FP). Neither invoking
+nor omitting it needs a note in the final report; the two-Claude-lens gate is complete on
+its own.
 
 - **Call (structured, preferred)**: `node /opt/tools/agent-bridge/run-external-agent.mjs
   --tool codex --model gpt-5.6-sol --effort xhigh --schema <verdict.json> --sandbox read-only
@@ -272,6 +276,17 @@ designated home for *cheap web sweeps* generally: our Claude cheap tier has no w
 by design (scout is local read-only; builder has WebFetch but no WebSearch), so a
 coverage-style web verification task routes here, or to `builder`/`architect` on the
 Claude-only path (SKILL.md Step 2).
+
+**Staging scope — INPUTS only (config v4; incident #6).** The staging copy (or `--cwd`)
+an external worker receives contains ONLY the ticket's INPUTS — never sibling directories
+holding other agents' outputs or finished deliverables. Incident #6 (2026-07-12,
+owner-reported): a Flash recon worker skipped a reverse-engineering task and returned
+Opus's output, found in a neighboring folder, as its own deliverable. The barrier is
+structural, not behavioral — same family as Codex reward hacking (hence the
+diff-from-disk rule, Use 3): scope what the worker can *see*, don't instruct it to be
+honest. Applies to every external lane: gemini staging = the INPUTS paths only; codex
+`--cwd` = the narrowest directory containing the INPUTS or a dedicated worktree, never a
+workspace root where other agents' work lives. Config: `cross_provider.staging_inputs_only`.
 
 - **Bound OUTPUT tightly** (N rows, exact table, distilled answer) — the huge context stays on
   Gemini's side; only the distilled result returns to the lead.
@@ -310,7 +325,7 @@ only under the policy above (hard AND latency-sensitive, logged reason).
 - **N1–N6 compatibility**: Codex-authored hunks flow into the same integrated-diff snapshot the
   whole-diff final review consumes — that review is author-agnostic.
 
-## Use 4 — baseline allocation under the mandate (default-on lanes; quality-equivalent only)
+## Use 4 — baseline allocation under the mandate (default lanes; quality-equivalent only; the third-lens row is opt-in since v3)
 
 Baseline provider allocation under the standing mandate (2026-07-09): spread orchestration
 load across all subscriptions, with the lead's judgment free to depart from the table when
@@ -324,7 +339,7 @@ present, these lanes route cross-provider **by default** — no per-run user pro
 | high-volume mechanical sweeps whose material can be **inlined** in the prompt | `gemini-recon-cheap` (Flash Low) | `scout` (Haiku) |
 | mechanical repo sweeps that need **shell execution** (run a linter/script, count via command — never scout's lane, it has no shell) | `codex-recon` (Luna, medium) | `builder` (Sonnet) |
 | well-specified implementation tickets (builder-class) | `codex-code` (Terra high, worktree, gates unchanged) | `builder` (Sonnet) |
-| third lens on dual-lens deliverables | `codex-critic` (Sol xhigh) / `gemini-critic` — **alternate across deliverables** to spread over both external subscriptions | additive — omitted, two-Claude-lens gate stands |
+| third lens on dual-lens deliverables — **opt-in by lead judgment since v3**, not a default lane | `codex-critic` (Sol xhigh) preferred; `gemini-critic` suspended until the bridge misfire (incident #5) is fixed | additive — omitted, two-Claude-lens gate stands |
 
 What NEVER shifts under the mandate — quality is the routing invariant, quota is not:
 

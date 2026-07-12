@@ -26,8 +26,49 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 2
-updated: 2026-07-11    # v2: cross-lane pilots block (role-polygon 2026-07-11 evidence)
+version: 4
+updated: 2026-07-12    # v4: staging=INPUTS-only + провенанс в приёмке аналитики (инцидент #6,
+                       #     продвинут директивой владельца). v3 (тот же день): профили ставок
+                       #     (stakes) + третья линза opt-in + codex-лейны закреплены дефолтами.
+
+# -----------------------------------------------------------------------------
+# Профили ставок (SKILL.md Step 0). Введены в v3 по телеметрии 2026-07-04..11:
+# из ~79 критик-гейтов реальный дефект пойман в ~20% случаев, и улов почти
+# целиком сконцентрирован в security/auth/транзакционной работе; на рутинных
+# задачах полный конвейер давал 5–10-кратное замедление без улова (наблюдение
+# владельца, 2026-07-12). Профиль назначается на прогон ЦЕЛИКОМ на Step 0 и
+# масштабирует ГЛУБИНУ конвейера — грилл, architect, число линз; размер задачи
+# (таблица триажа Step 0) отдельно управляет ШИРИНОЙ веера. Ось профиля —
+# ставки, не размер: однострочная правка в auth — это high.
+# -----------------------------------------------------------------------------
+stakes:
+  tie_break: up            # сомнение между профилями — берём более тяжёлый: та же
+                           # асимметрия, что в routing.tie_break (недожатый гейт
+                           # дороже перегретого)
+  profiles:
+    low:                                # мелкое, обратимое, вне жёстких полов
+      requires_all:                     # нужны ВСЕ условия: один сигнал ставок ломает профиль
+        - no routing.hard_floors signal
+        - no gates.dual_lens_triggers signal
+        - blast radius bounded and reversible (no schema / deletion / publish / security)
+      pipeline: single worker or lead-inline; no architect
+      grill: skip
+      gate: deterministic checks, then the lead reads the full diff himself (no spawned critic)
+    standard:                           # дефолт обычной фичи
+      default: true
+      pipeline: (scout recon if needed) -> builder(s)
+      grill: only on a Step 0.5 ambiguity signal, then Light
+      architect: only if the design space is genuinely open
+      gate: single Claude critic
+    high:                               # жёсткие полы и высшие ставки
+      any_signal:
+        - any routing.hard_floors signal
+        - any gates.dual_lens_triggers signal
+        - irreversible / high-blast-radius action in scope (Step 0.5, signal 5)
+        - migration or multi-system change
+      pipeline: full - grill -> architect -> builders -> gates
+      grill: full (grill-with-docs) — стоячее предпочтение владельца действует здесь
+      gate: dual lens; cross-model third lens — opt-in решением лида (gates.cross_model_third_lens)
 
 # -----------------------------------------------------------------------------
 # Маршрутизация: класс подзадачи -> агент (SKILL.md Step 2).
@@ -114,9 +155,13 @@ gates:
     - anything published outside the team
     - anything the user will act on without reading
   dual_lens_correctness_model: fable
-  # Кросс-модельная третья линза при обнаруженном коннекторе: default-on;
-  # пропуск только когда латентность реально доминирует — с указанием в отчёте.
-  cross_model_third_lens: default-on
+  # Кросс-модельная третья линза: opt-in (v3, решение владельца 2026-07-12;
+  # ранее default-on). Основания: на полигоне 2026-07-11 gemini-мост промахнулся
+  # 2/2, а линза лежит на критическом пути каждого высокоставочного гейта.
+  # Вызывается решением лида на high-профиле, когда независимый ракурс стоит
+  # round-trip'а; предпочтительная линза — codex-critic (полигон: 8/8, 0 FP).
+  # Гейт двух Claude-линз полон и без неё; пропуск больше не отмечается в отчёте.
+  cross_model_third_lens: opt-in
   # v2.11: для UI-деливераблов живой прогон основного сценария — в детерминированном
   # гейте (реальные обработчики событий, не только зелёная сборка).
   ui_live_check: required
@@ -133,6 +178,15 @@ gates:
 # -----------------------------------------------------------------------------
 cross_provider:
   enabled: auto-detect             # bridge --detect; нет поверхности -> Claude-дефолты
+
+  # v4 (инцидент #6, 2026-07-12): стейджинг/рабочая область внешнего исполнителя
+  # содержит ТОЛЬКО INPUTS его тикета — никогда соседние директории с выводами
+  # других агентов. Для codex-лейнов: --cwd указывает на минимальную директорию
+  # с INPUTS (или выделенный worktree), не на корень рабочей области. Барьер
+  # структурный, а не поведенческий: Flash выдал найденный в соседней папке
+  # результат Opus за свой — полагаться на добросовестность лейна нельзя,
+  # ограничивается то, что лейн ВИДИТ (та же логика, что diff-с-диска у Codex).
+  staging_inputs_only: required
 
   lanes:
     codex-critic:                  # кросс-модельная линза (зеркало Opus-xhigh критика)
@@ -157,6 +211,9 @@ cross_provider:
       model: "Gemini 3.5 Flash (Low)"
 
   # Базовое распределение под quota-spread (Use 4): лейн -> дефолтный маршрут.
+  # v3: спред — постоянная политика, а не режим «когда окно уже кончилось»:
+  # при 3–4 параллельных проектах недельное окно Claude стабильно исчерпывается
+  # за 1–2 дня до сброса; ждать исчерпания значит опоздать ровно на эти дни.
   defaults:
     web_recon: gemini-recon
     big_context_recon: gemini-recon
@@ -166,21 +223,24 @@ cross_provider:
     third_lens:
       alternate: [codex-critic, gemini-critic]      # чередовать: Sol — самое узкое окно кредитов
 
-  # Пилоты кросс-лейнов (введены v2 по итогам полигона ролей 2026-07-11,
-  # benchmark/RESULTS.md). «Пилот» = лейн получает реальный трафик под
-  # телеметрическим наблюдением; при накоплении exit_after_records записей с
-  # прохождением, сопоставимым с Claude-дефолтом, — отдельным решением
-  # пользователя лейн либо ЗАКРЕПЛЯЕТСЯ дефолтом, либо откатывается. Пилот
-  # ничего не меняет в качестве: judgment-класс и первичный грейдер остаются
-  # Claude (never_shift ниже). Основание — эмпирика полигона, не догадка.
+  # Закреплённые лейны (v3, решение владельца 2026-07-12) — то самое «отдельное
+  # решение пользователя», которым пилот v2 и должен был закрываться: три
+  # codex-лейна переведены из пилота в закреплённые дефолты. Эмпирика — полигон
+  # ролей 2026-07-11 (benchmark/RESULTS.md); мотив — квота (см. комментарий к
+  # defaults выше). Качество не сдвинуто: never_shift ниже действует без
+  # изменений, judgment-класс и первичный грейдер каждого гейта остаются Claude.
+  promoted:
+    codex-recon:   {evidence: "scout t1/t2 1.0/1.0, no sandbox violations", as: "shell recon + scout availability fallback"}
+    codex-code:    {evidence: "builder t1 11/11 hidden, t2 15/15 char + 30/30 fixture, 0 oob", as: "well_specified_builder_tickets default + builder fallback"}
+    codex-critic:  {evidence: "critic 8/8 planted defects, 0 FP, read-only clean", as: "preferred cross-model third lens (ahead of gemini-critic)"}
+
+  # Пилоты кросс-лейнов: механизм сохранён для будущих лейнов (новый провайдер
+  # проходит тот же путь: проверка по каталогу коннектора -> полигон ролей ->
+  # пилот с реальным трафиком -> решение пользователя). Сейчас на пилоте никого.
   pilots:
-    exit_after_records: 10           # порог решения по каждому лейну
-    on_pilot:
-      codex-recon:   {evidence: "scout t1/t2 1.0/1.0, no sandbox violations", as: "shell recon + scout availability fallback"}
-      codex-code:    {evidence: "builder t1 11/11 hidden, t2 15/15 char + 30/30 fixture, 0 oob", as: "well_specified_builder_tickets default + builder fallback"}
-      codex-critic:  {evidence: "critic 8/8 planted defects, 0 FP, read-only clean", as: "preferred cross-model third lens (ahead of gemini-critic)"}
+    exit_after_records: 10           # порог решения по каждому будущему лейну
     not_on_pilot:
-      gemini-critic:      "incident #5 (2 sightings): bridge misfires on read-only review; not piloted"
+      gemini-critic:      "incident #5 (2 sightings): bridge misfires on read-only review; до починки моста качество-несущая работа на gemini не маршрутизируется"
       gemini-recon-cheap: "scout t2 passed only via ask-gemini MCP inlined; bridge path unreliable — keep as fallback, not promoted"
 
   # Что НЕ сдвигается мандатом никогда (качество — инвариант, квота — нет):

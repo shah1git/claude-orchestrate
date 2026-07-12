@@ -72,8 +72,24 @@ Known failure modes to avoid (documented by Anthropic): spawning many agents for
 query; vague delegation that makes agents duplicate work or leave gaps; endless searching
 for information that does not exist. When in doubt, start one tier lower.
 
-The tier you land on also sets how hard to clarify the request before decomposing
-(Step 0.5) and whether the plan needs your sign-off before the fan-out (Step 1).
+**Second axis — stakes profile (config.yaml `stakes`; v3).** Size sets the *width* of the
+fan-out; stakes set the *depth* of the pipeline. Assign one profile per run at triage,
+tie-breaking up:
+
+| Profile | Trigger (operative signals: config `stakes.profiles`) | Pipeline |
+|---|---|---|
+| **low** | no hard-floor signal, no dual-lens trigger, bounded & reversible blast radius — all three | single worker or lead-inline; deterministic checks; the lead reads the full diff — no grill, no architect, no spawned critic |
+| **standard** | everything else — the default | builder(s) (+ scout recon); one Claude critic; grill only on an ambiguity signal, and then Light; architect only if the design space is genuinely open |
+| **high** | any hard-floor signal, dual-lens trigger, irreversible action, or migration / multi-system change | full pipeline: grill-with-docs → architect → builders → dual lens (+ opt-in cross-model lens) |
+
+Grounding (telemetry 2026-07-04..11, ~79 critic gates): real defects were caught at ~20%
+of gates and clustered almost entirely in security/auth/transactional work — `high`
+territory; on routine tasks the full pipeline added 5–10× wall-clock with no catch.
+Stakes are orthogonal to size — a one-file change in auth is `high`. A hard-floor or
+dual-lens signal discovered mid-run re-triages the run up immediately.
+
+The size tier and the stakes profile together set how hard to clarify the request before
+decomposing (Step 0.5) and whether the plan needs your sign-off before the fan-out (Step 1).
 
 ## Step 0.5 — Clarify the request before you spend the budget
 
@@ -112,16 +128,17 @@ Trivial never grills — an ambiguous "trivial" task was mis-triaged; re-triage.
   challenge-against-the-domain, update-docs-inline session this row describes; don't
   hand-roll a substitute when the skill exists.
 
-**Standing preference for this project (owner, 2026-07-11): open with the grill, and when
-in doubt grill more, not less.** On a `/orchestrate` invocation for anything above Trivial,
-default to running `grill-with-docs` *before* the Step 1 plan — the owner expects the run
-to begin with a real grill, not a couple of `AskUserQuestion` passes. Down-shift to Light
-only when the request is genuinely crisp (no Step 0.5 ambiguity signal, "done" already
-statable as a gradeable criterion); if you catch yourself skipping the grill to move
-faster, that is the mistake this note exists to stop. The grill is still lead-only,
-main-loop work (workers can't ask the user), and its stop condition is unchanged: stop the
-moment remaining questions no longer change the decomposition or any ticket's
-INPUTS / BOUNDARIES / ACCEPTANCE.
+**Standing preference for this project (owner, 2026-07-11; scoped 2026-07-12): the full
+grill opens `high`-stakes runs — and there, when in doubt, grill more, not less.** On a run
+whose stakes profile (Step 0) is `high`, default to running `grill-with-docs` *before* the
+Step 1 plan — the owner expects such a run to begin with a real grill, not a couple of
+`AskUserQuestion` passes, and on `high` the grill is not skippable for speed. A `standard`
+run grills only when a Step 0.5 ambiguity signal fires — and then Light; `low` never
+grills. The 2026-07-12 scoping is an owner decision made on telemetry (5–10× wall-clock on
+routine tasks with no catch): do not silently re-broaden the grill to every run, and do not
+shrink it below `high` either. The grill is still lead-only, main-loop work (workers can't
+ask the user), and its stop condition is unchanged: stop the moment remaining questions no
+longer change the decomposition or any ticket's INPUTS / BOUNDARIES / ACCEPTANCE.
 
 **How many questions — your judgment, not a quota.** There is no fixed number. In a full
 grill you ask one open question at a time and keep going until the stop condition below is
@@ -267,6 +284,15 @@ needs judgment.
 `agent()` calls, and team spawns alike (see "Large fan-outs" and "Agent teams" for the
 channel-specific rules).
 
+**Built-in generic agents sit outside the matrix — don't route to them.** The harness's
+built-in `Explore` / `Plan` / `general-purpose` agents carry no frontmatter `model:` pin
+and inherit the *session* model — under this skill, the lead tier: a "cheap recon" sent
+to built-in Explore silently spends the most expensive quota (the routing log already
+holds one such record; the omp case study independently documents the same trap — its
+built-in `explore` inherited the expensive default until an explicitly-pinned scout
+replaced it). Recon routes to `scout`, design to `architect`; a built-in agent is
+acceptable only with an explicit `model:` override and a named reason in the record.
+
 **Model override**: the Agent tool's `model` parameter overrides an agent's frontmatter.
 Up-routing is always allowed (`builder` with `model: opus` for one unusually gnarly
 implementation ticket). Down-routing `critic` to `model: sonnet` is allowed ONLY when
@@ -288,9 +314,12 @@ after the class is set. Standing user mandate (2026-07-09; it replaces and voids
 2026-07-05 "Codex = opt-in" decision): when their connectors are detected present,
 non-Claude workers (OpenAI Codex, Google Gemini via Antigravity) are **regular members of
 the routing pool**, routed by the lead's judgment. Two standing values drive that
-judgment: the *additional analytical angle* of an uncorrelated model (cross-model lens
-default-on for dual-lens deliverables — ADR-0001, self-preference bias) and *quota-spread*
-across the user's subscriptions (baseline lanes: cross-provider.md Use 4). Judgment routes
+judgment: the *additional analytical angle* of an uncorrelated model (cross-model lens —
+opt-in on `high`-stakes gates since v3 — ADR-0001, self-preference bias) and *quota-spread*
+across the user's subscriptions (baseline lanes: cross-provider.md Use 4). Since 2026-07-12
+the spread is a necessity, not a bonus — the owner's weekly Claude window runs out 1–2 days
+before reset across 3–4 parallel projects — and the three codex lanes are promoted from
+pilot to fixed defaults (config `cross_provider.promoted`). Judgment routes
 providers, never quality: judgment-class tickets and the primary grader stay Claude (an
 external lens is additive, never a substitute), and a non-Claude worker is a lead-invoked
 bridge/MCP call, not a sub-agent. Routing is judgment-driven, never silent — every
@@ -405,7 +434,11 @@ plan around it:
    (point 4 below) but zero Opus tokens.
 3. **Mandatory `critic` pass** for: production code changes, anything security-relevant,
    and any deliverable the user will rely on without personally checking. Skippable for
-   throwaway recon. The grader must not be the producer: critic sees only the deliverable
+   throwaway recon. On a `low`-stakes run (Step 0) the spawned critic is replaced by the
+   lead's own read of the full diff after deterministic checks pass — the verification
+   hierarchy's spot-check rung, applied deliberately; any hard-floor or dual-lens signal
+   surfacing mid-run re-triages the run out of `low` first. The grader must not be the
+   producer: critic sees only the deliverable
    + the ticket's acceptance criteria — not the producer's reasoning.
    **Dual-lens rule — applied by you, automatically**: for highest-stakes deliverables —
    the trigger list lives in config.yaml `gates.dual_lens_triggers` (production code
@@ -423,18 +456,20 @@ plan around it:
    conditions a single critic remains the default — the second lens doubles the most
    expensive gate.
 
-   **Cross-model third lens — default-on when a connector is present
-   (references/cross-provider.md).** For a dual-lens-trigger deliverable, add one
-   cross-model critic (Codex or Gemini, alternating) as a *third* lens on the same
-   deliverable + criteria, read-only. Its documented value is architectural independence:
-   a different-provider reviewer whose biases don't overlap Claude's (ADR-0001,
-   self-preference bias) — under the standing mandate (2026-07-09) this lens is on by
-   default; skip only when latency genuinely dominates, stating the skip in one line of
-   the final report. It is additive:
-   accept only when **both Claude lenses PASS and the cross-model lens raises no surviving
-   critical/major finding**. A cross-model lens can only tighten the gate, never replace a
-   Claude lens; its cost is the other subscription's quota plus one round-trip, not Claude
-   quota. If no connector is present, the standard two-Claude-lens gate applies unchanged.
+   **Cross-model third lens — opt-in (v3, 2026-07-12; references/cross-provider.md).**
+   For a dual-lens-trigger deliverable you MAY add one cross-model critic as a *third*
+   lens on the same deliverable + criteria, read-only. Its documented value is
+   architectural independence: a different-provider reviewer whose biases don't overlap
+   Claude's (ADR-0001, self-preference bias). Since v3 it is invoked by lead judgment,
+   not by default — the 2026-07-11 polygon saw the gemini bridge misfire 2/2, and the
+   lens sits on the critical path of every highest-stakes gate; invoke it when the
+   independent angle is worth one round-trip, preferring `codex-critic` (polygon: 8/8
+   planted defects, 0 FP). It is additive:
+   accept only when **both Claude lenses PASS and an invoked cross-model lens raises no
+   surviving critical/major finding**. A cross-model lens can only tighten the gate, never
+   replace a Claude lens; its cost is the other subscription's quota plus one round-trip,
+   not Claude quota. With no connector present or the lens not invoked, the standard
+   two-Claude-lens gate applies unchanged.
 4. **Escalation ladder** on a FAIL verdict:
    ① one retry by the same agent with the critic's findings attached →
    ② escalate the model tier (haiku→sonnet→opus→fable worker in a fresh
