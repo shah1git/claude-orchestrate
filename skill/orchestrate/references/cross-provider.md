@@ -105,6 +105,24 @@ for recon, wrong for a Pro-tier critic.
 > - Treat any bridge-Gemini output that *isn't* the requested read-only artefact as a MISFIRE,
 >   not a finding; do not let a bridge-Gemini "fix" reach disk (its `--cwd` is a throwaway copy,
 >   so it cannot — but never promote its edits).
+>
+> **Update 2026-07-12 — the model is exonerated; the fault is transport-specific.** A two-transport
+> re-test on the sealed polygon tasks (`benchmark/results/2026-07-12-gemini-retest/`) had Gemini
+> *pass* every task on both paths, so the 2/2 2026-07-11 misfires were a property of the failing
+> transport, not of Gemini: the earlier stance "suspend `gemini-critic` until the model is fixed"
+> is wrong and is lifted. What the re-test pinned instead:
+> - **`ask-gemini` MCP is the working Gemini path** — clean, no contamination (scout 25/25, 17/17;
+>   critic 7/8, 0 FP, and forced-Flash still caught the critical swapped-args seam). **But it is
+>   Flash-locked in print mode regardless of `--model`** (a warning surfaces): route it where Flash
+>   suffices; never *claim* a "3.1 Pro lens" through it — the connector does not expose the pin.
+> - **Native `agy` (interactive, e.g. inside an Orca terminal) honours the model** but is unfit for
+>   autonomous dispatch: it needs per-step permission approvals (not headless), and under `--sandbox`
+>   it relocates cwd and runs `find /` across the whole filesystem — in the re-test one candidate
+>   thereby answered a *neighbour* workspace's ticket and wrote+committed into its directory (a live
+>   incident #6 "poisoned neighbour"; telemetry/incidents.md). Do not promote native agy as a lane
+>   until each staged workspace is structurally isolated and the agent is pre-trusted.
+> So `gemini-critic` is a usable opt-in third lens again **via `ask-gemini` MCP, at Flash tier**;
+> `codex-critic` (Sol) stays the *preferred* third lens on quality (8/8, 0 FP, honours its Pro pin).
 
 > **File access — bridge v2 gives Gemini a repo too, via a copy, not a permission.** Bridge
 > `--tool codex` (`codex exec`) is an *agent* that reads files in its `cwd` sandbox itself —
@@ -282,10 +300,13 @@ For a dual-lens-trigger deliverable (SKILL.md Step 4.3), add ONE cross-model cri
 **third** lens on the same deliverable + acceptance criteria. Since config v3 (owner
 decision 2026-07-12; formerly default-on) this lens is **opt-in by lead judgment**: invoke
 it when the independent angle is worth one round-trip — the lens sits on the critical path
-of every highest-stakes gate, and the 2026-07-11 polygon saw the gemini bridge misfire 2/2.
-When invoked, prefer `codex-critic` (polygon: 8/8 planted defects, 0 FP). Neither invoking
-nor omitting it needs a note in the final report; the two-Claude-lens gate is complete on
-its own.
+of every highest-stakes gate. When invoked, prefer `codex-critic` (polygon: 8/8 planted
+defects, 0 FP, honours its Sol-xhigh pin); `gemini-critic` is a usable alternate again after
+the 2026-07-12 two-transport re-test (the 2026-07-11 2/2 misfires were transport-, not
+model-caused), but only via the `ask-gemini` MCP path and only at Flash tier — that surface
+is Flash-locked in print mode, so it cannot deliver a Pro-tier Gemini lens (see the Update
+2026-07-12 note above). Neither invoking nor omitting the third lens needs a note in the
+final report; the two-Claude-lens gate is complete on its own.
 
 - **Call (structured, preferred)**: `node /opt/tools/agent-bridge/run-external-agent.mjs
   --tool codex --model gpt-5.6-sol --effort xhigh --schema <verdict.json> --sandbox read-only
@@ -395,7 +416,7 @@ present, these lanes route cross-provider **by default** — no per-run user pro
 | high-volume mechanical sweeps whose material can be **inlined** in the prompt | `gemini-recon-cheap` (Flash Low) | `scout` (Haiku) |
 | mechanical repo sweeps that need **shell execution** (run a linter/script, count via command — never scout's lane, it has no shell) | `codex-recon` (Luna, medium) | `builder` (Sonnet) |
 | well-specified implementation tickets (builder-class) | `codex-code` (Terra high, worktree, gates unchanged) | `builder` (Sonnet) |
-| third lens on dual-lens deliverables — **opt-in by lead judgment since v3**, not a default lane | `codex-critic` (Sol xhigh) preferred; `gemini-critic` suspended until the bridge misfire (incident #5) is fixed | additive — omitted, two-Claude-lens gate stands |
+| third lens on dual-lens deliverables — **opt-in by lead judgment since v3**, not a default lane | `codex-critic` (Sol xhigh) preferred; `gemini-critic` usable again via `ask-gemini` MCP at Flash tier only (re-test 2026-07-12; not the Pro tier, surface Flash-locks it) | additive — omitted, two-Claude-lens gate stands |
 
 What NEVER shifts under the mandate — quality is the routing invariant, quota is not:
 

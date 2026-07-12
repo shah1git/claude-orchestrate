@@ -26,8 +26,11 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 8
-updated: 2026-07-12    # v8: контур ревью — decision-context pack, ось скоупа находок,
+version: 9
+updated: 2026-07-12    # v9: gemini-critic снят с not_on_pilot — ре-тест показал, что
+                       #     промахи 2026-07-11 транспортные, не модельные; рабочий путь
+                       #     линзы = ask-gemini MCP (Flash-locked). Проза cross-provider.md.
+                       # v8: контур ревью — decision-context pack, ось скоупа находок,
                        #     адъюдикация до ретрая, дельта-переверификация, потолки
                        #     раундов (кейс a real project #21).
                        # v7: диагноз провала effort-vs-capability перед ретраем
@@ -305,8 +308,14 @@ cross_provider:
   pilots:
     exit_after_records: 10           # порог решения по каждому будущему лейну
     not_on_pilot:
-      gemini-critic:      "incident #5 (2 sightings): bridge misfires on read-only review; до починки моста качество-несущая работа на gemini не маршрутизируется"
       gemini-recon-cheap: "scout t2 passed only via ask-gemini MCP inlined; bridge path unreliable — keep as fallback, not promoted"
+    # v9 (ре-тест 2026-07-12, benchmark/results/2026-07-12-gemini-retest): gemini-critic
+    # СНЯТ с not_on_pilot — прошлые 2/2 промаха были свойством транспорта, не модели
+    # (Gemini прошла задачи на обоих путях). Рабочий путь линзы — ask-gemini MCP, НО он
+    # Flash-locked в print-mode: заявлять «3.1 Pro-линзу» через него нельзя (pin only what
+    # connector exposes). Нативный agy honores модель, но не промотирован: требует ручных
+    # permission-подтверждений (не headless) + --sandbox → find / → контаминация соседа
+    # (живой инцидент #6, incidents.md). Проза — references/cross-provider.md, Use 1.
 
   # Что НЕ сдвигается мандатом никогда (качество — инвариант, квота — нет):
   never_shift:
