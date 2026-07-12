@@ -592,6 +592,12 @@ Then append one JSONL record per delegated ticket to the routing telemetry log �
 rubric from a priori doctrine into a calibrated one; skipping it on "small" sessions
 is how the data never accumulates. Include the token / tool-use figures from each Agent
 result's `usage` block in the record (quality.md §7).
+**Self-check each record before appending (v8):** canonical §7 field names and one of
+the seven verdict values only — an unusual outcome goes into `note` (`[was: …]` style),
+never into a new verdict spelling or an ad-hoc field. Drift is not cosmetic: the
+vocabulary pinned 2026-07-11 needed a full repair pass one day later, and every drifted
+record silently drops out of the gate-yield / escape-rate / proportionality-stop
+arithmetic that §3b and recalibration depend on.
 
 ## Large fan-outs (≥ 5 similar items)
 

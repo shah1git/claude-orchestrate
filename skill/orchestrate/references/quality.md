@@ -338,7 +338,11 @@ gate-yield (`FAIL_FIXED` / all gated) and the escape rate (`PASS_THEN_FAIL` +
 process-caused incidents / all accepted). Legacy note: records written before 2026-07-11
 used two field generations (`ts`/`subagent`/`outcome`/`notes`/`routed_to`); all were
 migrated to the canonical names on 2026-07-11, with each original verdict's payload
-preserved as a `[was: …]` suffix in `note`.
+preserved as a `[was: …]` suffix in `note`. A second repair pass (2026-07-12) normalized
+week-one drift written *after* the pinning — field aliases (`ts`/`subtask`/`role`/`run`/
+`tools`/`wall_s`/`reason`), 18 non-canonical verdict spellings, missing `provider` on
+cross-provider records — original verdicts again preserved as `[was: …]`; hence the
+SKILL.md Step 5 self-check-before-append rule.
 
 Optional cost fields — `tokens`, `tool_uses`, `duration_ms` — may be appended to any
 record. They are free: the harness reports them in each Agent result's `usage` block
