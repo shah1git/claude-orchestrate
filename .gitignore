@@ -1,2 +1,6 @@
 *.bak
 .DS_Store
+
+# Телеметрия и артефакты прогонов — держим локально, из публичного репо исключены (2026-07-13)
+skill/orchestrate/telemetry/
+benchmark/results/
