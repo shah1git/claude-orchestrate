@@ -485,6 +485,13 @@ plan around it:
    ② escalate the model tier (haiku→sonnet→opus→fable worker in a fresh
    context→handle it yourself) →
    ③ report the blocker to the user with evidence. Never loop more than twice.
+   **Diagnose before burning rung ①** (config `routing.escalation.failure_diagnosis`;
+   official model-vs-effort guidance, 2026-07-07): a failure of *effort* — skipped a
+   file, didn't run the tests, abandoned the refactor midway — earns the same-tier
+   retry, with the worker's effort raised if it was pinned below default; a failure of
+   *capability* — full context, honest attempt, confidently wrong — skips the retry
+   and escalates the tier directly, because a same-tier retry on a capability failure
+   is a wasted attempt by construction.
    The fable rung exists because "handle it yourself" is *not* a fresh look: by the
    time the ladder reaches you, your context carries every failed attempt. A worker
    spawned with `model: fable` gives lead-tier judgment *plus* fresh-context
