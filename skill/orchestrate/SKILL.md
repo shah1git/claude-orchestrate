@@ -402,6 +402,16 @@ plan around it:
   `danger-full-access`. Capture its diff from disk (`git diff`), not its self-report, and
   gate it exactly like a Claude builder's diff — deterministic pre-checks then a *non-Codex*
   critic (producer ≠ grader).
+- **Stale-base guard before a write wave (config `fan_out.stale_base_max_behind`).**
+  Before dispatching builders into a checkout or spawning `isolation: "worktree"`
+  workers, probe how far the base is behind its tracking branch (`git fetch -q &&
+  git rev-list --count HEAD..origin/<base>`); beyond the threshold, refresh the base
+  first (rebase, or recreate the worktree), then dispatch. Overriding the guard is a
+  named lead decision logged in telemetry, never silent. When dispatching against
+  *known* small drift, list the missed commit subjects in the ticket's INPUTS so the
+  worker sees the drift from line 1 instead of discovering it via stale line numbers.
+  (Adopted 2026-07-12 from Orca's orchestration layer — its dispatch pre-flight does
+  exactly this, deterministically, without burning retry budget.)
 - **Re-validate a pre-written spec against reality before dispatch.** If you drafted a
   ticket's spec ahead of time — while an earlier ticket in the chain was still running — a
   spec written against an *assumed* end-state can be stale by the time its turn comes.
@@ -479,6 +489,13 @@ plan around it:
    time the ladder reaches you, your context carries every failed attempt. A worker
    spawned with `model: fable` gives lead-tier judgment *plus* fresh-context
    independence; you are the integration fallback, not the second opinion.
+   **Attempt-scoped reports.** Each rung of the ladder is a new *attempt* with its own
+   identity; accept a ticket's report only from the attempt that is currently live. A
+   late report from a superseded attempt — the first worker finally answering after
+   its retry was already dispatched — is discarded unread: grading it would let a
+   stale result complete a newer dispatch. The team channel applies the same rule per
+   wave. (Adopted 2026-07-12 from Orca's dispatch-scoped `worker_done` authority,
+   which rejects completions carrying a stale dispatch identity.)
 5. **Evidence over assertion.** A worker's "done" claim counts only when backed by tool
    output you can see (test run, command output, quoted source). Unverified claims are
    treated as not done.
