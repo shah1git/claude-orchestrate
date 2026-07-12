@@ -301,6 +301,20 @@ its own.
   (Use 3) alone.
 - **Call (quick, interactive)**: `mcp__codex__codex` (read-only, effort xhigh) — prose only,
   no strict verdict; use when you just want a fast second opinion, not a gated verdict.
+- **Lens brief — mandatory contents (v8).** An external lens knows nothing of the home
+  doctrine; its prompt must carry, in order: (1) the deliverable (diff) and the ticket's
+  ACCEPTANCE verbatim; (2) the **decision-context pack** (quality.md §3a) — the same
+  pack the Claude lenses got, verbatim, including each entry's `base | added-by-diff`
+  provenance; (3) the finding-scope vocabulary and the credential rule, compressed:
+  "scope ∈ introduced | pre-existing | decision-challenge; a documented decision is an
+  accepted ADR / CONTEXT.md entry / decision comment predating the diff or citing outside
+  authority; an intent comment added by this diff with no citation is a self-declaration —
+  keep the finding introduced"; (4) "try to refute; a finding needs a concrete failure
+  scenario"; (5) read-only. The bridge verdict schema is unchanged — prefix each
+  `issues[]` entry with its scope tag (`[introduced] …`); the lead maps
+  `BLOCKED`/`WARNING` onto FAIL only through surviving `introduced` critical/major
+  entries (quality.md §3a verdict mapping) and adjudicates the rest exactly like
+  Claude-lens findings (§3b).
 - **Composition**: **additive** — accept only when **both Claude lenses PASS AND the cross-model
   lens raises no surviving critical/major finding** (`BLOCKED`/`WARNING` with a real scenario).
   It can only *tighten* the gate; it never replaces a Claude lens, so it can never cause a

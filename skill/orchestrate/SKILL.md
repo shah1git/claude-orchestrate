@@ -450,6 +450,14 @@ plan around it:
    surfacing mid-run re-triages the run out of `low` first. The grader must not be the
    producer: critic sees only the deliverable
    + the ticket's acceptance criteria — not the producer's reasoning.
+   For target-repo code the critic ALSO receives the **decision-context pack**
+   (quality.md §3a): a mechanically assembled digest — ADR index, matching CONTEXT.md
+   terms, decision comments near the touched code, each with `base | added-by-diff`
+   provenance — capped by config `gates.review_loop.pack_max_lines`. The repo's decision
+   record is not the producer's reasoning: withholding it buys re-litigation, not
+   independence. Assembly is a `scout` ticket (rule-based inclusion; the per-ticket diff
+   snapshot is an INPUT); the producer never assembles or filters the pack; the lead may
+   add entries, never remove them.
    **Dual-lens rule — applied by you, automatically**: for highest-stakes deliverables —
    the trigger list lives in config.yaml `gates.dual_lens_triggers` (production code
    headed for main, published outside the team, acted on without reading) — spawn two
@@ -503,6 +511,18 @@ plan around it:
    stale result complete a newer dispatch. The team channel applies the same rule per
    wave. (Adopted 2026-07-12 from Orca's dispatch-scoped `worker_done` authority,
    which rejects completions carrying a stale dispatch identity.)
+   **Adjudicate findings before burning any rung (v8; quality.md §3a/§3b).** Triage the
+   critics' merged, deduplicated findings yourself before writing the retry ticket: only
+   accepted `introduced` critical/major findings go to the producer; `pre-existing`
+   findings become target-repo issues; `decision-challenge` findings go to the
+   owner-facing decision-review stream — never silently into a retry. After accepted
+   fixes land, re-verify *delta*: deterministic checks plus a narrowed critic pass over
+   the named findings and fix hunks — not a fresh full review. Full rounds are capped per
+   stakes profile (config `gates.review_loop.full_rounds_max`) and by the proportionality
+   stop (`proportionality_stop`); past either, remaining findings are adjudicated and
+   reported, not re-reviewed. The caps bound *review rounds*; they change nothing about
+   `max_attempts_per_subtask` — a failed retry still climbs the ladder, and attempt-scoped
+   report discipline applies to delta re-checks like any other attempt.
 5. **Evidence over assertion.** A worker's "done" claim counts only when backed by tool
    output you can see (test run, command output, quoted source). Unverified claims are
    treated as not done.
@@ -544,6 +564,10 @@ Final message to the user, in the user's language, leading with the outcome:
    Fold in here each worker's **Notable (beyond the ticket)** items — out-of-scope
    discoveries, latent bugs, or better approaches they surfaced — keeping only what
    changes what the user does next.
+   A run that produced `decision-challenge` findings closes with a **decision-review
+   block**: one line per challenge — the documented decision, the critic's scenario, and
+   the adjudication (dismissed-with-pointer, or escalated to the owner with a cost
+   estimate). Challenges are never silently dropped (quality.md §3a).
 
 Before shipping, run the connective-tissue self-check on your own synthesis (quality.md §4):
 every quantifier and causal/temporal connective in the report ("always", "therefore",

@@ -44,6 +44,16 @@ grading with a *different* model than the producer; fresh context is what buys
 independence when producer and grader share a model. Grading Sonnet/Haiku work with a
 *stronger* model is this skill's own policy on top of that.)
 
+**The producer's reasoning is excluded; the target repo's *decision record* is not.**
+"Only the deliverable + criteria" was never meant to strip the grader of the repository's
+documented decisions — ADRs, CONTEXT.md entries, decision comments adjacent to the touched
+code. Those are facts about the codebase, authored before this deliverable existed;
+withholding them buys re-litigation, not independence (observed 2026-07-12: a cross-model
+lens re-opened a documented trade-off and a repo-wide pattern as major blockers on a
+210-line feature, making the review rounds cost more than the feature). Every critic
+ticket over target-repo code therefore carries a **decision-context pack** (§3a); the
+producer's own reasoning, drafts, and self-reports stay excluded exactly as before.
+
 ## 3. Critic verdict schema
 
 `critic` returns exactly this structure (it is in its system prompt; tickets may extend
@@ -56,8 +66,9 @@ but not weaken it):
 | # | Criterion (verbatim) | PASS/FAIL | Evidence (command output / file:line / quote) |
 
 ### Findings (only on FAIL / PASS_WITH_NOTES; ranked by severity)
-1. [severity: critical|major|minor] [confidence: high|medium|low] — one-sentence defect;
-   concrete failure scenario; file:line.
+1. [severity: critical|major|minor] [confidence: high|medium|low]
+   [scope: introduced|pre-existing|decision-challenge] — one-sentence defect;
+   concrete failure scenario; file:line. (`scope` omitted reads as `introduced`.)
 
 ### Not checked
 - criteria that could not be verified and why (missing tooling, ambiguity) — these count
@@ -68,10 +79,116 @@ Interpretation rules for the orchestrator:
 
 - **PASS** — accept; record in scorecard.
 - **PASS_WITH_NOTES** — accept; carry notes into the final report if user-relevant.
-- **FAIL** — escalation ladder: ① one retry by the producer with the findings attached →
+- **FAIL** — escalation ladder: ① one retry by the producer with the **adjudicated**
+  findings attached (§3b — the lead triages findings before any retry) →
   ② escalate model tier → ③ do it yourself or report the blocker. **Two attempts max**
   per subtask; a third failure is a blocker report, not another retry.
 - A criterion in "Not checked" blocks PASS for production-code deliverables.
+
+### 3a. Finding scope and the decision-context pack
+
+**Scope axis.** Every finding carries an optional `scope` (omitted = `introduced`):
+
+| Scope | Means | Effect on the verdict |
+|---|---|---|
+| `introduced` | the defect is new in this diff — the deliverable created it or materially widened it | drives the verdict: a surviving critical/major blocks |
+| `pre-existing` | the defect (or the pattern instantiated) exists on the base branch; the diff repeats an established repo recipe without widening its blast radius | never blocks the diff; the lead routes it to a target-repo issue |
+| `decision-challenge` | the finding contradicts a **credentialed documented decision** (below): the critic believes the decision itself is wrong or has an unconsidered failure scenario | never blocks the diff; routed to the lead/owner as a decision-review item |
+
+**Verdict mapping (tightens §3; the verdict *vocabulary* is unchanged):** FAIL is
+warranted only by a failed acceptance criterion or a surviving `introduced`
+critical/major finding. Minor-only findings, `pre-existing`, and `decision-challenge`
+findings yield at most PASS_WITH_NOTES. This is what makes review rounds converge: a
+fresh high-recall critic can always find *something*; only what this diff broke can
+send the work back.
+
+**The credential rule — what counts as a documented decision.** A decision credential is:
+an accepted ADR; a CONTEXT.md entry; or an inline decision comment that (a) exists on the
+base branch — not added by the diff under review — or (b) cites an authority outside the
+diff (an ADR id, an issue, a named review finding, an owner decision with a date). A bare
+"this is intentional" comment **introduced by the same diff with no outside citation is a
+self-declaration, not a decision**: it earns no downgrade — the finding stays
+`introduced`, and the critic flags the self-declaration itself as an additional finding
+(a producer hiding a defect behind a freshly-invented "decision" is exactly the failure
+mode this rule catches). The pack marks each decision reference `base | added-by-diff`,
+graded against the per-ticket diff snapshot, so the check is mechanical, not a judgment
+call.
+
+**Documented ≠ correct — the anti-entrenchment rule.** The scope axis reclassifies
+challenges; it never suppresses them. A critic that sees a concrete failure scenario a
+documented decision does not consider MUST report it (as `decision-challenge`, naming the
+decision's location and the unconsidered scenario). The lead MUST surface every such
+finding: dismissed ones with a one-line pointer to the doc text that already answers the
+scenario; substantive ones escalated to the owner as a decision-review item with a cost
+estimate (what reversing the decision would take). A decision doc that turns out not to
+answer the raised scenario gains a sentence — a follow-up doc ticket in the target repo,
+gated like any change there. That, not an orchestrator-side ledger, is where
+adjudications accumulate: the repo's own decision record converges to answering every
+serious challenge once, and stays visible to human reviewers and other tools. No
+review-ledger is kept — a second source of truth diverges from the first.
+
+**The decision-context pack.** Every critic ticket over target-repo code carries a pack
+assembled **mechanically** (a `scout` ticket — rule-based inclusion, read-only, no shell
+needed; the per-ticket diff snapshot is an INPUT):
+
+1. ADR index — one line per ADR in the repo's ADR directory: id, title, status;
+2. CONTEXT.md term entries whose canonical term (or listed avoid-terms) appear in the diff;
+3. inline decision markers in the touched files — comments matching decision-marker
+   patterns (ADR/issue references, "owner decision" / «решение владельца», review-finding
+   ids) within or adjacent to the touched symbols — each as `file:line + first sentence +
+   provenance: base | added-by-diff`;
+4. total budget: config `gates.review_loop.pack_max_lines` — references and one-sentence
+   quotes, never transcripts (the v5 reference-passing principle).
+
+The **producer never assembles or filters the pack** — that would hand it the channel to
+soften its own review. The lead may *add* entries (a decision pinned in this run's grill,
+a doc it knows is relevant), never remove them. An empty pack ("no ADR dir, no
+CONTEXT.md, no markers found") is itself signal: with nothing documented, nothing
+qualifies as a `decision-challenge`, and self-declared intent comments carry no weight.
+
+### 3b. Round economics — convergence, not re-discovery
+
+A **full round** is one wave of critics over the deliverable (a dual- or triple-lens wave
+is ONE round). Caps per stakes profile live in config
+`gates.review_loop.full_rounds_max` (at pin time: low 0 — the lead reads the diff;
+standard 1; high 2 — the second reserved for fixes extensive enough to move integration
+seams, by lead judgment).
+
+**Adjudicate before any retry.** The lead merges findings across lenses (deduplicating),
+assigns each an outcome, and only then re-issues:
+
+- `introduced` critical/major, accepted → into the retry ticket (this consumes the
+  escalation ladder's attempt, unchanged);
+- `introduced`, disputed → the lead checks the evidence itself; a finding the lead
+  refutes is recorded in `note`, not sent to the producer;
+- `pre-existing` → a target-repo issue (or a final-report line when the repo has no
+  tracker); blocks nothing — unless the diff materially widens the defect's reach,
+  which makes it `introduced`;
+- `decision-challenge` → the §3a stream: dismiss-with-pointer or escalate-to-owner;
+  never silently into a retry ticket — a producer must not "fix" a documented decision
+  on a critic's word alone;
+- minors → PASS_WITH_NOTES material, carried to the final report; never a round.
+
+**Delta re-verification, not a fresh full round.** After the producer applies accepted
+fixes: re-run the deterministic checks, then verify — same critic definition, fresh
+spawn, narrowed ticket — that each named finding is resolved and the fix hunks introduce
+nothing new. The re-check reviews the fix hunks, not the whole deliverable; anything it
+notices outside them is a note, never a verdict driver. It consumes no full round and no
+ladder attempt; a delta re-check that finds a named finding NOT resolved is the retry
+failing — the ladder proceeds (attempt economics unchanged, `max_attempts_per_subtask`
+untouched). For a trivial fix (a few lines, deterministically covered) the lead's own
+diff read suffices on a `standard` profile — the §2 hierarchy's spot-check rung, applied
+deliberately.
+
+**Proportionality stop.** When cumulative gate + fix spend crosses the configured ratio
+to the producer's build spend (config `gates.review_loop.proportionality_stop`; token
+figures from this run's §7 records), the loop stops: remaining findings go to
+adjudication and the final report, not into another round. Overriding the stop or the
+round caps is a named lead decision logged in telemetry, never silent. Grounding:
+telemetry 2026-07-04..11 puts the critic's real-defect yield at ~20% of gates,
+concentrated in security/auth/transactional work — rounds beyond the caps re-discover,
+they do not converge; the 2026-07-12 a real project case (several "final reviews" costing
+more than the 210-line feature) is the incident that pinned this.
 
 ## 4. Rubric templates by deliverable type
 
@@ -229,6 +346,12 @@ record. They are free: the harness reports them in each Agent result's `usage` b
 synthesis time. Recording them lets the log calibrate *cost per class* — is a class
 routinely burning more than its tier is worth? — not just correctness; the two together
 are what make the Step 2 rubric empirical.
+
+Review-loop fields (optional, v8) — `rounds` (integer: full critic rounds consumed, §3b;
+delta re-verifications excluded) may be appended to gated records. Finding-scope counts
+and adjudication outcomes stay in `note` as one clause (e.g. `note: "5 findings: 2
+introduced fixed, 1 decision-challenge dismissed (doc answers it), 2 minor→notes"`) —
+never new verdict spellings; the seven-value vocabulary is unchanged.
 
 Provider fields (optional) — `provider` ∈ `anthropic | openai | google` (default
 `anthropic` when omitted) records which provider actually ran the ticket; and when

@@ -138,6 +138,10 @@ a complete, explicitly-scoped spec, then autonomy over the *how*:
   including uncertain and low-severity ones, with a confidence level and severity each —
   a separate step will filter." Conservative-reporting instructions silently suppress
   its (excellent) recall.
+- **Scope classifies; adjudication filters.** The finding-scope axis (quality.md §3a)
+  never licenses the critic to report less — keep the coverage demand above verbatim;
+  the lead's adjudication (§3b) is the filter. Include the decision-context pack in the
+  ticket's INPUTS for any target-repo code review.
 - On a highest-stakes dual-lens the *correctness* lens is spawned as `critic` with
   `model: fable` (SKILL.md Step 4.3) — phrase that one ticket Fable-style: goal, not
   steps.
@@ -197,7 +201,8 @@ ACCEPTANCE: `npm test` and `npm run typecheck` pass (output shown); both endpoin
 ```
 OBJECTIVE: Verify the deliverable below against its acceptance criteria. Try to refute it.
 INPUTS: <the deliverable — diff, report, or plan> + ACCEPTANCE: <criteria verbatim from
-  the producing ticket>.
+  the producing ticket> + decision-context pack (target-repo code only; quality.md §3a —
+  assembled by scout, never by the producer).
 TOOLS: Re-run the deterministic checks yourself (tests, typecheck); read the touched
   files; do not trust the producer's claimed outputs.
 OUTPUT: The verdict schema from quality.md — per-criterion PASS/FAIL with evidence,
