@@ -44,6 +44,25 @@ never a silent switch to an API key. A metered API key is a deliberate, owner-ap
 exception with its reason logged. Future connectors (e.g., Grok Build CLI) attach by the
 same rule: subscription OAuth surface first.
 
+**Vendor policy map — subscription OAuth in third-party harnesses (verified 2026-07-12;
+recheck on any auth incident):**
+
+| Vendor | Third-party use of subscription OAuth | Enforcement |
+|---|---|---|
+| Anthropic | forbidden (legal-and-compliance page, explicit) | billing cutoff since 2026-04; account disabling since 2026-01 |
+| OpenAI | **explicitly allowed** — CEO and the Codex eng-lead publicly endorsed ChatGPT-plan OAuth in third-party harnesses (2026-02/05) | no documented bans |
+| Google | forbidden (Gemini CLI ToS, names third-party tools verbatim) | mass account bans 2026-02-27 (paid Ultra included); automated detection since 2026-03-18 |
+
+The architectural line that keeps our lanes on the safe side of this map: we **spawn the
+vendor's official CLI as a subprocess** — every backend call is made by the vendor's own
+client, headless modes are documented features. That is categorically different from what
+banned tools do: extract the OAuth token and impersonate the official client from
+third-party code. Keep it that way — a lane that would call a vendor backend directly
+with a subscription token is a stop-and-ask decision, never an implementation detail.
+Residual gray zone for Google: their detection has produced false positives — an
+unexplained Google-account restriction on this machine is a possible detection misfire;
+surface it to the owner immediately.
+
 ## Two surfaces — pick by what you need back
 
 A cross-provider "worker" is **the lead invoking an external CLI from the main loop** (only
