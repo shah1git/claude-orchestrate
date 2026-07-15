@@ -46,7 +46,7 @@ defect: the isolated worker cannot tell your uncertainty from a requirement.
 
 ## Per-model phrasing cheat-sheet
 
-> **Verified for: Fable 5 (lead · architect · highest-stakes correctness lens) ·
+> **Verified for: Fable 5 (lead · architect · final escalation rung) ·
 > Opus 4.8 · Sonnet 5 · Haiku 4.5** — checked 2026-07-08. The agents' frontmatter binds
 > each worker via a floating alias (`fable`, `opus`, `sonnet`, `haiku`), which always
 > resolves to the newest generation of its family — a
@@ -102,6 +102,12 @@ instruction from one item to another, nor infer requests you didn't make:
   first one you edit."
 - **Full spec in the first message.** Progressive drip-feeding of requirements measurably
   degrades token efficiency and results; the ticket must be complete.
+- **When the ticket implements business logic against a spec, name the pre-agreed seams
+  and prescribe `/tdd` on them.** Carry the seams straight from the spec — never let the
+  builder pick its own. Say it explicitly: "Implement via the `tdd` skill (Skill tool) on
+  these seams: <list>. Red before green, one seam at a time; typecheck regularly, run the
+  full suite once at the end." Mechanical tickets (docs, config, pure refactors) don't
+  need this — it's for new or changed behavior only.
 - It is *more* agentic than earlier Sonnets — it will run self-verification loops and
   reach for tools readily. Channel that: "run the test suite yourself and include the
   output" is cheap to ask and high-value.
@@ -142,9 +148,12 @@ a complete, explicitly-scoped spec, then autonomy over the *how*:
   never licenses the critic to report less — keep the coverage demand above verbatim;
   the lead's adjudication (§3b) is the filter. Include the decision-context pack in the
   ticket's INPUTS for any target-repo code review.
-- On a highest-stakes dual-lens the *correctness* lens is spawned as `critic` with
-  `model: fable` (SKILL.md Step 4.3) — phrase that one ticket Fable-style: goal, not
-  steps.
+- Fable's only appearance in the critic role is the **final escalation rung**: if `critic`
+  still fails at Opus, the last ladder step (`routing.escalation.tiers`,
+  `routing.overrides.fable_ceiling_uses`) respawns it with `model: fable` — not a standing
+  dual-lens gate (that mechanism no longer exists, ADR-0002; the gate's non-Claude angle is
+  the Standards lens, cross-provider.md Use 1). Phrase that one ticket Fable-style: goal, not
+  steps, same as the architect section above.
 
 ## Worked examples
 
@@ -183,8 +192,13 @@ CONTEXT: Part of the hardening pass the user requested; architect's plan is auth
   reporting.
 INPUTS: Plan: <paste architect's relevant section verbatim>. Files: src/api/routes.ts,
   src/middleware/. Existing middleware pattern to imitate: src/middleware/auth.ts.
-TOOLS: Read the files named above before editing. Run `npm test` and `npm run typecheck`
-  yourself before finishing and include the output.
+  Pre-agreed seams (from the spec): the `POST /orders` handler and the
+  `POST /orders/:id/cancel` handler — test each through its HTTP boundary, not the
+  internal rate-limit counter.
+TOOLS: Read the files named above before editing. Implement via the `tdd` skill (Skill
+  tool) on the seams listed above — red before green, one seam at a time. Typecheck
+  regularly as you go, after each seam (`npm run typecheck`); run the full suite once, at
+  the end (`npm test`), and include the verbatim output.
 OUTPUT: Edited code + a summary listing each file changed and why, plus the verbatim tail
   of the test run.
 BOUNDARIES: Apply to BOTH endpoints (this instruction covers every endpoint listed, not

@@ -148,11 +148,13 @@ qualifies as a `decision-challenge`, and self-declared intent comments carry no 
 
 ### 3b. Round economics — convergence, not re-discovery
 
-A **full round** is one wave of critics over the deliverable (a dual- or triple-lens wave
-is ONE round). Caps per stakes profile live in config
-`gates.review_loop.full_rounds_max` (at pin time: low 0 — the lead reads the diff;
-standard 1; high 2 — the second reserved for fixes extensive enough to move integration
-seams, by lead judgment).
+A **full round** is one wave over the deliverable — the fixed three-lens gate (SKILL.md
+Step 4.3) running Standards, Spec, and critic in parallel counts as ONE round, not three.
+The cap is a flat ceiling in config `gates.review_loop.full_rounds_max`: since v11 it no
+longer varies by profile — verification depth does not scale by any axis (ADR-0002); the
+v8 per-profile keying it replaced is retired along with the profile axis itself (slice 3,
+issue #7). Any round beyond the first stays reserved, by lead judgment, for fixes
+extensive enough to move integration seams.
 
 **Adjudicate before any retry.** The lead merges findings across lenses (deduplicating),
 assigns each an outcome, and only then re-issues:
@@ -303,20 +305,22 @@ is data, not doctrine — read it for recalibration, never load it into a ticket
 One JSON object per line:
 
 ```json
-{"date": "2026-07-04", "task": "de-version model labels", "ticket": "verify:v1.5",
- "class": "judgment", "agent": "critic", "model": "opus",
+{"date": "2026-07-15", "task": "config v10 shape axis", "ticket": "config-v10",
+ "class": "judgment", "agent": "critic", "model": "opus", "shape": "разбирательство",
  "first_try": true, "retries": 0, "escalated_to": null, "verdict": "PASS", "note": "",
- "config": "v1+a1b2c3d", "tokens": 54154, "tool_uses": 8}
+ "config": "v10+a1b2c3d", "tokens": 54154, "tool_uses": 8}
 ```
 
 Field rules: `class` ∈ `judgment | skilled | mechanical` (the Step 2 classes); `agent`
 is the agent type actually used (`architect | builder | scout | critic`), with `model`
 recording the effective model (differs from the frontmatter alias family only on an
-explicit override); `retries` counts ticket re-issues after any failure — deterministic
-pre-gate FAILs, critic FAILs, and NEEDS_CLARIFICATION re-issues alike; `first_try` is
-simply `retries == 0`; `escalated_to` names the tier that ultimately passed, `null` if
-none; `verdict` is the final verdict after all attempts; `note` is one short clause,
-filled only when it explains a FAIL, retry, or escalation.
+explicit override); `shape` ∈ `сборка | разбирательство` (config.yaml `shape`, ADR-0002,
+spec #4) — the run-level fork the lead assigned at Step 0 triage, the same value on every
+delegated-ticket record of that run; `retries` counts ticket re-issues after any failure —
+deterministic pre-gate FAILs, critic FAILs, and NEEDS_CLARIFICATION re-issues alike;
+`first_try` is simply `retries == 0`; `escalated_to` names the tier that ultimately
+passed, `null` if none; `verdict` is the final verdict after all attempts; `note` is one
+short clause, filled only when it explains a FAIL, retry, or escalation.
 
 **Canonical `verdict` vocabulary** (pinned 2026-07-11, after the free-text field drifted
 into 27 spellings in one week and the first analysis pass had to normalize them by
@@ -380,6 +384,14 @@ first sight of a new fingerprint the lead copies the file to
 config bytes that routed it — even outside git history. Records before 2026-07-11
 predate the config and legitimately omit the field. This is what lets recalibration
 (below) separate "the rubric misroutes" from "the rubric changed mid-sample".
+
+Shape field — every record carries `shape` ∈ `сборка | разбирательство` (config.yaml
+`shape`; ADR-0002, spec #4): the fork the lead assigned this run at Step 0 triage, stamped
+on every delegated-ticket record the run produces — the same provenance pattern as
+`config`, and read alongside it (a `shape` value is only meaningful together with the
+`config` fingerprint that defined it). Records before 2026-07-15 predate the axis (v9 and
+earlier scaled gate depth by the now-retired profile axis instead) and legitimately omit
+the field.
 
 Channel field (optional) — `channel` ∈ `oneshot | workflow | team` (default `oneshot`
 when omitted; every existing record predates the field and is read as `oneshot` —

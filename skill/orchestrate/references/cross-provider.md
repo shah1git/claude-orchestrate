@@ -96,9 +96,9 @@ for recon, wrong for a Pro-tier critic.
 > an `ast` evaluator) instead of returning a findings list — no gradeable verdict. This repeats
 > the earlier routing-log `MISFIRE(committed instead of review)`. Both are contract failures,
 > not model-quality failures (it detected the defect while "fixing" it). Rule of thumb:
-> - **Cross-model third lens → prefer `codex-critic` (Sol)** over `gemini-critic` when the only
->   Gemini path is the bridge; Sol returned a clean read-only findings list (8/8) under
->   `sandbox: read-only` with no violations.
+> - **Cross-model lens (the Standards axis since v11/ADR-0002) → prefer `codex-critic` (Sol)**
+>   over `gemini-critic` when the only Gemini path is the bridge; Sol returned a clean read-only
+>   findings list (8/8) under `sandbox: read-only` with no violations.
 > - **When Gemini is the right lens anyway** (its distinct angle is wanted), reach it via the
 >   **`ask-gemini` MCP with material inlined in the prompt**, not the bridge — that path did
 >   honour a read-only extraction task (scout t2, 17/17). Accept its Flash-in-print model lock.
@@ -121,8 +121,9 @@ for recon, wrong for a Pro-tier critic.
 >   thereby answered a *neighbour* workspace's ticket and wrote+committed into its directory (a live
 >   incident #6 "poisoned neighbour"; telemetry/incidents.md). Do not promote native agy as a lane
 >   until each staged workspace is structurally isolated and the agent is pre-trusted.
-> So `gemini-critic` is a usable opt-in third lens again **via `ask-gemini` MCP, at Flash tier**;
-> `codex-critic` (Sol) stays the *preferred* third lens on quality (8/8, 0 FP, honours its Pro pin).
+> So `gemini-critic` is a usable Standards-axis fallback again **via `ask-gemini` MCP, at Flash
+> tier** (`availability.fallbacks.standards-lens`); `codex-critic` (Sol) stays the *preferred*
+> route on quality (8/8, 0 FP, honours its Pro pin) — it is `cross_provider.defaults.standards_lens`.
 
 > **File access — bridge v2 gives Gemini a repo too, via a copy, not a permission.** Bridge
 > `--tool codex` (`codex exec`) is an *agent* that reads files in its `cwd` sandbox itself —
@@ -148,10 +149,10 @@ the Claude default it degrades to when no surface is present.
 
 | Capability | Use | Bridge (structured) | MCP (interactive) | Degrades to |
 |---|---|---|---|---|
-| `codex-critic` | cross-model lens | `--tool codex --model gpt-5.6-sol --effort xhigh --schema <verdict> --sandbox read-only --cwd <repo>` | `mcp__codex__codex` (read-only) | Claude dual-lens |
+| `codex-critic` | cross-model lens — the Standards axis's default route (`cross_provider.defaults.standards_lens`, fixed gate member, not opt-in) | `--tool codex --model gpt-5.6-sol --effort xhigh --schema <verdict> --sandbox read-only --cwd <repo>` | `mcp__codex__codex` (read-only) | `standards-lens` fallback chain → `sonnet-inline-note` |
 | `codex-code` | coding hand | `--tool codex --model gpt-5.6-terra --effort high --sandbox workspace-write --cwd <worktree>` | `mcp__codex__codex` (workspace-write) | `builder` (Sonnet) |
 | `codex-recon` | cheap repo-grounded recon with shell | `--tool codex --model gpt-5.6-luna --effort medium --sandbox read-only --cwd <repo>` | `mcp__codex__codex` (read-only) | `scout` (file-only) / `builder` (needs shell) |
-| `gemini-critic` | cross-model lens (alt) — ⚠ bridge unreliable for review (incident #5); prefer `codex-critic`, or `ask-gemini` MCP inlined | `--tool gemini --model "Gemini 3.1 Pro (High)"` | `mcp__gemini-cli__ask-gemini` (Flash-only in print) | Claude dual-lens |
+| `gemini-critic` | cross-model lens (alt) — the Standards axis's first fallback when `codex-critic` is unavailable; ⚠ bridge unreliable for review (incident #5), prefer `codex-critic`, or `ask-gemini` MCP inlined | `--tool gemini --model "Gemini 3.1 Pro (High)"` | `mcp__gemini-cli__ask-gemini` (Flash-only in print) | `standards-lens` fallback chain → `sonnet-inline-note` |
 | `gemini-recon` | big-context recon | `--tool gemini --model "Gemini 3.5 Flash (High)"` | `mcp__gemini-cli__ask-gemini` | `scout` (Haiku) |
 | `gemini-recon-cheap` | high-volume mechanical recon | `--tool gemini --model "Gemini 3.5 Flash (Low)"` | `mcp__gemini-cli__ask-gemini` | `scout` (Haiku) |
 
@@ -282,9 +283,10 @@ pool of detected surfaces. Two standing values drive that judgment:
 
 1. **Additional analytical angle** — an uncorrelated model whose blind spots don't overlap
    Claude's (avoids self-preference bias — ADR-0001; the user independently holds this
-   view, and the ADR's evidence supports it). Flagship shape: the cross-model lens on
-   dual-lens deliverables — **opt-in by lead judgment since config v3** (owner decision
-   2026-07-12; formerly default-on). → Use 1.
+   view, and the ADR's evidence supports it). Flagship shape: the cross-model lens is now
+   the **Standards axis of the fixed three-lens gate** — permanent, not opt-in (ADR-0002 /
+   config v11–v12; formerly an opt-in third lens bolted onto a dual-lens gate, v3–v10). →
+   Use 1.
 2. **Quota-spread** — orchestration load belongs on all the user's subscriptions (Claude,
    ChatGPT/Codex, Google), not on Claude alone. Baseline allocation: the default-lane
    table. → Use 4.
@@ -294,52 +296,125 @@ them when judgment says so, logging the reason (`lead-judgment`). Judgment route
 *providers*, never *quality*: the class→tier quality bar (SKILL.md Step 2), the never-shift
 invariants (Use 4), and the composition/gating rules are not overridable by this mandate.
 
-## Use 1 — cross-model critic lens (read-only, additive THIRD lens)
+## Use 1 — Standards lens: the fixed gate's permanent cross-model angle
 
-For a dual-lens-trigger deliverable (SKILL.md Step 4.3), add ONE cross-model critic as a
-**third** lens on the same deliverable + acceptance criteria. Since config v3 (owner
-decision 2026-07-12; formerly default-on) this lens is **opt-in by lead judgment**: invoke
-it when the independent angle is worth one round-trip — the lens sits on the critical path
-of every highest-stakes gate. When invoked, prefer `codex-critic` (polygon: 8/8 planted
-defects, 0 FP, honours its Sol-xhigh pin); `gemini-critic` is a usable alternate again after
-the 2026-07-12 two-transport re-test (the 2026-07-11 2/2 misfires were transport-, not
-model-caused), but only via the `ask-gemini` MCP path and only at Flash tier — that surface
-is Flash-locked in print mode, so it cannot deliver a Pro-tier Gemini lens (see the Update
-2026-07-12 note above). Neither invoking nor omitting the third lens needs a note in the
-final report; the two-Claude-lens gate is complete on its own.
+Every gated deliverable runs the fixed three-lens gate (`gates.lenses`, ADR-0002): Standards,
+Spec, критик (SKILL.md Step 4). The Standards lens's whole point is a **non-Claude executor**
+closing the self-preference-bias gap (CONTEXT.md, term "Self-preference bias") — since
+config v11–v12 this is a **permanent member of the gate**, not an opt-in extra bolted onto a
+dual-lens gate (that mechanism, v3–v10, no longer exists). `cross_provider.defaults.
+standards_lens: codex-critic` is the default route; `availability.fallbacks.standards-lens:
+[codex-critic, gemini-critic, sonnet-inline-note]` is its dedicated fallback chain
+(config.yaml). Prefer `codex-critic` (polygon: 8/8 planted defects, 0 FP, honours its
+Sol-xhigh pin) as the primary; `gemini-critic` is a usable stand-in after the 2026-07-12
+two-transport re-test (the 2026-07-11 2/2 misfires were transport-, not model-caused), but
+only via the `ask-gemini` MCP path and only at Flash tier — that surface is Flash-locked in
+print mode, so it cannot deliver a Pro-tier Gemini lens (see the Update 2026-07-12 note
+above). The chain's terminal is **not a skip**: `skip-third-lens` (the generic `codex-critic`/
+`gemini-critic` lane chains above) doesn't apply to this axis, because a gate-fixed lens
+cannot be dropped from the gate. `sonnet-inline-note` — when both external surfaces are
+unavailable, the lead executes the Standards question itself with a Claude model (`sonnet`)
+inline in the main loop, and notes the reroute in one line of the final report. Every call of
+this axis stamps `xprovider_reason: independent-lens` in telemetry (quality.md §7) — the
+standing label for mandate value 1 above, distinct from `context-size`/`quota-spread`/
+`lead-judgment`.
 
-- **Call (structured, preferred)**: `node /opt/tools/agent-bridge/run-external-agent.mjs
-  --tool codex --model gpt-5.6-sol --effort xhigh --schema <verdict.json> --sandbox read-only
-  --cwd <repo>`, prompt on **stdin** =
-  the deliverable + the ticket's ACCEPTANCE verbatim + "try to refute; a finding needs a
-  concrete failure scenario." Verdict schema = **the bridge's machine-checkable shape**
-  (`status ∈ APPROVED|WARNING|BLOCKED`, `summary`, `issues[]`; see the agent-bridge README) —
-  this is *distinct* from our critic's prose PASS/FAIL verdict (quality.md §3); the lead maps
-  `BLOCKED`/`WARNING`-with-a-real-scenario onto a FAIL. For a Gemini lens use `--tool gemini
-  --model "Gemini 3.1 Pro (High)"` (schema is best-effort in-prompt; check `ok`). Read the
-  parsed `output`. **`--resume` is forbidden here**: a critic's context must be fresh-by-
-  construction (producer≠grader depends on it), and `--resume` is reserved for the coding hand
-  (Use 3) alone.
+### Smell baseline — delivered in the prompt, every call
+
+The lane has no filesystem access to the `code-review` skill (or any skill file) — so the
+Standards lens's prompt must carry the full smell baseline below on **every** invocation, not
+a reference to it. Source: the `code-review` skill (Matt Pocock skills,
+`engineering/code-review`), which in turn cites Martin Fowler, *Refactoring*, ch. 3.
+
+Each smell reads *what it is* → *how to fix*; match it against the diff:
+
+- **Mysterious Name** — a function, variable, or type whose name doesn't reveal what it does
+  or holds. → rename it; if no honest name comes, the design's murky.
+- **Duplicated Code** — the same logic shape appears in more than one hunk or file in the
+  change. → extract the shared shape, call it from both.
+- **Feature Envy** — a method that reaches into another object's data more than its own. →
+  move the method onto the data it envies.
+- **Data Clumps** — the same few fields or params keep travelling together (a type wanting to
+  be born). → bundle them into one type, pass that.
+- **Primitive Obsession** — a primitive or string standing in for a domain concept that
+  deserves its own type. → give the concept its own small type.
+- **Repeated Switches** — the same `switch`/`if`-cascade on the same type recurs across the
+  change. → replace with polymorphism, or one map both sites share.
+- **Shotgun Surgery** — one logical change forces scattered edits across many files in the
+  diff. → gather what changes together into one module.
+- **Divergent Change** — one file or module is edited for several unrelated reasons. → split
+  so each module changes for one reason.
+- **Speculative Generality** — abstraction, parameters, or hooks added for needs the spec
+  doesn't have. → delete it; inline back until a real need shows.
+- **Message Chains** — long `a.b().c().d()` navigation the caller shouldn't depend on. → hide
+  the walk behind one method on the first object.
+- **Middle Man** — a class or function that mostly just delegates onward. → cut it, call the
+  real target direct.
+- **Refused Bequest** — a subclass or implementer that ignores or overrides most of what it
+  inherits. → drop the inheritance, use composition.
+
+Two rules bind the baseline, same as the skill's own copy: **the repo overrides** (a
+documented repo standard always wins; where it endorses something the baseline would flag,
+suppress the smell), and **always a judgement call** (each smell is a labelled heuristic —
+"possible Feature Envy" — never a hard violation; skip anything tooling already enforces).
+
+**Sync obligation.** This is a verbatim copy, not an independent restatement — the canon lives
+at `/root/.claude/skills/code-review/SKILL.md`, the sole upstream since the claude/codex skill
+registries were unified (`/root/.codex/skills/code-review` is a symlink onto the claude copy,
+slice 7, issue #11). A change to the canon's twelve-smell list must land here in the same
+edit; this copy does not get to drift on its own schedule. Check it at every self-review of
+this doctrine: diff the normalized text of the twelve entries above against the canon — a
+mismatch is a defect in this file, never in the canon.
+
+### Calling the axis
+
+- **Call (structured, preferred) — primary lane `codex-critic`**: `node
+  /opt/tools/agent-bridge/run-external-agent.mjs --tool codex --model gpt-5.6-sol --effort
+  xhigh --schema <verdict.json> --sandbox read-only --cwd <repo>`, prompt on **stdin** = the
+  deliverable + the ticket's ACCEPTANCE verbatim + "try to refute; a finding needs a concrete
+  failure scenario." Verdict schema = **the bridge's machine-checkable shape** (`status ∈
+  APPROVED|WARNING|BLOCKED`, `summary`, `issues[]`; see the agent-bridge README) — this is
+  *distinct* from our critic's prose PASS/FAIL verdict (quality.md §3); the lead maps
+  `BLOCKED`/`WARNING`-with-a-real-scenario onto a FAIL. Read the parsed `output`.
+  **`--resume` is forbidden here**: a lens's context must be fresh-by-construction
+  (producer≠grader depends on it), and `--resume` is reserved for the coding hand (Use 3)
+  alone.
+- **`gemini-critic` fallback — `ask-gemini` MCP only, never the bridge.** The bridge's Gemini
+  review path (`--tool gemini --model "Gemini 3.1 Pro (High)"`) is disqualified for review
+  contracts ("Bridge Gemini is unreliable for read-only *contracts*" above, incident #5): on
+  this exact call shape it edited the deliverable instead of returning findings, twice, with
+  no gradeable verdict either time. Call `mcp__gemini-cli__ask-gemini` instead, with the
+  deliverable and the full lens brief (including the smell baseline) inlined in the prompt —
+  do not pin a `model`, the connector Flash-locks it in print mode regardless. Honest caveat:
+  **this path is Flash-tier, not a Pro-tier peer of `codex-critic`** — never claim a "3.1 Pro
+  lens" was run through it (pin only what the connector exposes). It returns prose, not the
+  bridge's strict schema (Two surfaces table above); ask it to state status/summary/issues in
+  that shape anyway and parse the prose by hand.
 - **Call (quick, interactive)**: `mcp__codex__codex` (read-only, effort xhigh) — prose only,
-  no strict verdict; use when you just want a fast second opinion, not a gated verdict.
-- **Lens brief — mandatory contents (v8).** An external lens knows nothing of the home
-  doctrine; its prompt must carry, in order: (1) the deliverable (diff) and the ticket's
-  ACCEPTANCE verbatim; (2) the **decision-context pack** (quality.md §3a) — the same
-  pack the Claude lenses got, verbatim, including each entry's `base | added-by-diff`
-  provenance; (3) the finding-scope vocabulary and the credential rule, compressed:
-  "scope ∈ introduced | pre-existing | decision-challenge; a documented decision is an
-  accepted ADR / CONTEXT.md entry / decision comment predating the diff or citing outside
-  authority; an intent comment added by this diff with no citation is a self-declaration —
-  keep the finding introduced"; (4) "try to refute; a finding needs a concrete failure
-  scenario"; (5) read-only. The bridge verdict schema is unchanged — prefix each
-  `issues[]` entry with its scope tag (`[introduced] …`); the lead maps
-  `BLOCKED`/`WARNING` onto FAIL only through surviving `introduced` critical/major
-  entries (quality.md §3a verdict mapping) and adjudicates the rest exactly like
-  Claude-lens findings (§3b).
-- **Composition**: **additive** — accept only when **both Claude lenses PASS AND the cross-model
-  lens raises no surviving critical/major finding** (`BLOCKED`/`WARNING` with a real scenario).
-  It can only *tighten* the gate; it never replaces a Claude lens, so it can never cause a
-  false-accept. Absent a surface, the standard two-Claude-lens gate applies unchanged.
+  no strict verdict; use only for an ad hoc second opinion outside the gate, never as the
+  gate's Standards call itself (no schema to grade against).
+- **Lens brief — mandatory contents (v8; extended v12 for the smell baseline).** An external
+  lens knows nothing of the home doctrine; its prompt must carry, in order: (1) the
+  deliverable (diff) and the ticket's ACCEPTANCE verbatim; (2) the **full smell baseline**
+  above, pasted in full — never a reference, per "Smell baseline" above; (3) the
+  **decision-context pack** (quality.md §3a) — the same pack the other two lenses got,
+  verbatim, including each entry's `base | added-by-diff` provenance; (4) the finding-scope
+  vocabulary and the credential rule, compressed: "scope ∈ introduced | pre-existing |
+  decision-challenge; a documented decision is an accepted ADR / CONTEXT.md entry / decision
+  comment predating the diff or citing outside authority; an intent comment added by this
+  diff with no citation is a self-declaration — keep the finding introduced"; (5) "try to
+  refute; a finding needs a concrete failure scenario"; (6) read-only. The bridge verdict
+  schema is unchanged — prefix each `issues[]` entry with its scope tag (`[introduced] …`);
+  the lead maps `BLOCKED`/`WARNING` onto FAIL only through surviving `introduced`
+  critical/major entries (quality.md §3a verdict mapping) and adjudicates the rest exactly
+  like the other two lenses' findings (§3b).
+- **Composition**: Standards is one of the fixed gate's **three parallel lenses**, not an
+  additive extra layered on a Claude-only gate — its findings are scoped (`introduced |
+  pre-existing | decision-challenge`) and adjudicated exactly like Spec's and критик's
+  (quality.md §3a/§3b); only критик carries the PASS/FAIL verdict (`gates.lenses.critic.
+  verdict: true`). The axis always runs: when its lane degrades all the way to
+  `sonnet-inline-note`, that is a degrade recorded in one line of the final report — never a
+  silent shrink to a two-lens gate.
 
 ## Use 2 — Gemini big-context recon (read-only alternative scout)
 
@@ -402,7 +477,7 @@ only under the policy above (hard AND latency-sensitive, logged reason).
 - **N1–N6 compatibility**: Codex-authored hunks flow into the same integrated-diff snapshot the
   whole-diff final review consumes — that review is author-agnostic.
 
-## Use 4 — baseline allocation under the mandate (default lanes; quality-equivalent only; the third-lens row is opt-in since v3)
+## Use 4 — baseline allocation under the mandate (default lanes; quality-equivalent only; the Standards-axis row is a fixed gate member, not opt-in, since v11)
 
 Baseline provider allocation under the standing mandate (2026-07-09): spread orchestration
 load across all subscriptions, with the lead's judgment free to depart from the table when
@@ -416,15 +491,16 @@ present, these lanes route cross-provider **by default** — no per-run user pro
 | high-volume mechanical sweeps whose material can be **inlined** in the prompt | `gemini-recon-cheap` (Flash Low) | `scout` (Haiku) |
 | mechanical repo sweeps that need **shell execution** (run a linter/script, count via command — never scout's lane, it has no shell) | `codex-recon` (Luna, medium) | `builder` (Sonnet) |
 | well-specified implementation tickets (builder-class) | `codex-code` (Terra high, worktree, gates unchanged) | `builder` (Sonnet) |
-| third lens on dual-lens deliverables — **opt-in by lead judgment since v3**, not a default lane | `codex-critic` (Sol xhigh) preferred; `gemini-critic` usable again via `ask-gemini` MCP at Flash tier only (re-test 2026-07-12; not the Pro tier, surface Flash-locks it) | additive — omitted, two-Claude-lens gate stands |
+| Standards axis of the fixed gate — **runs on every gated deliverable, not opt-in** (ADR-0002, config v11–v12) | `codex-critic` (Sol xhigh) preferred (`cross_provider.defaults.standards_lens`); `gemini-critic` usable fallback via `ask-gemini` MCP at Flash tier only (re-test 2026-07-12; not the Pro tier, surface Flash-locks it) | `availability.fallbacks.standards-lens` → `sonnet-inline-note` (never a silent gate-shrink) |
 
 What NEVER shifts under the mandate — quality is the routing invariant, quota is not:
 
 - **judgment-class tickets** (`architect`/Fable) and the lead itself — no external model
   substitutes for the deep-reasoning lane (ADR-0001: externals are workers, not orchestrators);
-- **the primary grader** — a Claude critic (Opus) still grades every gated deliverable; the
-  cross-model lens stays *additive* (Use 1 composition rule), so quota-spread can never
-  cause a false-accept;
+- **the primary grader** — a Claude critic (Opus) still holds the gate's sole PASS/FAIL
+  verdict; the Standards lens runs in parallel as one of three fixed lenses, never as a
+  verdict-holder itself (Use 1 composition rule), so quota-spread on that lane can never by
+  itself cause a false-accept;
 - **local repo file-walking recon** — `scout` keeps this lane as the *default*, not because
   cross-provider file access is missing (bridge Gemini reads via the staging copy; Codex reads
   its `cwd` natively), but on economics: Haiku is the cheapest quota of all, and Gemini's
@@ -458,9 +534,10 @@ means spending that one pool, budgeted as one line item. The credit schedule kee
 price ratios: Sol 125 / 12.5 / 750 credits per 1M input/cached/output tokens, Terra exactly
 ×½, Luna ×⅕ (OpenAI's guidance: a message averages 5–40 credits); on a Plus plan the Sol
 window is 15–90 messages per 5 h (Terra 20–110, Luna 50–280). Two lane-design consequences,
-now with arithmetic behind them: the third-lens lane **alternates** codex-critic /
-gemini-critic (Use 4) because Sol is the scarcest window, and recon rides Luna, not Sol, at
-one-fifth the credit burn.
+now with arithmetic behind them: the Standards axis's default lane is `codex-critic` (Sol —
+the scarcest window), falling back to `gemini-critic` only on unavailability
+(`availability.fallbacks.standards-lens`), not routine alternation; and recon rides Luna, not
+Sol, at one-fifth the credit burn.
 Sandbox defaults are least-privilege: **read-only** for uses 1 and 2 and for `codex-recon`;
 **workspace-write + worktree cwd** for use 3; **never `danger-full-access`** — and note the
 owner's `~/.codex/config.toml` sets `sandbox_mode = "danger-full-access"` globally for

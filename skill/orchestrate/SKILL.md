@@ -72,24 +72,34 @@ Known failure modes to avoid (documented by Anthropic): spawning many agents for
 query; vague delegation that makes agents duplicate work or leave gaps; endless searching
 for information that does not exist. When in doubt, start one tier lower.
 
-**Second axis — stakes profile (config.yaml `stakes`; v3).** Size sets the *width* of the
-fan-out; stakes set the *depth* of the pipeline. Assign one profile per run at triage,
-tie-breaking up:
+**Entry criterion (ADR-0002).** The owner, verbatim (2026-07-15; spelling and punctuation
+normalized): «я не отдам простую задачу в оркестратор; если я отдаю задачу — значит там
+есть над чем подумать». A Task that reaches `/orchestrate` has already cleared this filter
+— there is no trivial class *inside* the orchestrator left to scale a pipeline down for;
+the Trivial row above is the outward gate, not an internal depth dial. A `low`-style depth
+profile does not exist for the same reason (ADR-0002, spec #4).
 
-| Profile | Trigger (operative signals: config `stakes.profiles`) | Pipeline |
+**Second axis — shape (config.yaml `shape`; v10, ADR-0002, spec #4).** Size sets the
+*width* of the fan-out; shape sets the *sequence* — whether the work is cut into vertical
+slices with a spec and tickets, or runs as one uninterrupted thread. Depth of verification
+no longer scales by any axis: the gate is fixed at three lenses regardless of shape (config
+`gates:`, slice 3 — issue #7, out of scope here). Assign one shape per run at triage:
+
+| Shape | Fork criterion (config `shape.values`) | Sequence |
 |---|---|---|
-| **low** | no hard-floor signal, no dual-lens trigger, bounded & reversible blast radius — all three | single worker or lead-inline; deterministic checks; the lead reads the full diff — no grill, no architect, no spawned critic |
-| **standard** | everything else — the default | builder(s) (+ scout recon); one Claude critic; grill only on an ambiguity signal, and then Light; architect only if the design space is genuinely open |
-| **high** | any hard-floor signal, dual-lens trigger, irreversible action, or migration / multi-system change | full pipeline: grill-with-docs → architect → builders → dual lens (+ opt-in cross-model lens) |
+| **сборка** (assembly) | the work splits into vertical slices — spec, then tickets with blocking edges | grill (lead-opened, owner-answered) → spec (`to-spec`) → tickets (`to-tickets`) → work by the frontier |
+| **разбирательство** (investigation) | one thread — nothing to cut | straight to work; no spec, no tickets; Step 0.5's clarification rules apply unchanged |
 
-Grounding (telemetry 2026-07-04..11, ~79 critic gates): real defects were caught at ~20%
-of gates and clustered almost entirely in security/auth/transactional work — `high`
-territory; on routine tasks the full pipeline added 5–10× wall-clock with no catch.
-Stakes are orthogonal to size — a one-file change in auth is `high`. A hard-floor or
-dual-lens signal discovered mid-run re-triages the run up immediately.
+(mirrors `shape.values` — config.yaml is the source; edit there first.)
 
-The size tier and the stakes profile together set how hard to clarify the request before
-decomposing (Step 0.5) and whether the plan needs your sign-off before the fan-out (Step 1).
+The fork criterion is **whether the work splits into slices** — not importance, not risk,
+not line count. A hard-floor signal discovered mid-run does not change the shape — nor does
+it change the gate, which no longer has a composition to affect (slice 3): the same fixed
+three-lens wave runs regardless (Step 4.3), never the method itself (ADR-0002: price
+commands the choice of Executor, never the rule of Method).
+
+The size tier and shape together set how hard to clarify the request before decomposing
+(Step 0.5) and whether the plan needs your sign-off before the fan-out (Step 1).
 
 ## Step 0.5 — Clarify the request before you spend the budget
 
@@ -128,17 +138,17 @@ Trivial never grills — an ambiguous "trivial" task was mis-triaged; re-triage.
   challenge-against-the-domain, update-docs-inline session this row describes; don't
   hand-roll a substitute when the skill exists.
 
-**Standing preference for this project (owner, 2026-07-11; scoped 2026-07-12): the full
-grill opens `high`-stakes runs — and there, when in doubt, grill more, not less.** On a run
-whose stakes profile (Step 0) is `high`, default to running `grill-with-docs` *before* the
-Step 1 plan — the owner expects such a run to begin with a real grill, not a couple of
-`AskUserQuestion` passes, and on `high` the grill is not skippable for speed. A `standard`
-run grills only when a Step 0.5 ambiguity signal fires — and then Light; `low` never
-grills. The 2026-07-12 scoping is an owner decision made on telemetry (5–10× wall-clock on
-routine tasks with no catch): do not silently re-broaden the grill to every run, and do not
-shrink it below `high` either. The grill is still lead-only, main-loop work (workers can't
-ask the user), and its stop condition is unchanged: stop the moment remaining questions no
-longer change the decomposition or any ticket's INPUTS / BOUNDARIES / ACCEPTANCE.
+**Standing preference for this project (owner, 2026-07-15; ADR-0002, spec #4): a `сборка`
+run always opens with the full grill, before the Step 1 plan.** Assembly work is cut into
+vertical slices by construction (spec → tickets, config `shape.values.сборка.sequence`);
+per ADR-0002 the grill precedes that cut unconditionally — not scaled by an ambiguity
+signal, not skippable for speed, and not overridable by cost (price commands only the
+choice of Executor, never the rule of Method).
+A `разбирательство` run keeps the tier × ambiguity table above unchanged: grill only when a
+signal fires, scaled by size tier, exactly as before this axis existed. The grill is still
+lead-only, main-loop work (workers can't ask the user), and its stop condition is unchanged:
+stop the moment remaining questions no longer change the decomposition or any ticket's
+INPUTS / BOUNDARIES / ACCEPTANCE.
 
 **How many questions — your judgment, not a quota.** There is no fixed number. In a full
 grill you ask one open question at a time and keep going until the stop condition below is
@@ -199,15 +209,17 @@ Think through, before the first Agent call:
    a memory-sourced list seated the wrong item at #10; all twenty downstream facts
    verified, the answer was still wrong.)
 
-**Approval checkpoint — hold before the first delegation wave.** For high-stakes or
+**Approval checkpoint — hold before the first delegation wave.** For consequential or
 expensive runs, present the plan and get explicit user approval before the first `Agent`
 call. Lead-only, main loop.
 
 Fire when the run is both *expensive* and *consequential* — any of:
 - tier is **Complex multi-part** with a real fan-out (≥ 3 workers / the worktree-isolation
   threshold, Step 3); OR
-- the deliverable meets a **dual-lens highest-stakes trigger** — production code headed for
-  main, published outside the team, or acted on without reading (Step 4.3); OR
+- the deliverable is headed for production/main, will be published outside the team, or
+  will be acted on without anyone reading it first (Step 4.3 — these no longer pick a
+  deeper gate, since the gate no longer scales, but they still mark a run worth pausing
+  for approval); OR
 - the grill surfaced an **irreversible / high-blast-radius action** (Step 0.5 signal 5).
 
 Skip for Trivial, Simple recon, and cheap read-only Comparison/survey runs — presenting a
@@ -222,6 +234,137 @@ plan unless it materially changes, which re-triggers approval. (When the session
 in plan mode, present the same plan via ExitPlanMode; the binding rule is behavioral — no
 first-wave `Agent` call before explicit approval — and does not depend on plan-mode
 internals.)
+
+For a `сборка` run, "The build spine" below folds the tickets stage's Quiz-the-user into
+this same checkpoint — one approval between spec and frontier, not two — but unlike the
+triggers above, it fires unconditionally: `to-tickets` requires the user's approval on
+every breakdown, not only on runs that are expensive and consequential.
+
+## The build spine — grill, spec, tickets, frontier (`сборка` shape)
+
+Config.yaml's `shape.values.сборка.sequence` is the source of the `сборка` sequence; Step
+0's shape table only mirrors it in prose. This section is that sequence's operating
+manual — how the lead actually walks it, end to end, once Step 0 assigns the `сборка`
+shape. A `разбирательство` run skips it entirely (closing note below).
+
+**Canonical files, and who executes them.** The spine composes seven skills, each with its
+canonical copy at `/root/.claude/skills/{grilling,domain-modeling,to-spec,to-tickets,
+implement,tdd,code-review}/SKILL.md`. Six of the seven were authored for a solo,
+human-driven session — the same gap Step 0.5 and
+[references/clarify.md](references/clarify.md) already document for the grill. Rather than
+lean on a trigger phrase to surface the right one, whichever agent is walking a given stage
+— the lead for grill/spec/tickets, a `builder` worker for the frontier's `implement`/`tdd`
+— reads the named file directly and follows the method it describes, in its own turn
+(`to-spec`, `to-tickets`, and `implement` carry `disable-model-invocation: true` and are
+structurally unreachable by the Skill tool outside a human typing `/name` explicitly;
+`grilling`, `domain-modeling`, and `tdd` don't carry that flag and remain nameable —
+`agents/builder.md` already invokes `tdd` this way inside a ticket — but the spine treats
+all six the same way for the lead's or worker's own turn: read, adapt, run).
+`code-review/SKILL.md` is the seventh file and the exception: its Standards/Spec two-axis
+review is the methodology `gates.lenses.standards` and `gates.lenses.spec` already inherit
+(Frontier, below) — no worker runs it as `implement`'s own close-out step; the fixed gate
+replaces it outright. Facts come from the repository; decisions come from the user — the
+grill only puts questions to them, it never answers on their behalf.
+
+**Grill.** No new machinery: this is Step 0.5's existing full grill — opened by the lead's
+own judgment, the owner answering one question at a time, the first leg of
+`shape.values.сборка.sequence` (Step 0's table). The Standing preference (Step 0.5) already
+mandates it unconditionally before the Step 1 plan on every `сборка` run. `grilling/SKILL.md`
+and `domain-modeling/SKILL.md` are this stage's style exemplar — the one-question-at-a-time
+interview and the term-sharpening discipline — not a second skill layered on top of Step 0.5.
+
+**Spec — `to-spec`.** Read `to-spec/SKILL.md` and run it: explore the repo if the grill
+didn't already, sketch the seams the work will be tested at — prefer an existing seam, the
+highest one available, ideally exactly one — and confirm them with the user *before*
+writing (`to-spec`'s own step 2; the grill already covered the feature, this confirms the
+seams specifically). Write the spec on `to-spec`'s template and publish it to the tracker
+(`docs/agents/issue-tracker.md`) under the `ready-for-agent` label.
+
+**Tickets — `to-tickets`.** Read `to-tickets/SKILL.md` and cut the spec into tracer-bullet
+tickets under its vertical-slice rule:
+
+- each slice cuts a narrow but *complete* path through every layer (schema, API, UI,
+  tests) — vertical, never a horizontal slice of one layer;
+- a completed slice is demoable or verifiable on its own;
+- each slice is sized to fit in a single fresh context window;
+- any prefactoring happens first — "make the change easy, then make the easy change."
+
+**Wide refactors are the one exception to vertical slicing:** a wide refactor is a single
+mechanical change — rename a column, retype a shared symbol — whose blast radius fans
+across the whole codebase, so one edit breaks thousands of call sites at once and no
+vertical slice can land green. Sequence it as **expand → migrate → contract** instead of
+forcing a tracer bullet. Expand first: add the new form beside the old so nothing breaks.
+Migrate next: move call sites over in batches sized by blast radius (per package, per
+directory), each batch its own ticket blocked by the expand ticket, keeping CI green batch
+to batch because the old form still exists. Contract last: delete the old form once no
+caller remains, in a ticket blocked by every migration batch. When even the batches can't
+stay green alone, keep the sequence but let them share an integration branch that all
+block a final integrate-and-verify ticket — green is promised only there.
+
+**Quiz-the-user merges into Step 1's approval checkpoint — one approval, not two, fired
+unconditionally.** `to-tickets`' own Quiz step (present the numbered breakdown, ask about
+granularity and blocking edges, iterate until approved) does not run as a separate gate
+ahead of Step 1's checkpoint; the two collapse into a single `AskUserQuestion`, presented
+as a **draft** — the breakdown is not yet published anywhere. Present the ticket breakdown
+— title, blocked-by, what each ticket delivers — alongside Step 1's own compact plan
+(routing table, top acceptance criterion, blast radius, projected fan-out), and ask one
+**Approve / Revise / Cancel**, capped at the same two revision rounds Step 1 already caps
+at. Unlike Step 1's own trigger list above, this merged checkpoint is never conditional on
+being expensive-and-consequential: `to-tickets` requires the user's approval on every
+breakdown, and shape carries no stakes axis left to exempt a `сборка` run against
+(ADR-0002). One approval checkpoint sits between spec and frontier, never a ticket-quiz
+followed by a separate plan-approval.
+
+**Publish.** Only after Approve: publish the tickets to the tracker, one GitHub issue per
+ticket in dependency order (blockers first). Wire each edge as a **native** issue
+dependency, not a body convention — `docs/agents/issue-tracker.md`'s Wayfinding section
+already gives the exact call (`gh api … issues/<child>/dependencies/blocked_by`, keyed by
+the blocker's numeric database id, never its `#number`). A ticket with no open blocker can
+start immediately; the **frontier** is every open, unblocked, unclaimed ticket.
+
+**Frontier.** Work the open, unblocked tickets: **one ticket, one worker, one fresh
+context window** — never a ticket split across sessions, never two workers sharing one.
+Independent tickets may run as a parallel Step 3 wave — a sanctioned deviation from
+`to-tickets`' own sequential "one ticket at a time" canon (ticket #10), since parallel
+delegation is the whole point of orchestration; tickets that touch the same file stay
+sequenced regardless (Step 3's working-tree discipline) — a decomposition that put two
+writers on one file is a `to-tickets` bug, not a scheduling problem to solve at dispatch.
+A ticket is, by construction, the same unit Step 3 calls a task ticket — ADR-0002's
+routing-seam resolution — so classify and route it through the ordinary Step 2 matrix and
+delegate it exactly as Step 3 describes; most land on `builder` since a spec-derived
+vertical slice is usually a complete, checkable implementation, but classify each on its
+own merits like any other ticket.
+
+A ticket's own implementation is the `implement` method (`implement/SKILL.md`): `/tdd` on
+the seams the spec already agreed, full suite once at the end — already wired into the
+`builder` agent by slice 5 (`agents/builder.md`); this section links it, doesn't repeat it.
+`implement`'s own close-out step (`code-review`) does not stack as a fourth lens on top of
+Step 4 — it dissolves into the orchestrator's fixed three-lens gate (`gates.lenses`, Step 4
+point 3), the same gate every gated deliverable already clears (ADR-0002's
+review-collision resolution).
+
+**Smart zone.** Grill, spec, and tickets run in one continuous window — roughly 120k
+tokens before quality degrades — and are never compacted mid-route: compacting between
+grill and tickets loses exactly the ledger (sharpened terms, resolved forks) the later
+stages depend on. As the window nears that border, stop and hand off rather than push a
+degraded context through the remaining stages: write a `handoff` document
+(`handoff/SKILL.md`) and let a fresh session resume from it.
+
+**Wayfinder ramp.** Some Tasks arrive too foggy and too large for even the smart zone —
+the way to a spec isn't visible in one session. The lead does not force grill → spec on
+these directly; it proposes `wayfinder` to the user (human-callable, same as `to-spec` /
+`to-tickets` / `implement` above — the lead cannot self-invoke it, only suggest
+`/wayfinder`). Wayfinder charts the foggy work as a map of decision tickets, resolved one
+session at a time; once its fog clears, the map's resolution is what the build spine picks
+up **at the spec stage** — wayfinder's destination becomes `to-spec`'s input, not a
+parallel route.
+
+**`разбирательство` (investigation) skips the spine entirely.** One thread, nothing to cut
+— none of the above applies; Step 0.5's clarification path runs unchanged, exactly as
+`shape.values.разбирательство`'s sequence already states (Step 0). What does not change
+either is the gate: a `разбирательство` deliverable clears the same fixed three-lens gate
+as every `сборка` frontier ticket (Step 4 point 3) — shape forks the *sequence*, never
+whether the gate fires.
 
 ## Step 2 — Routing matrix
 
@@ -301,12 +444,12 @@ and not something the user acts on directly; deterministic checks exist and alre
 passed; a missed defect would still be caught downstream before the user relies on the
 result. Down-routing is never a quota-saving device. Do not override `scout` upward —
 if it needs a stronger model, it was mis-routed. The up-routing ceiling is
-`model: fable` — the lead-tier model as a worker. It has exactly three sanctioned uses:
-`architect` (bound to it by design), the *correctness* lens of a highest-stakes dual-lens
-(point 3, Step 4), and the final escalation rung (Step 4). Beyond those three it is never
-a routine route — it spends the most expensive quota, and a `builder`/`scout` ticket never
-takes it at *routing* time (the Step 4 escalation ladder's fable rung stays open to any
-ticket that has already failed its way up the tiers).
+`model: fable` — the lead-tier model as a worker. It has exactly two sanctioned uses
+(config `routing.overrides.fable_ceiling_uses`): `architect` (bound to it by design), and
+the final escalation rung (Step 4). Beyond those two it is never a routine route — it
+spends the most expensive quota, and a `builder`/`scout` ticket never takes it at *routing*
+time (the Step 4 escalation ladder's fable rung stays open to any ticket that has already
+failed its way up the tiers).
 
 **Provider dimension — the lead's judgment call under a standing mandate.** The class→tier
 matrix above fixes the *class and quality bar*; provider is an orthogonal choice made
@@ -314,9 +457,11 @@ after the class is set. Standing user mandate (2026-07-09; it replaces and voids
 2026-07-05 "Codex = opt-in" decision): when their connectors are detected present,
 non-Claude workers (OpenAI Codex, Google Gemini via Antigravity) are **regular members of
 the routing pool**, routed by the lead's judgment. Two standing values drive that
-judgment: the *additional analytical angle* of an uncorrelated model (cross-model lens —
-opt-in on `high`-stakes gates since v3 — ADR-0001, self-preference bias) and *quota-spread*
-across the user's subscriptions (baseline lanes: cross-provider.md Use 4). Since 2026-07-12
+judgment: the *additional analytical angle* of an uncorrelated model — since slice 3
+structurally guaranteed on every gated deliverable by the fixed Standards lens (config
+`gates.lenses.standards`; ADR-0001, self-preference bias) rather
+than invoked opt-in — and *quota-spread* across the user's subscriptions (baseline lanes:
+cross-provider.md Use 4). Since 2026-07-12
 the spread is a necessity, not a bonus — the owner's weekly Claude window runs out 1–2 days
 before reset across 3–4 parallel projects — and the three codex lanes are promoted from
 pilot to fixed defaults (config `cross_provider.promoted`). Judgment routes
@@ -442,52 +587,56 @@ plan around it:
    after every code-gradeable criterion has already passed. A deterministic FAIL goes
    straight back to the producer with the failing output attached — it consumes a retry
    (point 4 below) but zero Opus tokens.
-3. **Mandatory `critic` pass** for: production code changes, anything security-relevant,
+3. **Mandatory three-lens gate** for: production code changes, anything security-relevant,
    and any deliverable the user will rely on without personally checking. Skippable for
-   throwaway recon. On a `low`-stakes run (Step 0) the spawned critic is replaced by the
-   lead's own read of the full diff after deterministic checks pass — the verification
-   hierarchy's spot-check rung, applied deliberately; any hard-floor or dual-lens signal
-   surfacing mid-run re-triages the run out of `low` first. The grader must not be the
-   producer: critic sees only the deliverable
-   + the ticket's acceptance criteria — not the producer's reasoning.
-   For target-repo code the critic ALSO receives the **decision-context pack**
-   (quality.md §3a): a mechanically assembled digest — ADR index, matching CONTEXT.md
-   terms, decision comments near the touched code, each with `base | added-by-diff`
-   provenance — capped by config `gates.review_loop.pack_max_lines`. The repo's decision
-   record is not the producer's reasoning: withholding it buys re-litigation, not
-   independence. Assembly is a `scout` ticket (rule-based inclusion; the per-ticket diff
-   snapshot is an INPUT); the producer never assembles or filters the pack; the lead may
-   add entries, never remove them.
-   **Dual-lens rule — applied by you, automatically**: for highest-stakes deliverables —
-   the trigger list lives in config.yaml `gates.dual_lens_triggers` (production code
-   headed for main, published outside the team, acted on without reading) — spawn two
-   critics in parallel with distinct lenses: one graded on *correctness* (is it true /
-   does it work), one on *completeness* (does it cover the full stated scope). Accept
-   only when both pass.
-   For these highest-stakes deliverables the *correctness* lens is spawned as `critic`
-   with `model: fable` — frontier judgment on the lens where a miss ships a defect; the
-   *completeness* lens stays on Opus. Two lenses, two models: their failure modes
-   decorrelate at the most expensive gate. (Phrase the Fable lens's ticket Fable-style —
-   goal, not steps; see delegation.md.)
-   Grade every deliverable against these trigger conditions while planning (Step 1);
-   the user is never expected to request the second lens. Outside the trigger
-   conditions a single critic remains the default — the second lens doubles the most
-   expensive gate.
+   throwaway recon. **Fixed structure, not a scale** (config `gates.lenses`; ADR-0002,
+   spec #4, CONTEXT.md "Линза") — every deliverable that reaches this gate gets the same
+   one wave of three parallel lenses, unconditionally, no depth dial left to turn — inside
+   a `сборка` run's frontier tickets exactly as across a `разбирательство` run's single
+   thread (see "The build spine", closing note):
+   - **Standards** (`gates.lenses.standards`) — how well the work holds up against this
+     repo's own conventions. Its executor is a config pin, not a prose one
+     (`gates.lenses.standards.executor`; references/cross-provider.md) — a non-Claude
+     lane by construction, so self-preference bias is closed on every gated deliverable,
+     not only on the ones a lead remembers to escalate.
+   - **Spec** (`gates.lenses.spec`) — whether the work is the right thing and nothing
+     more, held against the originating spec/ticket including its Out of Scope; absorbs
+     what used to be a separate completeness check. Its executor is likewise a config pin
+     (`gates.lenses.spec.executor`).
+   - **critic** (`gates.lenses.critic`) — whether the work can be trusted: re-runs the
+     deterministic checks itself, reads the touched code, tries to refute it. The only
+     lens that carries the gate's PASS/FAIL verdict (`gates.lenses.critic.verdict`) —
+     Standards and Spec report findings, not a verdict. Its executor is the `critic`
+     agent (`gates.lenses.critic.executor`); the agent's own model pin lives in its
+     frontmatter (agents/critic.md), not here.
 
-   **Cross-model third lens — opt-in (v3, 2026-07-12; references/cross-provider.md).**
-   For a dual-lens-trigger deliverable you MAY add one cross-model critic as a *third*
-   lens on the same deliverable + criteria, read-only. Its documented value is
-   architectural independence: a different-provider reviewer whose biases don't overlap
-   Claude's (ADR-0001, self-preference bias). Since v3 it is invoked by lead judgment,
-   not by default — the 2026-07-11 polygon saw the gemini bridge misfire 2/2, and the
-   lens sits on the critical path of every highest-stakes gate; invoke it when the
-   independent angle is worth one round-trip, preferring `codex-critic` (polygon: 8/8
-   planted defects, 0 FP). It is additive:
-   accept only when **both Claude lenses PASS and an invoked cross-model lens raises no
-   surviving critical/major finding**. A cross-model lens can only tighten the gate, never
-   replace a Claude lens; its cost is the other subscription's quota plus one round-trip,
-   not Claude quota. With no connector present or the lens not invoked, the standard
-   two-Claude-lens gate applies unchanged.
+   Grader independence is unchanged: none of the three is the producer, none sees the
+   producer's reasoning — each receives only the deliverable and the ticket's acceptance
+   criteria verbatim. For target-repo code, `critic` also receives the
+   **decision-context pack** (quality.md §3a): a mechanically assembled digest — ADR
+   index, matching CONTEXT.md terms, decision comments near the touched code, each with
+   `base | added-by-diff` provenance — capped by config `gates.review_loop.pack_max_lines`.
+   The repo's decision record is not the producer's reasoning: withholding it buys
+   re-litigation, not independence. Assembly is a `scout` ticket (rule-based inclusion;
+   the per-ticket diff snapshot is an INPUT); the producer never assembles or filters the
+   pack; the lead may add entries, never remove them.
+
+   **Accept only when** Standards and Spec raise no surviving blocking finding (the scope
+   axis and adjudication rules in quality.md §3a/§3b apply to every lens's findings, not
+   only critic's) **and** critic's own verdict is PASS or PASS_WITH_NOTES.
+
+   **The gate does not scale and cannot be skipped once it fires** — price still commands
+   the choice of Executor within a lens (ADR-0002), never whether the wave runs or how
+   many lenses it has. Through v10 a different mechanism scaled the gate up for
+   higher-stakes work (a second, fable-graded lens) and left a cross-model lens opt-in for
+   the lead to invoke case by case; both are retired (slice 3, issue #7). The cases that
+   mechanism used to key off — production code headed for the main branch, anything
+   published outside the team, anything the user will act on without reading — were never
+   real evidence that *other* work needed a thinner gate; they are simply the cases where
+   skipping or thinning the gate would cost the most, which is exactly why, instead of
+   scaling the gate up for these three, it stopped scaling down for anything else. Grade
+   every deliverable against this gate while planning (Step 1); the user never needs to
+   request an extra lens, because there is no lighter default left to request one against.
 4. **Escalation ladder** on a FAIL verdict:
    ① one retry by the same agent with the critic's findings attached →
    ② escalate the model tier (haiku→sonnet→opus→fable worker in a fresh
@@ -517,8 +666,8 @@ plan around it:
    findings become target-repo issues; `decision-challenge` findings go to the
    owner-facing decision-review stream — never silently into a retry. After accepted
    fixes land, re-verify *delta*: deterministic checks plus a narrowed critic pass over
-   the named findings and fix hunks — not a fresh full review. Full rounds are capped per
-   stakes profile (config `gates.review_loop.full_rounds_max`) and by the proportionality
+   the named findings and fix hunks — not a fresh full review. Full rounds are capped by
+   config `gates.review_loop.full_rounds_max` and by the proportionality
    stop (`proportionality_stop`); past either, remaining findings are adjudicated and
    reported, not re-reviewed. The caps bound *review rounds*; they change nothing about
    `max_attempts_per_subtask` — a failed retry still climbs the ladder, and attempt-scoped
@@ -531,19 +680,18 @@ plan around it:
    corrected ticket; a second such return means the ticket was mis-scoped — route the
    subtask one tier up or investigate yourself. Surface unresolved questions in your
    final report.
-7. **Whole-diff final review after a multi-writer wave.** Per-ticket critics verify each
+7. **Whole-diff final review after a multi-writer wave.** Per-ticket lenses verify each
    deliverable in isolation; integration-seam defects — two individually-correct diffs that
    conflict, a shared contract one ticket broke for another, a duplicated or double-applied
    change — slip through per-ticket gates. After a multi-builder wave settles and every
-   per-ticket gate has passed, run one `critic` over the ENTIRE integrated diff with a
-   cross-cutting lens ("do these changes cohere; does any pair conflict; did a shared
-   assumption break") before the Step 5 synthesis. This is *additive* to the per-ticket
-   gates, not a replacement — and if the integrated result is itself highest-stakes (point 3's
-   triggers), it takes the **dual-lens** treatment, not a single critic. For a very large
-   integrated diff, focus the review on the **seams** — the interfaces between tickets — or
-   partition by subsystem, rather than pushing the whole blob through one critic's context.
-   Skip for single-writer changes. For highest-stakes waves an independent cross-model lens
-   (references/cross-provider.md) adds the most.
+   per-ticket gate has passed, run the same fixed **three-lens gate** (point 3) over the
+   ENTIRE integrated diff with a cross-cutting brief ("do these changes cohere; does any
+   pair conflict; did a shared assumption break") before the Step 5 synthesis — the
+   integrated diff is itself a gated deliverable, not a lighter-weight check. This is
+   *additive* to the per-ticket gates, not a replacement. For a very large integrated diff,
+   focus the review on the **seams** — the interfaces between tickets — or partition by
+   subsystem, rather than pushing the whole blob through one lens's context. Skip for
+   single-writer changes.
 
 Verdict schema, rubric templates (code / research / design), and the session scorecard:
 [references/quality.md](references/quality.md).
