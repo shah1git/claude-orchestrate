@@ -4,3 +4,7 @@
 # Телеметрия и артефакты прогонов — держим локально, из публичного репо исключены (2026-07-13)
 skill/orchestrate/telemetry/
 benchmark/results/
+
+# Python-артефакты инструментов
+__pycache__/
+.pytest_cache/
