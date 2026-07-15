@@ -65,4 +65,21 @@ for agent in architect builder scout critic; do
   install_one "${REPO_DIR}/agents/${agent}.md" "${AGENTS_DIR}/${agent}.md"
 done
 
+# Also wire the shared `~/.agents` skills store, if present. Harnesses spawned
+# by Orca (and other agent CLIs) read skills from `~/.agents/skills` rather than
+# `~/.claude/skills`, so an install that only touched `~/.claude` left
+# `/orchestrate` reported as an "unknown skill" in those terminals. We mirror the
+# skill and the four agent definitions there too. NOTE: finding the skill file is
+# necessary but not sufficient — `/orchestrate` spawns tiered Claude subagents via
+# the Agent tool, so it only *functions* in a Claude-Code-family harness that
+# supports subagents and model tiers; in others the skill is found but cannot run.
+SHARED_AGENTS_DIR="${HOME}/.agents"
+if [ -d "${SHARED_AGENTS_DIR}/skills" ]; then
+  mkdir -p "${SHARED_AGENTS_DIR}/agents"
+  install_one "${REPO_DIR}/skill/orchestrate" "${SHARED_AGENTS_DIR}/skills/orchestrate"
+  for agent in architect builder scout critic; do
+    install_one "${REPO_DIR}/agents/${agent}.md" "${SHARED_AGENTS_DIR}/agents/${agent}.md"
+  done
+fi
+
 echo "Done (${MODE} mode)."
