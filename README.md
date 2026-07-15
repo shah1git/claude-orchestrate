@@ -15,21 +15,28 @@ each pinned to the model tier its job actually needs:
 | `scout` | Haiku, read-only | Mechanical recon: find files/usages, grep sweeps, inventories, classification |
 | `critic` | Opus | Adversarial verification of any deliverable, in a fresh context |
 
-Every delegated ticket carries mandatory acceptance criteria, and every production
-deliverable is verified — deterministically where possible, otherwise by `critic` running
-in a fresh context that never sees the producer's own reasoning. Failures escalate on a
-capped ladder (retry once → raise the model tier → report the blocker) rather than
-looping indefinitely.
+Every delegated ticket carries mandatory acceptance criteria, and every gated deliverable is
+verified through the same fixed three-lens gate, unconditionally: Standards (does it meet
+this repo's conventions), Spec (is it the right thing, nothing extra), and `critic` (can it
+be trusted — the only lens with a PASS/FAIL verdict), each in a fresh context that never sees
+the producer's own reasoning. Production code and security-relevant work are examples of why
+the gate can't be skipped, not a trigger list — deterministic checks (tests, typecheck,
+build) run first wherever they apply. Failures escalate on a capped ladder (retry once →
+raise the model tier → report the blocker) rather than looping indefinitely.
 
 ### Optional cross-provider layer
 
 By default the skill is fully self-contained and Claude-only. When the user has them wired,
-the lead can *optionally* delegate to non-Claude models via MCP — OpenAI Codex and Google
-Gemini (Antigravity) — for three named reasons only: an independent cross-model verification
-lens, big-context recon beyond a Claude window, or (opt-in) a Codex coding hand. It is
-capability-detected: absent a connector, every route falls back to the Claude default, so
-the Claude-only path always works. See
-[skill/orchestrate/references/cross-provider.md](skill/orchestrate/references/cross-provider.md).
+the lead can also route to non-Claude models — OpenAI Codex and Google Gemini (Antigravity)
+— via MCP or the `agent-bridge`, including as the Standards lens above (a permanent,
+non-Claude member of the fixed gate, closing self-preference bias, not an opt-in extra) and
+as a coding hand for well-specified builder tickets. See
+[skill/orchestrate/references/cross-provider.md](skill/orchestrate/references/cross-provider.md)
+(Use 1–4) for the full list of named uses. It is capability-detected: absent a connector,
+every route resolves to a Claude default, and the Standards lens specifically is never
+silently skipped — its fallback chain always terminates in a Claude lens run inline, with a
+note in the final report (exact executors and fallback order live in config: `gates.lenses`,
+`availability.fallbacks`) — so the Claude-only path always works.
 
 ## Install
 
