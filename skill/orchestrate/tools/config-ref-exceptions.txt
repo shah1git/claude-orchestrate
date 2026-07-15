@@ -1,0 +1,19 @@
+# Exceptions for validate_config.py's prose-reference resolution.
+#
+# Format: one dotted path per line, exactly as it appears inside backticks
+# in SKILL.md / references/*.md; optional trailing `# reason` comment;
+# blank lines and full-line `#` comments are ignored.
+#
+# Every entry here is a *legitimate* dotted, backtick-quoted reference that
+# is NOT a config.yaml path — usually a field name from an external JSON
+# payload that the skill's prose documents inline. Add an entry only when the
+# reference genuinely does not live in config.yaml; do not add a config.yaml
+# path here to silence a real drift — fix the prose or the config instead.
+
+# agent-bridge `--detect` JSON payload fields (references/cross-provider.md,
+# "Detection & graceful degradation"), not config.yaml paths.
+codex.loggedIn
+codex.present
+codex.version
+gemini.models
+gemini.present
