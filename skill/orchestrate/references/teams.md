@@ -157,9 +157,13 @@ ticket.** The quality gates are Step 4 unchanged, mapped onto persistence:
    contracts — even if wave N−1 stated them. Never rely on teammate memory (the Step 3
    isolation rule, applied to a worker that merely *feels* less isolated).
 2. **Build.** Teammate implements, runs scoped checks itself, reports with evidence
-   (its agent-definition format), updates task status, idles. Two concurrent writers max,
-   on disjoint path sets each ticket names; a third concurrent writer is not a team run —
-   re-shape or use the one-shot worktree-isolation rule (Step 3). Trust diffs, not task
+   (its agent-definition format), updates task status, idles. **One concurrent writer
+   max per wave** (v16 — was two on disjoint paths: teammates share the checkout, so a
+   second writer shares the first one's *execution environment*, and mid-wave scoped
+   checks run over the neighbour's uncommitted files — the same hazard that lowered
+   `fan_out.worktree_isolation_from_writers` to 2); readers alongside are fine. A second
+   concurrent writer is not a team run — re-shape into sequential waves or use
+   worktree-isolated one-shots (Step 3). Trust diffs, not task
    states: statuses can lag (docs) — the wave is done when the lead has the diff.
 3. **Deterministic pre-gate.** The lead captures the wave diff from disk (`git diff`,
    never the self-report) and re-runs the code-gradeable criteria. FAIL → straight back

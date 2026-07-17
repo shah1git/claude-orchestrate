@@ -214,8 +214,9 @@ expensive runs, present the plan and get explicit user approval before the first
 call. Lead-only, main loop.
 
 Fire when the run is both *expensive* and *consequential* — any of:
-- tier is **Complex multi-part** with a real fan-out (≥ 3 workers / the worktree-isolation
-  threshold, Step 3); OR
+- tier is **Complex multi-part** with a real fan-out (≥ 3 workers; decoupled from the
+  worktree-isolation threshold since v16 lowered that to 2 — isolation is hygiene, not a
+  cost signal); OR
 - the deliverable is headed for production/main, will be published outside the team, or
   will be acted on without anyone reading it first (Step 4.3 — these no longer pick a
   deeper gate, since the gate no longer scales, but they still mark a run worth pausing
@@ -533,15 +534,19 @@ Rules:
 **Working-tree discipline (write tickets).** Parallel builders share one checkout —
 plan around it:
 
-- **Three or more concurrent writers → worktree isolation is mandatory**: spawn every
-  builder in the wave with `isolation: "worktree"` and integrate the diffs yourself,
-  regardless of how disjoint the path sets look. Structural isolation removes the
-  cross-contamination error class instead of policing it; the shared-checkout rules
-  below then apply only to waves of one or two writers.
-- Parallel writes on a shared checkout only on **disjoint path sets**. If two subtasks
-  must touch the same file, chain them sequentially and pass the first diff as INPUT to
-  the second. For genuinely conflicting parallel work, spawn builders with
-  `isolation: "worktree"` and integrate the diffs yourself.
+- **Two or more concurrent writers → worktree isolation is mandatory** (config
+  `fan_out.worktree_isolation_from_writers`; v16 — was 3): spawn every builder in the
+  wave with `isolation: "worktree"` and integrate the diffs yourself, regardless of how
+  disjoint the path sets look. Structural isolation removes the cross-contamination
+  error class instead of policing it — and, decisively, keeps each writer's *execution
+  environment* hermetic: snapshot discipline attributes diffs correctly even in a shared
+  tree, but a test or build run there still sees the neighbour's uncommitted files, so a
+  red (or accidentally-green) neighbour poisons a deterministic verdict (the 2026-07-17
+  Mac episode: one writer's suite ran the other's in-flight tests). A shared checkout
+  hosts at most one concurrent writer.
+- If two subtasks must touch the **same file**, worktrees alone don't solve it — chain
+  them sequentially and pass the first diff as INPUT to the second, or route both hunks
+  into one ticket. Isolation prevents contamination, not semantic merge conflicts.
 - A **Codex coding-hand** (references/cross-provider.md) is a writer like any builder: give
   it `sandbox: workspace-write` and `cwd` set to a dedicated worktree, never
   `danger-full-access`. Capture its diff from disk (`git diff`), not its self-report, and
