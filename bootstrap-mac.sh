@@ -21,15 +21,24 @@
 # Идемпотентен: повторный запуск = обновление всех трёх репозиториев и
 # перекладка симлинков. Это и есть механизм «подтянуть свежие скиллы Покока».
 #
-# Первый запуск (репозитория ещё нет на машине):
-#   sudo mkdir -p /opt/claude-orchestrate /opt/tools \
-#     && sudo chown -R "$(id -un)" /opt/claude-orchestrate /opt/tools
-#   git clone https://github.com/shah1git/claude-orchestrate.git /opt/claude-orchestrate
-#   bash /opt/claude-orchestrate/bootstrap-mac.sh
+# Первый запуск: клонируйте репозиторий куда удобно (симлинки установки будут
+# указывать именно туда, поэтому место должно быть постоянным) и запустите
+# скрипт из чекаута:
+#   git clone https://github.com/shah1git/claude-orchestrate.git ~/projects/claude-orchestrate
+#   bash ~/projects/claude-orchestrate/bootstrap-mac.sh
+# sudo потребуется только для /opt/tools (путь моста фиксирован — его ждут
+# вызовы лейнов в references/cross-provider.md).
 # =============================================================================
 set -euo pipefail
 
-ORCH_DIR="/opt/claude-orchestrate"
+# Каталог оркестрации = репозиторий, в котором лежит сам скрипт (тот же приём,
+# что в install.sh) — уважаем место, куда владелец положил чекаут. Жёсткий
+# /opt/claude-orchestrate был бы вторым экземпляром, копии бы разъехались.
+ORCH_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+if [ ! -d "${ORCH_DIR}/skill/orchestrate" ]; then
+  echo "✗ рядом со скриптом нет skill/orchestrate — запускайте bootstrap-mac.sh из чекаута claude-orchestrate" >&2
+  exit 1
+fi
 BRIDGE_DIR="/opt/tools/agent-bridge"
 POCOCK_CACHE="/opt/tools/mattpocock-skills"   # клон апстрима; канон живёт не здесь,
                                               # а в ~/.agents/skills (копии, как на ВПС)
