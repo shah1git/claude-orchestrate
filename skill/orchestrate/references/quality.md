@@ -192,12 +192,32 @@ concentrated in security/auth/transactional work — rounds beyond the caps re-d
 they do not converge; the 2026-07-12 a real project case (several "final reviews" costing
 more than the 210-line feature) is the incident that pinned this.
 
+**Session budget (v15).** The run-level counterpart of the proportionality stop: when
+the run's cumulative token spend across this run's §7 records crosses config
+`session_budget.tokens_max`, the lead stops dispatching new tickets, lets in-flight
+tickets finish their gates, and reports the remaining frontier as not-done — with
+tracker state left clean enough for a fresh run to pick up where this one stopped
+(`on_exceed: stop-dispatch-finish-gates-report`). The check is mechanical — sum the §7
+token figures at every dispatch point. Override is a named lead decision logged in
+telemetry, never silent. Grounding: the same 2026-07-17 neighbour-project incident — an
+overnight loop with no external budget spun to 4× the volume of everything previously
+accepted; per-ticket caps bound the loops *inside* a ticket, this bounds the run.
+
 ## 4. Rubric templates by deliverable type
 
 **Code change** (default criteria to put in ACCEPTANCE):
 - deterministic: tests pass (output shown), typecheck/build pass, diff confined to the
   ticket's named paths (graded against the per-ticket diff snapshot — see SKILL.md
   "Working-tree discipline" — never against global git status during a parallel wave);
+- deterministic, **size ceiling** (v15): total diff lines — insertions + deletions by
+  `git diff --numstat` against the same per-ticket snapshot — stay under config
+  `gates.pre_gate.max_diff_lines`, unless the ticket itself declared a larger expected
+  volume up front (`override: ticket-declared-only`; the lead's named decision in
+  telemetry). A breach is a deterministic FAIL back to the producer — cut the work into
+  tracer bullets — never a critic question, and never grounds to raise the ceiling after
+  the fact. Grounding: the 2026-07-17 neighbour-project incident (a planned 2–4k-line
+  task ballooned to ~43k uncommitted lines overnight); generation is free for a model,
+  so volume is a tripwire, not an effort signal;
 - deterministic, **UI-facing changes**: the primary user flow is exercised *live* — a
   scripted browser/DOM interaction, or a hand click-through when scripting is
   impractical — so the real event handlers fire before acceptance. tsc, build, and code
