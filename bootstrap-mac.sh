@@ -148,6 +148,34 @@ fi
 echo "== /orchestrate =="
 bash "${ORCH_DIR}/install.sh"
 
+# --- 5.5 Телеметрия: подключение к приватному репо (если клон уже есть) ------
+# Адрес телеметрийного репо здесь сознательно не хранится (главный репозиторий
+# остаётся пригодным к публикации): шаг срабатывает, только если владелец сам
+# склонировал приватное репо в один из двух конвенционных путей. Каждая машина
+# пишет в machines/<hostname> — слияние бесконфликтно по построению; дальше
+# синхронизация — telemetry-sync.sh.
+echo "== Телеметрия =="
+TELEM_LINK="${ORCH_DIR}/skill/orchestrate/telemetry"
+for cand in "${HOME}/orchestrate-telemetry" "/opt/orchestrate-telemetry"; do
+  if [ -d "${cand}/.git" ] && [ ! -L "${TELEM_LINK}" ]; then
+    mdir="${cand}/machines/$(hostname)"
+    mkdir -p "${mdir}"
+    if [ -d "${TELEM_LINK}" ]; then
+      # Переносим накопленное на этой машине в её каталог (перенос, не удаление).
+      find "${TELEM_LINK}" -mindepth 1 -maxdepth 1 -exec mv {} "${mdir}/" \;
+      rmdir "${TELEM_LINK}"
+    fi
+    ln -s "${mdir}" "${TELEM_LINK}"
+    ok "телеметрия подключена: ${TELEM_LINK} -> ${mdir}"
+    break
+  fi
+done
+if [ -L "${TELEM_LINK}" ]; then
+  ok "телеметрия пишется в приватное репо ($(readlink "${TELEM_LINK}"))"
+else
+  warn "телеметрия локальная: клона телеметрийного репо нет — склонируйте его в ~/orchestrate-telemetry и перезапустите (см. telemetry-sync.sh)"
+fi
+
 # --- 6. Самопроверка ---------------------------------------------------------
 echo "== Самопроверка =="
 node "${BRIDGE_DIR}/run-external-agent.mjs" --detect || warn "bridge --detect завершился с ошибкой — проверьте Node и логины"
