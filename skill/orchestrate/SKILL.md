@@ -493,6 +493,26 @@ terminal element is an honest behavior, not a substitute model: `report-blocker`
 telemetry record as `fallback_from` + `fallback_reason` (quality.md §7) — that is how
 quota pressure becomes visible in the data instead of silently reshaping routing.
 
+**Provider breaker — when a whole provider is down, not one lane (v20, config
+`availability.breaker`).** The per-lane chains above are the first line: they answer *this
+call failed*. A provider that has fallen over entirely produces a stream of identical
+failures, and hitting each lane's chain separately means eating a timeout per ticket. The
+breaker is the second line: it counts failures **per provider** (`availability.provider_map`
+says which lanes belong to whom). Hard signals — quota window, lapsed subscription, absent
+connector, a fail-closed sandbox that would not apply — degrade the provider on the first
+event; soft signals (connector error, timeout) need two failures on **two different**
+dispatches (two failures on the *same* ticket may be a prompt property, e.g. a safety
+classifier, not a dead surface). Once open, reroute every pending lane of that provider
+**proactively** (`fallback_reason: provider-degraded`) without touching the dead surface —
+that is the whole win. Probe to revive only at a wave boundary, at most twice a run, and
+send the first live ticket back on a non-gate lane (a half-alive transport that loses tool
+output produces exactly the false PASS we must not let into the gate). A second open writes
+the provider off for the run. Across runs the counter is **not** carried (runs are hours
+apart); instead, at Step 2 — right where `--detect` already runs — read the last 24h of
+`provider_health` events, and if a provider ended a prior run open, require a canary before
+the first live dispatch to it. When reading the `critic` and `standards-lens` chains, apply
+`independence_filter: skip-producer-vendor` — never let a critic grade its own vendor's work.
+
 ## Step 3 — Delegate with task tickets
 
 Workers start with a **fresh, isolated context** — they see none of your conversation
@@ -682,6 +702,30 @@ plan around it:
    stale result complete a newer dispatch. The team channel applies the same rule per
    wave. (Adopted 2026-07-12 from Orca's dispatch-scoped `worker_done` authority,
    which rejects completions carrying a stale dispatch identity.)
+   **Death mid-flight ≠ quality FAIL (v20, config `availability.midflight`).** A worker
+   whose transport dies mid-ticket — nonzero transport exit, `ok:false` of transport
+   class, empty/truncated stream, timeout with no output, a sudden login prompt — is an
+   availability event: it does **not** burn `max_attempts_per_subtask`. It has its own
+   limit (`redispatch_max_per_ticket: 2`) and re-dispatches the same ticket on a **fresh
+   worktree** with a repeated stale-base check. The dead worker's partial diff is taken
+   from disk and handed to the replacement as an **untrusted reference INPUT, not a base**
+   (a half-finished refactor is internally inconsistent) — promoting it to a base is a
+   named lead decision. The test of death-vs-quality is whether a usable report exists;
+   ambiguity resolves to quality (the availability path is the cheaper outcome, so it must
+   not become a loophole for endless retries).
+   **Run continuity when Claude itself thins (v20, config `availability.lead`).** Two
+   disciplines, both on the wave boundary. (a) **Quota forecast:** before dispatching the
+   next wave, sum the run's spend against the remaining Claude window; if what is left will
+   not cover the wave plus its gates plus synthesis, stop early
+   (`stop-dispatch-finish-gates-report`) — a predictable quota death becomes a planned stop
+   with a report, not a mid-sentence cut. (b) **Resume-pack:** after each wave, write a
+   run-state snapshot to `telemetry/run-state/<run_id>.md` — frontier/tracker state,
+   in-flight tickets with attempt identities, worktree paths and their purpose, provider
+   health, the config fingerprint. If Claude vanishes entirely, orchestration simply stops
+   — there is no substitute lead (`emergency_foreign_lead: forbidden`, `custodian_mode:
+   disabled`; owner 2026-07-19: no Claude → wait for it) — and a returning session reads
+   the pack and continues from where it stopped, discarding orphaned workers by the
+   attempt-scoped rule above. Cost is a few lines per wave; the payoff is a resumable run.
    **Adjudicate findings before burning any rung (v8; quality.md §3a/§3b).** Triage the
    critics' merged, deduplicated findings yourself before writing the retry ticket: only
    accepted `introduced` critical/major findings go to the producer; `pre-existing`
