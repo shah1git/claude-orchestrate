@@ -229,6 +229,28 @@ if command -v grok >/dev/null; then
   fi
 fi
 
+# --- 5.8 Ужесточение Kimi Code CLI (аудит 2026-07-18; references/kimi/) --------
+# Только если kimi установлен. Безопасная часть (telemetry=false) — в глобальный
+# конфиг; функцио-затрагивающие ручки (auto-update, cron, services) НЕ форсим
+# глобально — их лейн передаёт через env при спавне (не трогает интерактивные
+# сессии владельца в omp/нативном CLI). Молчаливой выгрузки репо у Kimi нет
+# (в отличие от Grok) — см. references/kimi/README.md.
+if command -v kimi >/dev/null || [ -x "${HOME}/.kimi-code/bin/kimi" ]; then
+  echo "== Ужесточение Kimi =="
+  KCFG="${HOME}/.kimi-code/config.toml"
+  if [ -f "${KCFG}" ]; then
+    if head -c 200 "${KCFG}" | grep -q '^telemetry'; then
+      ok "~/.kimi-code/config.toml: telemetry уже задан"
+    else
+      printf 'telemetry = false  # egress-hardening (references/kimi)\n' | cat - "${KCFG}" > "${KCFG}.tmp" && mv "${KCFG}.tmp" "${KCFG}"
+      ok "~/.kimi-code/config.toml: telemetry = false (privacy, без потери функций)"
+    fi
+  else
+    warn "~/.kimi-code/config.toml нет — залогинься в kimi, затем перезапусти bootstrap"
+  fi
+  warn "лейн Kimi спавнить с env: KIMI_DISABLE_TELEMETRY=1 KIMI_CODE_NO_AUTO_UPDATE=1 KIMI_DISABLE_CRON=1 (см. references/kimi/README.md); /feedback не использовать"
+fi
+
 # --- 6. Самопроверка ---------------------------------------------------------
 echo "== Самопроверка =="
 node "${BRIDGE_DIR}/run-external-agent.mjs" --detect || warn "bridge --detect завершился с ошибкой — проверьте Node и логины"
