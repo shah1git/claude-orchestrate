@@ -18,6 +18,9 @@ SEALED=(
   tasks/scout/t1/hidden/key.json
   tasks/scout/t2/hidden/key.json
   tasks/scout/t3/hidden
+  tasks/recon/t1/hidden/key.json
+  tasks/recon/t2/hidden/key.json
+  tasks/recon/t3/hidden/key.json
   tasks/builder/t1/hidden
   tasks/builder/t2/hidden
   tasks/critic/t1/hidden
