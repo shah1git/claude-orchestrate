@@ -512,6 +512,18 @@ Rules:
 
 - **Parallel by default.** Spawn all independent workers in a single message (multiple
   Agent calls in one block). Typical healthy fan-out: 3–5 concurrent workers.
+- **Tag every spawn's `description` with `[<tier>·<effort>]`** so the agent panel shows
+  at a glance which model and reasoning effort each running worker costs — the dominant
+  quota signal in a multi-model fan-out. Prefix the Agent-tool `description` (which the
+  panel renders as the row label) with the lane you actually dispatched: `[sonnet·high]
+  чистка дубля политики`, `[fable·xhigh] аудит адаптеров`, `[luna·medium] инвентаризация`,
+  `[grok4.5·high] билд медиатеки`. The **lead is the source of truth** — it chose the
+  route, so it knows both fields (canonical agents from `agents/*.md` frontmatter,
+  cross-provider lanes from `cross_provider.lanes`; a `general-purpose` wrapper around a
+  bridge call still gets the lane's real tier·effort, not "general-purpose"). Why here
+  and not a `subagentStatusLine`: the panel's per-subagent JSON carries `model` but **not
+  effort** and **not** the agent-type name (verified 2026-07-18), so only a lead-authored
+  label can show both truthfully and survive every harness version and machine.
 - **Calibrate ticket style to the model tier** — this is where per-model prompting lives:
   - `scout` (Haiku): maximally explicit — enumerated steps, exact paths and commands, a
     literal example of the expected output, and an escape hatch ("if the instructions
