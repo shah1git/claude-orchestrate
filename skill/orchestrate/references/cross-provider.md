@@ -261,10 +261,16 @@ family bump (same policy as delegation.md banners).
   stamp `fallback_from`/`fallback_reason` into the ticket's telemetry record, and proceed.
   Absence is never a run-blocking error, and an availability reroute consumes no escalation
   attempts (SKILL.md Step 2, "Availability fallbacks").
-- **Runtime failure** (present but the call errors / times out / `ok:false`): treat as a worker
-  FAIL feeding the escalation ladder (Step 4) — ① one retry → ② escalate to the Claude default
-  → ③ report the blocker. A cross-provider failure never escapes the ladder. Two named Codex
-  failure causes to check before burning the retry: (a) **stale client** — Codex CLI below
+- **Runtime failure** — v20 splits this by TYPE (config `availability.midflight`):
+  - **Transport death** (nonzero transport exit, `ok:false` of transport class, empty/truncated
+    stream, timeout with no output, sudden login prompt) is an AVAILABILITY event, NOT a quality
+    FAIL: it does not burn `max_attempts_per_subtask`; it re-dispatches the same ticket on a
+    fresh worktree per the role's fallback chain and feeds the provider breaker (`availability.breaker`).
+    Ambiguity (a report exists but carries transport artefacts) resolves to quality.
+  - **Content failure** (transport intact, a usable-but-wrong report) is a worker FAIL feeding the
+    escalation ladder (Step 4) — ① one retry → ② escalate to the default → ③ report the blocker.
+  A cross-provider content failure never escapes the ladder. Two named Codex failure causes to
+  check before burning the retry: (a) **stale client** — Codex CLI below
   0.144.0 hides the GPT-5.6 models entirely (documented minimum; this machine sits exactly at
   it), presenting as "model unavailable" — our 2026-07-09 `SKIPPED` routing-log record was
   exactly this; the fix is an upgrade, not a retry. (b) **safety classifiers** — OpenAI runs
