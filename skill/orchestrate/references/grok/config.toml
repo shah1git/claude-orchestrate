@@ -1,0 +1,29 @@
+# Референс ~/.grok/config.toml для Grok-лейнов /orchestrate: минимум egress.
+# Основание — аудит grok-build 2026-07-18 (память: grok-build-audit.md).
+# Устанавливается в ~/.grok/config.toml скриптом bootstrap-mac.sh, ЕСЛИ файла
+# ещё нет (иначе — предупреждение «слить вручную», чтобы не затереть твои ключи).
+#
+# Почему каждый ключ: механизм выгрузки в GCS xAI жив в коде и по умолчанию
+# выключен, НО удалённые настройки сервера идут раньше дефолта — xAI может
+# включить телеметрию/выгрузку удалённо. Локальные выключатели ниже перебивают
+# удалённые. Список исключений выгрузки НЕ содержит .ssh/*.pem/.env — потому
+# выключаем канал целиком, а не полагаемся на skip-лист.
+
+[features]
+telemetry = false            # локальный off бьёт remote settings xAI
+codebase_indexing = false    # code-nav не нужен headless-лейну
+
+[telemetry]
+trace_upload = false         # пояс к подтяжкам: GCS-выгрузка off, даже если telemetry включат
+
+[diagnostics]
+error_reporting = false      # Sentry off
+
+[cli]
+auto_update = false           # не тянуть неаудированные бинарники поверх пина
+
+[sandbox]
+profile = "orchestrate"      # кастомный fail-closed профиль — см. sandbox.toml (его
+                             # генерирует bootstrap с абсолютными deny-путями этой машины)
+auto_allow_bash = true       # безопасный способ убрать permission-промпты в headless:
+                             # действует ТОЛЬКО при реально применённой песочнице

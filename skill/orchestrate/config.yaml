@@ -26,7 +26,16 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 16
+version: 17
+# v17 (2026-07-18): ужесточение Grok-лейнов после аудита открытого дерева
+#      grok-build (память grok-build-audit.md). Grok-CLI по умолчанию без песочницы
+#      (fail-open встроенных профилей; workspace читает весь /), канал выгрузки в
+#      GCS xAI жив и удалённо-включаем (untracked-файлы, .ssh/.pem/.env не исключены),
+#      официальный бинарь несёт вшитые точки выгрузки. Решение владельца: ужесточить,
+#      лейны оставить. grok-build/composer-build: sandbox workspace -> кастомный
+#      fail-closed orchestrate; новый блок cross_provider.grok_hardening (config-файл,
+#      env-выключатели, preflight-проверка песочницы, пин самосборки 0.2.102 как цель).
+#      Референсы + обоснование — references/grok/. Проза дефолтов не менялась.
 # v16 (2026-07-17): fan_out.worktree_isolation_from_writers 3 -> 2 (эпизод на маке,
 #      волна Т3/#137: два писателя в общем дереве — атрибуция диффов чистая, но общая
 #      среда исполнения; тесты одного прогонялись поверх незакоммиченных файлов
@@ -397,23 +406,47 @@ cross_provider:
     grok-build:                    # ПИЛОТ builder (v13; см. pilots ниже) — зеркало codex-code
       model: grok-4.5
       effort: high                 # high/medium/low; low для рутинной механики
-      sandbox: workspace           # cwd = ВЫДЕЛЕННЫЙ worktree ОБЯЗАТЕЛЬНО: песочница Grok
-                                   # читает диск целиком (strict=CWD+system — единственная
-                                   # изолирующая), контаминация 2026-07-15 → worktree строго
+      sandbox: orchestrate         # v17: было workspace — аудит 2026-07-18 доказал, что
+                                   # workspace читает весь / (изолирует лишь запись). Кастомный
+                                   # fail-closed профиль orchestrate (extends strict + deny) —
+                                   # references/grok/. worktree по-прежнему ОБЯЗАТЕЛЕН.
       never_critic: true           # reward-hacking репутация (METR); одна честная проба не снимает
+      hardening: grok_hardening    # v17: см. блок ниже — обязателен перед диспетчем
     composer-build:                # ПИЛОТ дешёвого исполнителя (v14; см. pilots ниже)
       model: grok-composer-2.5-fast
                                    # reasoning-effort НЕ поддерживает (быстрая кодовая модель)
-      sandbox: workspace           # тот же Grok-CLI-транспорт → worktree обязателен (см. grok-build)
+      sandbox: orchestrate         # v17: тот же кастомный fail-closed профиль (см. grok-build)
       never_critic: true
       spell_out_conventions: true  # v14: t1-провал — угадал не тот порядок кодов; в тикет
                                    # Composer конвенции (порядок кодов/полей) писать ЯВНО
+      hardening: grok_hardening    # v17
     gemini-critic:                 # альтернативная кросс-линза
       model: "Gemini 3.1 Pro (High)"
     gemini-recon:                  # большой контекст / веб-разведка
       model: "Gemini 3.5 Flash (High)"
     gemini-recon-cheap:            # высокообъёмная механика
       model: "Gemini 3.5 Flash (Low)"
+
+  # v17 (аудит grok-build 2026-07-18, память grok-build-audit.md): обязательное
+  # ужесточение обоих Grok-лейнов. Grok-CLI по умолчанию БЕЗ песочницы и с живым,
+  # удалённо-включаемым каналом выгрузки в GCS xAI (untracked-файлы, .ssh/.pem/.env
+  # НЕ исключены). Три уровня защиты + проверка; без применённой песочницы Grok не
+  # диспетчить (fail-closed). Готовые файлы и обоснование — references/grok/.
+  grok_hardening:
+    config_file: references/grok/config.toml   # -> ~/.grok/config.toml (bootstrap ставит, если нет)
+    sandbox_profile: orchestrate               # кастом extends strict + deny; наличие deny =>
+                                               # обязательный bubblewrap => fail-closed
+    # env спавнера лейна (дублируют config, переживают подмену файла):
+    env:
+      GROK_SANDBOX: orchestrate
+      GROK_TELEMETRY_ENABLED: "0"
+      GROK_TELEMETRY_TRACE_UPLOAD: "0"
+      DISABLE_ERROR_REPORTING: "1"
+      GROK_DISABLE_AUTOUPDATER: "1"
+    # Проверка в раннере ПОСЛЕ старта лейна: без ProfileApplied — валить прогон.
+    preflight_verify: "~/.grok/sandbox-events.jsonl содержит ProfileApplied; ApplyFailed / 'sandbox could not be applied' в stderr = FAIL"
+    version_pin_target: "self-build 0.2.102 из открытого дерева (без вшитых точек выгрузки); до готовности — официальный бинарь, ужатый тремя уровнями (наружу только инференс); 0.2.101 вывести после пина"
+    dispatch_gate: "нет применённой песочницы orchestrate -> Grok-лейн не диспетчить"
 
   # Базовое распределение под quota-spread (Use 4): лейн -> дефолтный маршрут.
   # v3: спред — постоянная политика, а не режим «когда окно уже кончилось»:

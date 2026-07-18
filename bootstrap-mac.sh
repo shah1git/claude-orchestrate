@@ -176,6 +176,59 @@ else
   warn "телеметрия локальная: клона телеметрийного репо нет — склонируйте его в ~/orchestrate-telemetry и перезапустите (см. telemetry-sync.sh)"
 fi
 
+# --- 5.7 Ужесточение Grok (config v17; references/grok/) ---------------------
+# Только если grok CLI установлен. Три уровня: config.toml (ставим, если нет —
+# не затираем твои ключи), кастомный fail-closed профиль песочницы sandbox.toml
+# (генерируем с АБСОЛЮТНЫМИ deny-путями этой машины — тильда в deny не
+# раскрывается), bubblewrap (обязателен для fail-closed). env-выключатели
+# спавнер лейна ставит сам (cross_provider.grok_hardening.env).
+if command -v grok >/dev/null; then
+  echo "== Ужесточение Grok =="
+  GROK_HOME="${HOME}/.grok"
+  mkdir -p "${GROK_HOME}"
+
+  # config.toml — ставим, только если файла ещё нет (иначе можем затереть ключи).
+  if [ -f "${GROK_HOME}/config.toml" ]; then
+    warn "~/.grok/config.toml уже есть — НЕ трогаю; сверь с ${ORCH_DIR}/skill/orchestrate/references/grok/config.toml и слей вручную"
+  else
+    cp "${ORCH_DIR}/skill/orchestrate/references/grok/config.toml" "${GROK_HOME}/config.toml"
+    ok "~/.grok/config.toml установлен (выключатели телеметрии/выгрузки + профиль orchestrate)"
+  fi
+
+  # sandbox.toml — генерируем с реальными абсолютными deny-путями (только
+  # существующие каталоги; тильда в deny grok'ом НЕ раскрывается).
+  deny_entries=""
+  for p in "${HOME}/.ssh" "${HOME}/.claude" "${HOME}/.codex" "${HOME}/.agents" /opt/rikanv-doctrine; do
+    [ -e "${p}" ] && deny_entries="${deny_entries}\"${p}\", "
+  done
+  {
+    echo "# Кастомный fail-closed профиль песочницы Grok для /orchestrate."
+    echo "# Сгенерирован bootstrap-mac.sh с абсолютными deny-путями этой машины"
+    echo "# (тильда в deny НЕ раскрывается). Наличие deny => обязателен bubblewrap"
+    echo "# => fail-closed вместо fail-open встроенных профилей. Обоснование —"
+    echo "# skill/orchestrate/references/grok/README.md."
+    echo "[profiles.orchestrate]"
+    echo "extends = \"strict\""
+    echo "deny = [${deny_entries%, }]"
+  } > "${GROK_HOME}/sandbox.toml"
+  ok "~/.grok/sandbox.toml сгенерирован (deny: $(echo "${deny_entries%, }" | tr -d '"'))"
+
+  # bubblewrap — обязателен для fail-closed кастомного профиля.
+  if command -v bwrap >/dev/null; then
+    ok "bubblewrap: $(command -v bwrap)"
+  elif command -v apt-get >/dev/null; then
+    warn "bubblewrap не найден — ставлю (нужен sudo)"; sudo apt-get install -y bubblewrap >/dev/null 2>&1 && ok "bubblewrap установлен" || warn "не смог поставить bubblewrap — установи вручную (apt/brew), иначе профиль orchestrate не стартует"
+  else
+    warn "bubblewrap не найден и apt-get недоступен (macOS?) — установи вручную (brew install bubblewrap не существует; на macOS песочница идёт через Seatbelt, bwrap не нужен — профиль orchestrate применится нативно)"
+  fi
+
+  # Пред-открытый бинарь: предупреждаем про самосборку.
+  gv="$(grok --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  if [ "${gv}" = "0.2.101" ] || [ -z "${gv}" ]; then
+    warn "grok ${gv:-?} собран до открытия исходников — цель: самосборка 0.2.102 из xai-org/grok-build (references/grok/README.md); до неё лейны на официальном бинаре, ужатом конфигом"
+  fi
+fi
+
 # --- 6. Самопроверка ---------------------------------------------------------
 echo "== Самопроверка =="
 node "${BRIDGE_DIR}/run-external-agent.mjs" --detect || warn "bridge --detect завершился с ошибкой — проверьте Node и логины"
