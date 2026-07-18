@@ -26,7 +26,15 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 18
+version: 19
+# v19 (2026-07-19): исправлен ТРАНСПОРТ Gemini. Прямой `agy -p --model "<имя>"`
+#      честно учитывает модель в headless (agy валидирует имя модели) — открывает и
+#      Flash, и Pro на Google-квоте владельца. Обёртка gemini-mcp-tool Flash-locked
+#      в print (пин игнорит), gemini-путь bridge искажает промпт — оба НЕ использовать.
+#      Лейны gemini переведены на transport: agy-print; добавлен gemini-pro-recon
+#      (3.1 Pro, 2M-контекст для глубокой разведки/ревью). Качество-несущие роли
+#      Gemini (критик/линза/билдер) — только после полигона+теста честности, как
+#      Grok/Kimi (у Gemini хуже трек-рекорд: правил деливерабл вместо ревью).
 # v18 (2026-07-19, решение владельца на данных полигона): Grok-4.5 и Kimi-k3
 #      продвинуты в ПОЛНЫЕ лейны со всеми ролями Sol/Opus, включая критика.
 #      Основание: три трудные architect-задачи (t3 root-cause, t4 кросс-модуль с
@@ -460,12 +468,26 @@ cross_provider:
       critic_eligible: honesty-cleared-2026-07-19   # self-preference guard: kimi не судит kimi
       client_data: never          # обучение на контенте без opt-out ([[kimi-k3]]) -> данные
                                    # клиентов (rika-crm/retailcrm) мимо Kimi
-    gemini-critic:                 # альтернативная кросс-линза
+    # v19 (2026-07-19): ТРАНСПОРТ Gemini исправлен. Прямой `agy -p --model "<имя>"`
+    # ЧЕСТНО учитывает модель в headless (проверено: agy валидирует имя — отверг
+    # несуществующую модель, отработал «Gemini 3.1 Pro»). Это открывает и Flash, и
+    # Pro на Google-квоте владельца. НЕ использовать: (а) обёртку gemini-mcp-tool —
+    # она Flash-locked в print-режиме (игнорирует пин); (б) gemini-путь agent-bridge —
+    # искажает промпт (старый баг). Команда лейна: agy -p "<промпт>" --model "<имя>"
+    #   --print-timeout 5m  (в worktree; агент запускать с дозволенными инструментами).
+    # Pro-контекст 2M — силён для глубокого ревью больших диффов.
+    gemini-critic:                 # альтернативная кросс-линза (2M-контекст ревью)
       model: "Gemini 3.1 Pro (High)"
+      transport: agy-print         # agy -p --model; НЕ mcp-обёртка (Flash-lock), НЕ bridge
     gemini-recon:                  # большой контекст / веб-разведка
       model: "Gemini 3.5 Flash (High)"
+      transport: agy-print
     gemini-recon-cheap:            # высокообъёмная механика
       model: "Gemini 3.5 Flash (Low)"
+      transport: agy-print
+    gemini-pro-recon:              # v19: глубокая разведка/чтение в 2M-контексте (Pro)
+      model: "Gemini 3.1 Pro (High)"
+      transport: agy-print
 
   # v17 (аудит grok-build 2026-07-18, память grok-build-audit.md): обязательное
   # ужесточение обоих Grok-лейнов. Grok-CLI по умолчанию БЕЗ песочницы и с живым,
