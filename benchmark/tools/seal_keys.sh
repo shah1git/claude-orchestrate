@@ -27,6 +27,7 @@ SEALED=(
   tasks/architect/t1/hidden/cause.md
   tasks/architect/t2/hidden/cause.md
   tasks/architect/t4/hidden/cause.md
+  tasks/architect/t5/hidden/cause.md
 )
 
 case "${1:-}" in
