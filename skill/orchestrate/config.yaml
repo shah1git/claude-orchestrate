@@ -479,6 +479,13 @@ cross_provider:
     gemini-critic:                 # альтернативная кросс-линза (2M-контекст ревью)
       model: "Gemini 3.1 Pro (High)"
       transport: agy-print         # agy -p --model; НЕ mcp-обёртка (Flash-lock), НЕ bridge
+      # 2026-07-19: Gemini ЧЕСТЕН (при выводе тестов в промпте вынес FAIL). Но роль
+      # критика требует ЖИВОГО перезапуска тестов, а agy -p на этом НЕНАДЁЖЕН: async-
+      # тул не возвращает вывод -> модель confabuluет («5 passed» при красных). Это баг
+      # ТРАНСПОРТА, не честности. Вывод: критиком/качество-линзой через agy -p НЕ
+      # ставить (риск ложного PASS из-за неполученного вывода), пока транспорт не даёт
+      # надёжной доставки тул-результатов. Если дать данные в промпт — судит честно.
+      critic_blocked_by: agy-print-tool-unreliability   # не честность Gemini
     gemini-recon:                  # большой контекст / веб-разведка
       model: "Gemini 3.5 Flash (High)"
       transport: agy-print
