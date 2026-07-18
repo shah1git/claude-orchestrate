@@ -26,7 +26,19 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 19
+version: 20
+# v20 (2026-07-19, проект архитектора «устойчивость к падению провайдера»):
+#      пофейсовый fallback остаётся первой линией; добавлен ПРЕДОХРАНИТЕЛЬ по
+#      провайдеру (breaker: жёсткие/мягкие сигналы, порог 2×разных диспетча, пробы на
+#      границе волны, written-off на второе открытие, прайор из телеметрии вместо
+#      Orca-переноса счётчика), карта provider_map, independence_filter (критик не
+#      судит вендор продюсера), протокол midflight (смерть транспорта != провал
+#      качества; ре-диспетч со свежим worktree, дифф покойника — справка не база),
+#      блок lead (quota-прогноз на границе волны -> ранний стоп; resume-pack после
+#      каждой волны; emergency_foreign_lead: forbidden; custodian_mode: disabled —
+#      решение владельца: нет Claude -> ждём). Закрыты дыры v18/v19: критик/архитектор
+#      были одно-провайдерными, spec-линзы не было, gemini-critic висел в Standards.
+#      Расширены reasons + телеметрия provider_health. Пороги — догадки, правь по §5.
 # v19 (2026-07-19): исправлен ТРАНСПОРТ Gemini. Прямой `agy -p --model "<имя>"`
 #      честно учитывает модель в headless (agy валидирует имя модели) — открывает и
 #      Flash, и Pro на Google-квоте владельца. Обёртка gemini-mcp-tool Flash-locked
@@ -643,31 +655,99 @@ cross_provider:
 # fallback_reason (quality.md §7).
 # -----------------------------------------------------------------------------
 availability:
+  # v20 (2026-07-19, проект архитектора «устойчивость к падению провайдера»):
+  # пофейсовые цепочки — ПЕРВАЯ линия (один вызов не удался). Предохранитель по
+  # провайдеру (breaker ниже) — ВТОРАЯ: провайдер лёг целиком -> разом перебросить
+  # все его лейны, не долбясь в мёртвое. Цепочки переписаны под v18/v19 (закрыты
+  # дыры: критик/архитектор были одно-провайдерными, spec-линзы не было вовсе,
+  # gemini-critic висел в Standards вопреки блокировке).
   fallbacks:
-    # Claude-агенты (недоступность тира Claude):
-    architect: [fable, opus, report-blocker]            # judgment-пол — Opus; ниже нельзя
-    critic:    [opus, fable, report-blocker]            # первичный грейдер — всегда Claude:
-                                                        # внешней моделью НЕ заменяется
-    builder:   [sonnet, codex-code, opus, lead-inline]  # вбок на Terra, затем вверх
-    scout:     [haiku, gemini-recon-cheap, sonnet, lead-inline]
-                                                        # вбок на Flash Low — только если материал
-                                                        # инлайнится/стейджится; иначе сразу вверх
-    # Кросс-провайдерные лейны (недоступность внешней поверхности):
-    codex-critic:      [codex-critic, gemini-critic, skip-third-lens]
-    gemini-critic:     [gemini-critic, codex-critic, skip-third-lens]
-    codex-code:        [codex-code, builder]
-    codex-recon:       [codex-recon, builder]           # нужен shell -> builder, не scout
+    # Claude-агенты. critic: fable УБРАН (не в ticket-eligible never_shift; конфликт
+    # с fable_ceiling_uses) — теперь три внешних вендора закрывают роль.
+    architect: [fable, opus, sol-xhigh, grok-4.5, kimi-k3, report-blocker]
+    critic:    [opus, sol, grok-4.5, kimi-k3, report-blocker]   # грейдер не обязан быть
+                                                                # Claude (v18); independence_filter ниже
+    builder:   [sonnet, codex-code, grok-build, kimi-k3, opus, lead-inline]
+    scout:     [haiku, gemini-recon-cheap, codex-recon, grok-build, lead-inline]
+    spec-lens: [opus, sol, grok-4.5, kimi-k3, report-blocker]   # v20: цепочки НЕ было
+    # Кросс-провайдерные лейны:
+    codex-critic:      [codex-critic, grok-4.5, kimi-k3, skip-third-lens]   # gemini убран (v19-блок)
+    codex-code:        [codex-code, builder, grok-build, kimi-k3]
+    codex-recon:       [codex-recon, builder, grok-build]       # нужен shell
+    grok-build:        [grok-build, codex-code, sonnet, kimi-k3]
+    composer-build:    [composer-build, codex-code, sonnet]
+    kimi-k3:           [kimi-k3, sonnet, codex-code, grok-build]
     gemini-recon:      [gemini-recon, codex-recon, builder]
-    gemini-recon-cheap: [gemini-recon-cheap, scout]
-    # Ось Standards фиксированного гейта (v12, срез 4, issue #8) — не лейн, а гейт-
-    # обязательная ось: отдельная от пары выше, потому что та обслуживает опциональный
-    # ad hoc второе мнение (легитимно завершается skip-third-lens), а эта — постоянный
-    # член гейта (gates.lenses.standards, cross_provider.defaults.standards_lens) и
-    # пропущена быть не может. Терминал sonnet-inline-note — см. словарь терминалов выше.
-    standards-lens:    [codex-critic, gemini-critic, sonnet-inline-note]
+    gemini-recon-cheap: [gemini-recon-cheap, codex-recon, scout]
+    gemini-pro-recon:  [gemini-pro-recon, kimi-k3, codex-recon, builder]    # 2M->1M с нарезкой
+    # Ось Standards фиксированного гейта: gemini УБРАН (заблокирован v19), заменён
+    # честными критик-eligible. Терминал sonnet-inline-note (гейт-ось пропущена быть
+    # не может, в отличие от codex-critic ad hoc, что легитимно кончается skip-third-lens).
+    standards-lens:    [codex-critic, grok-4.5, kimi-k3, sonnet-inline-note]
 
-  # Словарь причин для fallback_reason (телеметрия):
-  reasons: [quota-window, subscription, connector-absent, connector-error]
+  # Фильтр НЕЗАВИСИМОСТИ (применяется поверх цепочек critic и standards): пропустить
+  # элемент, чей провайдер совпадает с провайдером ПРОДЮСЕРА деливерабла (self-preference,
+  # ADR-0001). Для critic — всегда; для standards — пока есть кандидаты.
+  independence_filter: skip-producer-vendor
+
+  # Карта «провайдер -> его лейны/агенты». ЕДИНСТВЕННОЕ место, где принадлежность
+  # выражена явно (раньше читалась из комментариев). Валидатор проверяет полноту.
+  provider_map:
+    anthropic: [architect, builder, scout, critic, opus, fable, sonnet, haiku, spec-lens, lead]
+    openai:    [codex-critic, codex-code, codex-recon, sol]
+    xai:       [grok-build, composer-build]
+    moonshot:  [kimi-k3]
+    google:    [gemini-recon, gemini-recon-cheap, gemini-pro-recon, gemini-critic]
+
+  # Предохранитель по провайдеру (§1 проекта). Run-scoped, ведёт лид на естественных
+  # точках (диспетч / возврат воркера / граница волны) — НЕ демон.
+  breaker:
+    hard_open: [quota-window, subscription, connector-absent, hardening-gate]  # валят с 1 события
+    soft_open:                                        # мягкие — требуют подтверждения
+      signals: [connector-error, timeout]
+      threshold_failures: 2
+      distinct_dispatches_required: 2                 # 2 отказа на РАЗНЫХ тикетах/лейнах, не на одном
+    not_signals: [quality-fail, needs-clarification, safety-classifier-block]  # НЕ в счётчик
+    on_open: reroute-pending-proactively              # выигрыш: не N таймаутов, а один
+    probe:                                            # воскрешение
+      at: wave-boundary
+      lane: cheapest-of-provider                      # канарейка (luna-low/grok-low/kimi-low/flash-low/haiku)
+      budget_per_run: 2
+      first_ticket_back: non-gate-only                # полуживой транспорт -> ложный PASS; в гейт не пускать
+    second_open: written-off-for-run                  # мигающий хуже мёртвого
+    cross_run: telemetry-prior-not-counter-carry      # НЕ Orca-перенос счётчика: прогоны разделены
+                                                      # часами; вместо этого прайор из телеметрии 24ч +
+                                                      # обязательная канарейка до первого боевого диспетча
+
+  # Протокол падения НА ЛЕТУ (§3). Смерть транспорта != провал качества.
+  midflight:
+    death_evidence: [nonzero-transport-exit, transport-error-ok-false, empty-or-truncated-stream, timeout-no-output, sudden-login-prompt]
+    ambiguity_resolves_to: quality                    # сомнение -> дорога качества (не лазейка для ретраев)
+    redispatch:
+      max_per_ticket: 2                               # свой предел, ОТДЕЛЬНЫЙ от max_attempts_per_subtask
+      fresh_worktree: required
+      stale_base_recheck: required
+      salvage: attach-as-untrusted-input             # дифф покойника — справка, не база
+      salvage_as_base: named-lead-decision-only       # только если прошёл скоуп-проверки целиком
+    wave:
+      completed_reports: valid                        # гейт судит артефакт, а не здоровье провайдера
+      whole_diff_review: waits-for-replacements
+
+  # Особый случай Claude (§4). Граница: жив ли лид как сессия.
+  lead:
+    invariant: session-model-only                     # см. never_shift; аварийного чужого лида нет
+    quota_forecast:                                   # A': смерть по квоте предсказуема — не врезаться
+      at: wave-boundary
+      on_shortfall: stop-dispatch-finish-gates-report # остатка не хватит на волну+гейты+синтез -> плановый стоп
+    resume_pack:                                      # B: полный выпад -> прогон резюмируем
+      when: after-each-wave
+      path: telemetry/run-state/                      # слепок: фронтир, летящие тикеты, worktree, здоровье, config
+    emergency_foreign_lead: forbidden                 # чужой харнесс в роли мозга не аттестован
+    custodian_mode: disabled                          # владелец 2026-07-19: строгая пауза, без не-Claude активности
+
+  # Словарь причин для fallback_reason (телеметрия). v20: +provider-degraded (проактивный
+  # переброс по открытому предохранителю), +hardening-gate (fail-closed песочница не применилась).
+  reasons: [quota-window, subscription, connector-absent, connector-error, provider-degraded, hardening-gate]
 
 # -----------------------------------------------------------------------------
 # Пороги перекалибровки (quality.md §5, §7). Начальные догадки — правь по данным.
@@ -703,6 +783,14 @@ telemetry:
   log: telemetry/routing-log.jsonl
   stamp_records_with_config: true  # поле config: "v<version>+<sha256:7>" в каждой записи
   snapshot_dir: telemetry/config-snapshots
+  provider_health_events: telemetry/routing-log.jsonl  # v20: события provider_health в тот же
+                                                       # поток (без поля verdict -> старые
+                                                       # потребители игнорируют). Поля: provider,
+                                                       # transport, state, trigger, evidence,
+                                                       # failed_dispatches, probe_lane, run_id.
+                                                       # Пер-тикет: +fallback_reason(provider-degraded/
+                                                       # hardening-gate), +redispatch_of/redispatch_no
+                                                       # (отдельно от retries), +salvage, +run_id.
 
 # -----------------------------------------------------------------------------
 # Кандидаты на будущие ручки — пока живут в прозе или не параметризованы вовсе.

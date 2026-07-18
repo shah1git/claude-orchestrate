@@ -381,8 +381,14 @@ and adjudication outcomes stay in `note` as one clause (e.g. `note: "5 findings:
 introduced fixed, 1 decision-challenge dismissed (doc answers it), 2 minor→notes"`) —
 never new verdict spellings; the seven-value vocabulary is unchanged.
 
-Provider fields (optional) — `provider` ∈ `anthropic | openai | google` (default
-`anthropic` when omitted) records which provider actually ran the ticket; and when
+Provider fields (optional) — `provider` ∈ `anthropic | openai | xai | moonshot |
+google` (default `anthropic` when omitted) records which provider actually ran the
+ticket. **v20 fix:** `xai` and `moonshot` were missing, so grok/kimi lanes (live since
+v18) could not honestly stamp their provider — the exact dictionary-drift this field
+exists to prevent. Provider-health rows (`event: provider_health`) and the run-scoped
+`run_id`, `redispatch_of`/`redispatch_no` (separate from `retries`), and `salvage`
+fields are documented under availability (config `availability.breaker`/`midflight`,
+`telemetry.provider_health_events`). When
 `provider != anthropic`, `xprovider_reason` ∈ `independent-lens | context-size |
 quota-spread | lead-judgment` records why the cross-provider route was chosen (SKILL.md
 Step 2, references/cross-provider.md; `user-codex-pref` appears only in pre-mandate
