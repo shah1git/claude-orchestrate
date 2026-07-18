@@ -497,10 +497,16 @@ What NEVER shifts under the mandate — quality is the routing invariant, quota 
 
 - **judgment-class tickets** (`architect`/Fable) and the lead itself — no external model
   substitutes for the deep-reasoning lane (ADR-0001: externals are workers, not orchestrators);
-- **the primary grader** — a Claude critic (Opus) still holds the gate's sole PASS/FAIL
-  verdict; the Standards lens runs in parallel as one of three fixed lenses, never as a
-  verdict-holder itself (Use 1 composition rule), so quota-spread on that lane can never by
-  itself cause a false-accept;
+- **the primary grader** — v18 (2026-07-19): no longer "must be Claude". The gate's sole
+  PASS/FAIL verdict may be held by any **honesty-cleared** lane (opus/critic, sol,
+  grok-4.5, kimi-k3 — the last two cleared 2026-07-19 by an honesty test: as critic over a
+  red test-suite they returned FAIL and did not tamper, plus t3/t4/t5 FULL). The invariant
+  is now honesty + independence, not vendor: a critic never grades **its own vendor's**
+  deliverable and never grades what **it built** (self-preference guard, ADR-0001). Opus
+  stays the default grader; Grok's METR record was lifted on one probe, so every critic
+  verdict is still cross-checked by the deterministic pre-gate (a PASS over red checks
+  surfaces at once). The Standards lens remains one of three fixed lenses, never the sole
+  verdict-holder, so quota-spread on it can never by itself cause a false-accept;
 - **local repo file-walking recon** — `scout` keeps this lane as the *default*, not because
   cross-provider file access is missing (bridge Gemini reads via the staging copy; Codex reads
   its `cwd` natively), but on economics: Haiku is the cheapest quota of all, and Gemini's

@@ -26,7 +26,19 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 17
+version: 18
+# v18 (2026-07-19, решение владельца на данных полигона): Grok-4.5 и Kimi-k3
+#      продвинуты в ПОЛНЫЕ лейны со всеми ролями Sol/Opus, включая критика.
+#      Основание: три трудные architect-задачи (t3 root-cause, t4 кросс-модуль с
+#      приманкой, t5 два гасящих друг друга бага со сверкой величины) — оба FULL
+#      наравне с Opus/Fable/Sol; тест на честность пройден (как критик по красным
+#      тестам вынесли FAIL, файлы не тронули, хотя могли писать). Снят never_critic
+#      с grok-build (переименования ключа нет). Добавлен лейн kimi-k3 + блок
+#      kimi_hardening. never_shift переписан: инвариант теперь не «грейдер=Claude»,
+#      а честность+независимость (критик не судит свой вендор и не судит то, что
+#      построил; self-preference ADR-0001). Fable — дефолт judgment, не эксклюзив.
+#      Composer НЕ повышен (на честность не тестировался). Оговорки: Grok METR-запись
+#      снята одной пробой — честность отслеживаем прегейтом; клиентские данные мимо Kimi.
 # v17 (2026-07-18): ужесточение Grok-лейнов после аудита открытого дерева
 #      grok-build (память grok-build-audit.md). Grok-CLI по умолчанию без песочницы
 #      (fail-open встроенных профилей; workspace читает весь /), канал выгрузки в
@@ -403,15 +415,26 @@ cross_provider:
       effort: medium
       bulk_effort: low
       sandbox: read-only
-    grok-build:                    # ПИЛОТ builder (v13; см. pilots ниже) — зеркало codex-code
+    grok-build:                    # v18: продвинут из пилота в полноценный лейн (ключ
+                                   # исторический — теперь роли шире сборки, см. roles).
+                                   # Решение владельца 2026-07-19 на данных: architect t3/t4/t5
+                                   # (root-cause, кросс-модуль с приманкой, два гасящих бага со
+                                   # сверкой величины) — FULL наравне с Opus/Fable/Sol; тест на
+                                   # честность пройден (вынес FAIL по красным тестам, файлы не
+                                   # тронул, хотя мог). Самый быстрый лейн.
       model: grok-4.5
       effort: high                 # high/medium/low; low для рутинной механики
-      sandbox: orchestrate         # v17: было workspace — аудит 2026-07-18 доказал, что
-                                   # workspace читает весь / (изолирует лишь запись). Кастомный
-                                   # fail-closed профиль orchestrate (extends strict + deny) —
-                                   # references/grok/. worktree по-прежнему ОБЯЗАТЕЛЕН.
-      never_critic: true           # reward-hacking репутация (METR); одна честная проба не снимает
-      hardening: grok_hardening    # v17: см. блок ниже — обязателен перед диспетчем
+      sandbox: orchestrate         # v17: fail-closed профиль (extends strict + deny),
+                                   # references/grok/; worktree ОБЯЗАТЕЛЕН.
+      hardening: grok_hardening    # v17: обязателен перед диспетчем
+      roles: [builder, recon, diagnosis, standards-lens, spec-lens, critic]
+      # v18: never_critic СНЯТ (был: METR reward-hacking). Оговорки к креслу критика:
+      #  (а) self-preference guard — grok НЕ судит деливерабл своего вендора (grok);
+      #  (б) METR-запись серьёзна и снята ОДНОЙ пробой — честность отслеживаем: каждый
+      #      вердикт критика сверяется детерминированным прегейтом (PASS на красных
+      #      проверках всплыл бы сразу). Пересмотреть при первом сигнале нечестности.
+      critic_eligible: honesty-cleared-2026-07-19
+      prefer_for: latency-sensitive   # быстрый оборот сборки/разведки без ultra-цены Codex
     composer-build:                # ПИЛОТ дешёвого исполнителя (v14; см. pilots ниже)
       model: grok-composer-2.5-fast
                                    # reasoning-effort НЕ поддерживает (быстрая кодовая модель)
@@ -420,6 +443,23 @@ cross_provider:
       spell_out_conventions: true  # v14: t1-провал — угадал не тот порядок кодов; в тикет
                                    # Composer конвенции (порядок кодов/полей) писать ЯВНО
       hardening: grok_hardening    # v17
+      # composer НЕ critic_eligible: на честность/суждение не тестировался (дешёвый
+      # быстрый кодер, не k3). never_critic остаётся до отдельной проверки.
+    kimi-k3:                       # v18: новый лейн — Moonshot Kimi Code CLI, модель k3,
+                                   # контекст 1M, подписка Allegretto (OAuth). Решение
+                                   # владельца 2026-07-19 на данных: architect t3/t4/t5 FULL
+                                   # наравне с Opus + тест честности пройден.
+      model: k3
+      effort: high                 # low|high|max (default max)
+      transport: kimi-cli-headless # `kimi -p` (немодифиц. официальный CLI, ToS-совместимо),
+                                   # драйвинг Orca-терминалом; НЕ через bridge (подписочный
+                                   # токен нельзя переиспользовать — бан по ToS).
+      hardening: kimi_hardening    # references/kimi/: telemetry=false + env-выключатели.
+                                   # Своей ФС-песочницы НЕТ -> worktree + OS/контейнер-изоляция.
+      roles: [builder, recon, diagnosis, standards-lens, spec-lens, critic]
+      critic_eligible: honesty-cleared-2026-07-19   # self-preference guard: kimi не судит kimi
+      client_data: never          # обучение на контенте без opt-out ([[kimi-k3]]) -> данные
+                                   # клиентов (rika-crm/retailcrm) мимо Kimi
     gemini-critic:                 # альтернативная кросс-линза
       model: "Gemini 3.1 Pro (High)"
     gemini-recon:                  # большой контекст / веб-разведка
@@ -447,6 +487,19 @@ cross_provider:
     preflight_verify: "~/.grok/sandbox-events.jsonl содержит ProfileApplied; ApplyFailed / 'sandbox could not be applied' в stderr = FAIL"
     version_pin_target: "self-build 0.2.102 из открытого дерева (без вшитых точек выгрузки); до готовности — официальный бинарь, ужатый тремя уровнями (наружу только инференс); 0.2.101 вывести после пина"
     dispatch_gate: "нет применённой песочницы orchestrate -> Grok-лейн не диспетчить"
+
+  # v18: ужесточение Kimi (аудит 2026-07-18, references/kimi/README.md). У Kimi нет
+  # grok-подобной выгрузки репо, но телеметрия и авто-обновление включены по умолчанию,
+  # а логин сам прописывает серверные search/fetch. Своей ФС-песочницы нет.
+  kimi_hardening:
+    config_file: references/kimi/config.toml   # telemetry=false -> ~/.kimi-code/config.toml
+    env:                                       # спавнер лейна (не трогает интерактив владельца)
+      KIMI_DISABLE_TELEMETRY: "1"
+      KIMI_CODE_NO_AUTO_UPDATE: "1"
+      KIMI_DISABLE_CRON: "1"
+    isolation: "своей песочницы нет -> worktree + OS/контейнер (Orca); worktree НЕ барьер чтения"
+    never_feedback: "/feedback не использовать — даже «Logs only» выгружает полный диалог"
+    client_data_gate: "данные клиентов мимо Kimi (обучение без opt-out)"
 
   # Базовое распределение под quota-spread (Use 4): лейн -> дефолтный маршрут.
   # v3: спред — постоянная политика, а не режим «когда окно уже кончилось»:
@@ -480,8 +533,11 @@ cross_provider:
   # пилот с реальным трафиком -> решение пользователя). Сейчас на пилоте никого.
   pilots:
     exit_after_records: 10           # порог решения по каждому будущему лейну
+    promoted:
+      grok-4.5: "v18 (2026-07-19, решение владельца на данных): ПРОДВИНУТ из пилота в полный лейн. architect t3/t4/t5 (root-cause; кросс-модуль с приманкой; два гасящих бага со сверкой величины) — FULL наравне с Opus/Fable/Sol. Тест честности пройден: как критик по красным тестам вынес FAIL, файлы не тронул, хотя мог писать. Роли: builder/recon/diagnosis/standards-lens/spec-lens/critic. Оговорки: self-preference guard (не судит grok), честность отслеживаем (METR-запись + одна проба), worktree+hardening обязательны, самый быстрый лейн."
+      kimi-k3: "v18 (2026-07-19, решение владельца на данных): новый полный лейн. architect t3/t4/t5 — FULL наравне с Opus. Тест честности пройден (FAIL по красным тестам, файлы не тронул). recon: 1M-контекст полигоном не задействован (греппится), преимущества над haiku нет — брать не ради recon, а как фронтир-судью/билдера. Роли те же. Оговорки: self-preference guard, client_data мимо Kimi, worktree+OS-изоляция (своей песочницы нет), kimi_hardening."
     on_pilot:
-      grok-build: "v13 (полигон 2026-07-15): grok-4.5 прошёл scout t1/t2/t3 (все размеры, 1.0) + builder t1 (кодинг по спеке 100%) + 0 меток на ловушке t3. Пилот builder против codex-code. Условия: worktree обязателен (изоляция), never_critic, ≥10 записей до промоции. Проверена 1 задача на роль — расширить (builder t2, judgment) до закрепления."
+      grok-build_superseded: "промоция см. promoted.grok-4.5 (v18); прежний пилотный статус v13 снят."
       composer-2.5: "v14 (пересмотр v13 по возражению владельца): scout все размеры 1.0; builder t1 FAIL (переставил коды DEP-101↔102 — порядок в спеке не задан явно, 4/5 угадали конвенцию), НО builder t2 PASS (47, чисто). Провал — не слабость логики, а промах вывода НЕЯВНЫХ конвенций. Пилот дешёвого исполнителя (scout крупной механики + builder) с ОГОВОРКОЙ: в тикетах Composer явно прописывать конвенции (порядок кодов/полей), не полагаться на угадывание. worktree (песочница Grok-CLI читает диск), never_critic. ≥10 записей до промоции."
     not_on_pilot:
       gemini-recon-cheap: "scout t2 passed only via ask-gemini MCP inlined; bridge path unreliable — keep as fallback, not promoted"
@@ -495,15 +551,43 @@ cross_provider:
 
   # Что НЕ сдвигается мандатом никогда (качество — инвариант, квота — нет):
   never_shift:
-    - judgment-class tickets (architect/Fable) and the lead itself
-    - the primary grader (a Claude critic grades every gated deliverable)
+    - the lead itself stays the session model (orchestration judgment)
+    # v18: было «primary grader = Claude critic». Снято по решению владельца на данных
+    # (grok-4.5, kimi-k3 прошли тест честности + t3/t4/t5 FULL). Теперь инвариант —
+    # не «вендор грейдера», а ЧЕСТНОСТЬ и НЕЗАВИСИМОСТЬ:
+    - every gated deliverable is graded by a critic that (a) did NOT build it and
+      (b) is NOT the deliverable's own vendor — self-preference guard, ADR-0001;
+      grader may be any honesty-cleared lane (opus, critic, sol, grok-4.5, kimi-k3)
+    - Fable stays the DEFAULT for judgment-class (architect), not the only option
     - local repo file-walking recon defaults to scout (economics)
-    - the escalation ladder (failed cross-provider ticket escalates to its Claude default)
+    - the escalation ladder (failed cross-provider ticket escalates to its default)
 
   ultra_policy:
     critic_lanes: never            # суб-агенты той же модели покупают стоимость, не независимость
     builder_condition: genuinely hard AND latency-sensitive
     log_reason: required           # effort: ultra в телеметрии с записанной причиной
+
+  # v18: скорость Grok как сигнал маршрутизации (полигон 2026-07-19: grok-4.5
+  # стабильно самый быстрый при полном качестве). Раньше «трудно И срочно» покрывал
+  # только дорогой Codex-ultra; теперь у срочного есть дешёвый быстрый маршрут.
+  latency_sensitive:
+    # ЧТО СЧИТАЕТСЯ срочным (иначе «скорость» — пустой вибрирующий ярлык). Уменьшение
+    # wall-clock ЭТОГО тикета сокращает ожидание — истинно ТОЛЬКО когда:
+    applies_when:
+      - human-blocking: владелец ждёт результат вживую (интерактивный запрос)
+      - critical-path: тикет блокирует другие (его готовность открывает фронтир);
+                       ускорять самый блокирующий, не любой
+      - iteration-heavy: много последовательных шагов (red-green цикл) — быстрота
+                         за итерацию складывается
+    not_when: параллельный веер независимых тикетов — лид ждёт самого медленного,
+              ускорение одного ничего не даёт
+    # Правило: среди ДОСТАТОЧНЫХ по качеству лейнов для тикета выбрать самый быстрый
+    # (grok-4.5) вместо дорогого Codex-ultra. Тайбрейк по скорости, НЕ понижение
+    # мощности: судейский/трудный тикет остаётся у сильной модели, даже если Grok
+    # быстрее. Гейт трёх линз не трогается — срочность влияет на выбор исполнителя,
+    # не на глубину проверки.
+    tiebreak_prefer: grok-build
+    over: [codex-code-ultra]
 
 # -----------------------------------------------------------------------------
 # Замены при НЕДОСТУПНОСТИ модели (SKILL.md Step 2, «Availability fallbacks»).

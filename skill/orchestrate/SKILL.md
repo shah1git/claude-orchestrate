@@ -466,9 +466,12 @@ cross-provider.md Use 4). Since 2026-07-12
 the spread is a necessity, not a bonus — the owner's weekly Claude window runs out 1–2 days
 before reset across 3–4 parallel projects — and the three codex lanes are promoted from
 pilot to fixed defaults (config `cross_provider.promoted`). Judgment routes
-providers, never quality: judgment-class tickets and the primary grader stay Claude (an
-external lens is additive, never a substitute), and a non-Claude worker is a lead-invoked
-bridge/MCP call, not a sub-agent. Routing is judgment-driven, never silent — every
+providers, never quality: the lead itself stays the session model, and every gated
+deliverable is graded by a critic that neither built it nor shares its vendor
+(self-preference guard). Since v18 the grader need not be Claude — honesty-cleared
+cross-provider lanes (grok-4.5, kimi-k3) may hold the verdict; Fable stays the default
+for judgment-class, not the only option. A non-Claude worker is a lead-invoked
+bridge/MCP/CLI call, not a sub-agent. Routing is judgment-driven, never silent — every
 non-Claude route carries its named reason into telemetry; with no surface present, every
 route degrades to its Claude default. Full mechanics, connector registry, default lanes,
 and the detect-or-degrade rule:
@@ -482,7 +485,8 @@ instead, along the ordered chain in config.yaml `availability.fallbacks` (one ch
 agent and per cross-provider lane; edited there): the first *available* element wins.
 Direction rule the chains must respect (and edits to them too): a fallback never drops
 below the class's quality floor — sideways to an equal tier of another provider, or up,
-never down (the primary grader stays Claude even here; a fully-additive third lens may
+never down (the grader stays an honesty-cleared, non-own-vendor critic even here — not
+necessarily Claude since v18; a fully-additive third lens may
 terminally degrade to `skip-third-lens`, stated in one line of the final report). Each
 terminal element is an honest behavior, not a substitute model: `report-blocker`,
 `lead-inline`, `skip-third-lens`. A reroute that fired is stamped into the ticket's
