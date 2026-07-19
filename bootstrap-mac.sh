@@ -20,6 +20,8 @@
 #
 # Идемпотентен: повторный запуск = обновление всех трёх репозиториев и
 # перекладка симлинков. Это и есть механизм «подтянуть свежие скиллы Покока».
+# Если pull обновил сам bootstrap-mac.sh — скрипт перезапускает себя свежей
+# версией (bash нельзя доверять дочитывание файла, изменившегося под ногами).
 #
 # Первый запуск: клонируйте репозиторий куда удобно (симлинки установки будут
 # указывать именно туда, поэтому место должно быть постоянным) и запустите
@@ -98,7 +100,16 @@ clone_or_pull() {
 }
 
 echo "== Репозитории =="
+orch_head_before="$(git -C "${ORCH_DIR}" rev-parse HEAD 2>/dev/null || true)"
 clone_or_pull "${ORCH_DIR}"   "${ORCH_REPO}"
+# Самообновление: если pull сменил ревизию, мог измениться и этот файл — дальше
+# исполнялась бы старая копия из буфера bash, и свежие шаги молча не выполнились
+# бы. Перезапускаем себя свежей версией; env-предохранитель исключает цикл.
+if [ -z "${ORCH_BOOTSTRAP_REEXEC:-}" ] && [ -n "${orch_head_before}" ] \
+   && [ "${orch_head_before}" != "$(git -C "${ORCH_DIR}" rev-parse HEAD)" ]; then
+  echo "  ↻ репозиторий обновился — перезапускаю свежий bootstrap"
+  ORCH_BOOTSTRAP_REEXEC=1 exec bash "${ORCH_DIR}/bootstrap-mac.sh"
+fi
 clone_or_pull "${BRIDGE_DIR}" "${BRIDGE_REPO}"
 clone_or_pull "${POCOCK_CACHE}" "${POCOCK_REPO}"
 
@@ -156,6 +167,34 @@ bash "${ORCH_DIR}/install.sh"
 # синхронизация — telemetry-sync.sh.
 echo "== Телеметрия =="
 TELEM_LINK="${ORCH_DIR}/skill/orchestrate/telemetry"
+
+# Автоклон приватного репо. Адрес в публичном скрипте по-прежнему не хранится —
+# он ВЫВОДИТСЯ: владелец берётся из origin этого чекаута, имя конвенционное
+# (orchestrate-telemetry, оно и так закреплено путями ниже). У форка выведется
+# его собственный владелец — репозиторий остаётся пригодным к публикации.
+# Переопределение при необходимости: ORCH_TELEMETRY_REPO=owner/name.
+if [ ! -L "${TELEM_LINK}" ] && [ ! -d "${HOME}/orchestrate-telemetry/.git" ] && [ ! -d "/opt/orchestrate-telemetry/.git" ]; then
+  telem_slug="${ORCH_TELEMETRY_REPO:-}"
+  if [ -z "${telem_slug}" ]; then
+    telem_owner="$(git -C "${ORCH_DIR}" remote get-url origin 2>/dev/null \
+      | sed -nE 's#^(git@github\.com:|https://github\.com/)([^/]+)/.*#\2#p')"
+    [ -n "${telem_owner}" ] && telem_slug="${telem_owner}/orchestrate-telemetry"
+  fi
+  if [ -n "${telem_slug}" ]; then
+    # Репо приватный: клонируем через gh (он умеет авторизацию); фолбэк — git
+    # с запретом интерактивного запроса пароля, чтобы падать сразу, а не висеть.
+    if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+      gh repo clone "${telem_slug}" "${HOME}/orchestrate-telemetry" \
+        && ok "клонирован ${telem_slug} -> ~/orchestrate-telemetry" \
+        || warn "клон ${telem_slug} не удался (нет репо или доступа) — телеметрия останется локальной"
+    else
+      GIT_TERMINAL_PROMPT=0 git clone "https://github.com/${telem_slug}.git" "${HOME}/orchestrate-telemetry" \
+        && ok "клонирован ${telem_slug} -> ~/orchestrate-telemetry" \
+        || warn "клон ${telem_slug} не удался (приватный репо без gh?) — выполни: gh repo clone ${telem_slug} ~/orchestrate-telemetry и перезапусти"
+    fi
+  fi
+fi
+
 for cand in "${HOME}/orchestrate-telemetry" "/opt/orchestrate-telemetry"; do
   if [ -d "${cand}/.git" ] && [ ! -L "${TELEM_LINK}" ]; then
     mdir="${cand}/machines/$(hostname)"
@@ -213,13 +252,16 @@ if command -v grok >/dev/null; then
   } > "${GROK_HOME}/sandbox.toml"
   ok "~/.grok/sandbox.toml сгенерирован (deny: $(echo "${deny_entries%, }" | tr -d '"'))"
 
-  # bubblewrap — обязателен для fail-closed кастомного профиля.
-  if command -v bwrap >/dev/null; then
+  # bubblewrap — обязателен для fail-closed кастомного профиля, но только на
+  # Linux: на macOS ту же работу делает родной Seatbelt, ставить нечего.
+  if [ "$(uname -s)" = "Darwin" ]; then
+    ok "macOS: песочница — родной Seatbelt, bwrap не нужен; профиль orchestrate применится нативно"
+  elif command -v bwrap >/dev/null; then
     ok "bubblewrap: $(command -v bwrap)"
   elif command -v apt-get >/dev/null; then
-    warn "bubblewrap не найден — ставлю (нужен sudo)"; sudo apt-get install -y bubblewrap >/dev/null 2>&1 && ok "bubblewrap установлен" || warn "не смог поставить bubblewrap — установи вручную (apt/brew), иначе профиль orchestrate не стартует"
+    warn "bubblewrap не найден — ставлю (нужен sudo)"; sudo apt-get install -y bubblewrap >/dev/null 2>&1 && ok "bubblewrap установлен" || warn "не смог поставить bubblewrap — установи вручную (apt), иначе профиль orchestrate не стартует"
   else
-    warn "bubblewrap не найден и apt-get недоступен (macOS?) — установи вручную (brew install bubblewrap не существует; на macOS песочница идёт через Seatbelt, bwrap не нужен — профиль orchestrate применится нативно)"
+    warn "bubblewrap не найден, apt-get недоступен — поставь пакет bubblewrap средствами своего дистрибутива, иначе профиль orchestrate не стартует"
   fi
 
   # Пред-открытый бинарь: предупреждаем про самосборку.
@@ -239,11 +281,24 @@ if command -v kimi >/dev/null || [ -x "${HOME}/.kimi-code/bin/kimi" ]; then
   echo "== Ужесточение Kimi =="
   KCFG="${HOME}/.kimi-code/config.toml"
   if [ -f "${KCFG}" ]; then
-    if head -c 200 "${KCFG}" | grep -q '^telemetry'; then
-      ok "~/.kimi-code/config.toml: telemetry уже задан"
-    else
+    # telemetry — ключ КОРНЕВОЙ таблицы TOML, поэтому ищем его только до первого
+    # заголовка [секции]: одноимённый ключ внутри чужой секции — другой ключ,
+    # а слепое добавление при уже существующем корневом дало бы дубликат —
+    # невалидный TOML. Остальной конфиг (ключи логина и т.п.) не трогаем.
+    kimi_root_telemetry="$(awk '/^\[/{exit} /^[[:space:]]*telemetry[[:space:]]*=/{print; exit}' "${KCFG}")"
+    if [ -z "${kimi_root_telemetry}" ]; then
+      # Вставка первой строкой: всё до первой [секции] попадает в корень TOML.
       printf 'telemetry = false  # egress-hardening (references/kimi)\n' | cat - "${KCFG}" > "${KCFG}.tmp" && mv "${KCFG}.tmp" "${KCFG}"
-      ok "~/.kimi-code/config.toml: telemetry = false (privacy, без потери функций)"
+      ok "~/.kimi-code/config.toml: добавлено telemetry = false (privacy, без потери функций)"
+    elif printf '%s\n' "${kimi_root_telemetry}" | grep -q 'false'; then
+      ok "~/.kimi-code/config.toml: telemetry уже выключена"
+    else
+      # Явное telemetry = true переключаем: телеметрия Kimi выключена на всех
+      # машинах контура (references/kimi/README.md).
+      awk '!intable && /^\[/{intable=1}
+           !intable && /^[[:space:]]*telemetry[[:space:]]*=/{print "telemetry = false  # egress-hardening (references/kimi)"; next}
+           {print}' "${KCFG}" > "${KCFG}.tmp" && mv "${KCFG}.tmp" "${KCFG}"
+      ok "~/.kimi-code/config.toml: telemetry переключена в false"
     fi
   else
     warn "~/.kimi-code/config.toml нет — залогинься в kimi, затем перезапусти bootstrap"
