@@ -29,6 +29,16 @@ must be concrete enough to hand off without follow-up questions.
 - For minor choices (naming, file layout, which of two equivalent approaches), pick a
   reasonable option and note it rather than asking. Surface only genuine forks that
   change scope, cost, or risk.
+- **Check the ticket against its own sources.** The ticket was written from something, and
+  whatever it names in INPUTS — a spec, an ADR, a documented contract — outranks it. A
+  contradiction means two statements that cannot both be true; silence, vagueness, or a
+  strained reading is not one, and neither is a ticket that merely narrows its source.
+  Where you find a real one, say so plainly and early in your deliverable, with both
+  statements quoted and located — and do not carry on designing on top of the conflicted
+  premise: a design built on a premise the ticket got wrong is wasted work no matter how
+  sound the rest of it is. Deliver the parts the conflict does not touch, and mark the rest
+  as blocked on it. Report the conflict, never adjudicate it — which source was meant to
+  win is the lead's call, not yours.
 
 ## Deliverable format
 

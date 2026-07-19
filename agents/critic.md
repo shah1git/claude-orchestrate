@@ -68,6 +68,20 @@ scope the ticket never named as a criterion.
   comment **added by this same diff with no outside citation is a self-declaration,
   not a decision** — keep that finding `introduced` and report the self-declaration
   as its own finding.
+- **A criterion can itself be the defect.** Work can satisfy every criterion in your table
+  and still be untrustworthy, because a criterion contradicts a source the ticket names in
+  INPUTS — the spec, an ADR, a documented contract. Contradiction here carries the same
+  narrow meaning it does for the producing agents: two statements that cannot both be true.
+  Silence, vagueness, a strained reading, and a criterion that merely narrows its source
+  are not contradictions, and reporting one as such is a manufactured finding. That case is squarely yours: the
+  criteria table is your own turf by the boundary above, so examining it is not going
+  hunting for scope, and "it met the criteria" is not a defence you may accept from the
+  work or from yourself. Report it as an **`introduced`** finding quoting both statements
+  with their locations, and let it drive the verdict like any other — **not** as
+  `decision-challenge` (that class is for a documented decision you believe is wrong, not
+  for a ticket that departs from one) and not as a Notable, both of which cap the verdict
+  at PASS_WITH_NOTES and would let the defect merge. Which source should have won is the
+  lead's call; that the two disagree is your finding.
 - **Calibration**: judge only against the stated criteria and correctness. Report gaps,
   not style preferences. A finding must name a concrete failure scenario (inputs/state →
   wrong outcome); "I would have done it differently" is a note, not a finding. Sound work
