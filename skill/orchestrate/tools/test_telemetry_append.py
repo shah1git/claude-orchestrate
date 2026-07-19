@@ -22,6 +22,10 @@ MINI_CONFIG = dedent("""\
       on_exceed: stop-dispatch-finish-gates-report
     telemetry:
       log: telemetry/routing-log.jsonl
+      entry_values: [full, frontier]
+      entry_requires_shape:
+        frontier: сборка
+      require_entry_on_append: true
       stamp_records_with_config: true
 """)
 
@@ -36,11 +40,15 @@ def make_skill_dir(tmp_path, config=MINI_CONFIG, log_lines=()):
 
 
 def row(**over):
+    # `entry` sits in the base because config.yaml requires it on every new
+    # append (v22); a test that needs it absent passes entry=None, which drops
+    # the key rather than writing a null.
     base = {"date": "2026-07-19", "task": "demo", "ticket": "t1",
             "class": "skilled", "agent": "builder", "model": "sonnet",
-            "verdict": "PASS", "config": "v21+0000000", "tokens": 100}
+            "verdict": "PASS", "config": "v21+0000000", "tokens": 100,
+            "entry": "full"}
     base.update(over)
-    return base
+    return {k: v for k, v in base.items() if v is not None}
 
 
 def run(skill_dir, *argv):
@@ -188,3 +196,71 @@ def test_corrupt_log_line_is_a_hard_error(tmp_path):
     # validation passed, append happened, but the sum must refuse to lie
     assert p.returncode == 1
     assert "not valid JSON" in p.stderr
+
+
+def test_frontier_entry_with_assembly_shape_appends(tmp_path):
+    d = make_skill_dir(tmp_path)
+    record = row(entry="frontier", shape="сборка")
+    p = run(d, json.dumps(record))
+    assert p.returncode == 0, p.stderr
+    assert log_rows(d) == [record]
+
+
+def test_full_entry_with_investigation_shape_appends(tmp_path):
+    d = make_skill_dir(tmp_path)
+    record = row(entry="full", shape="разбирательство")
+    p = run(d, json.dumps(record))
+    assert p.returncode == 0, p.stderr
+    assert log_rows(d) == [record]
+
+
+def test_omitted_entry_is_rejected_when_config_requires_it(tmp_path):
+    # Legacy rows already in the log may lack `entry` (read as `full`), but a
+    # record written now can always state its entrance — and the pilot's
+    # falsifiability depends on it doing so.
+    d = make_skill_dir(tmp_path)
+    p = run(d, json.dumps(row(entry=None, shape="разбирательство")))
+    assert p.returncode == 1
+    assert "lacks the entry stamp" in p.stderr
+    assert log_rows(d) == []
+
+
+def test_omitted_entry_passes_when_config_does_not_require_it(tmp_path):
+    # Backward compatibility for pre-v22 config snapshots: no requirement key,
+    # no requirement — the reader's `full` default still applies.
+    legacy = MINI_CONFIG.replace("  require_entry_on_append: true\n", "")
+    assert "require_entry_on_append" not in legacy
+    d = make_skill_dir(tmp_path, config=legacy)
+    record = row(entry=None, shape="разбирательство")
+    p = run(d, json.dumps(record))
+    assert p.returncode == 0, p.stderr
+    assert log_rows(d) == [record]
+
+
+def test_unknown_entry_is_rejected_without_appending(tmp_path):
+    d = make_skill_dir(tmp_path)
+    p = run(d, json.dumps(row(entry="solo", shape="сборка")))
+    assert p.returncode == 1
+    assert "entry must be one of" in p.stderr
+    assert log_rows(d) == []
+
+
+def test_frontier_entry_requires_assembly_shape(tmp_path):
+    d = make_skill_dir(tmp_path)
+    p = run(d, json.dumps(row(entry="frontier", shape="разбирательство")))
+    assert p.returncode == 1
+    assert "only after tickets have been cut" in p.stderr
+    assert log_rows(d) == []
+
+
+def test_malformed_entry_values_in_config_is_rejected(tmp_path):
+    # The guard in validate_record only helps if a drifted config actually
+    # trips it: a scalar where the vocabulary belongs must fail loudly, not
+    # silently degrade to "every entry is valid".
+    broken = MINI_CONFIG.replace("entry_values: [full, frontier]",
+                                 "entry_values: full")
+    d = make_skill_dir(tmp_path, config=broken)
+    p = run(d, json.dumps(row(entry="full", shape="сборка")))
+    assert p.returncode == 1
+    assert "entry_values must be a list of strings" in p.stderr
+    assert log_rows(d) == []

@@ -212,3 +212,35 @@ def test_exceptions_file_suppresses_a_known_non_config_reference(tmp_path):
     )
     assert result.returncode == 0
     assert result.stderr == ""
+
+
+def test_sibling_skill_without_own_config_is_held_to_this_config(tmp_path):
+    # ADR-0004: skill/<sibling>/SKILL.md with no config.yaml of its own shares
+    # the main skill's config — its unresolved references must fail red.
+    skill_dir = (tmp_path / "orchestrate")
+    skill_dir.mkdir()
+    make_skill_dir(skill_dir)
+    sibling = tmp_path / "orchestrate-frontier"
+    sibling.mkdir()
+    (sibling / "SKILL.md").write_text(
+        "# Frontier\nUses `routing.no_such_key` at entry.\n")
+    result = run_validator(skill_dir)
+    assert result.returncode == 1
+    assert "orchestrate-frontier/SKILL.md" in result.stderr
+    assert "routing.no_such_key" in result.stderr
+
+
+def test_sibling_with_its_own_config_is_not_scanned(tmp_path):
+    # A sibling carrying its own config.yaml is a separate skill (or a test
+    # fixture): it validates against its own config, never against this one.
+    skill_dir = (tmp_path / "orchestrate")
+    skill_dir.mkdir()
+    make_skill_dir(skill_dir)
+    sibling = tmp_path / "standalone-skill"
+    sibling.mkdir()
+    (sibling / "config.yaml").write_text("version: 1\n")
+    (sibling / "SKILL.md").write_text(
+        "# Standalone\nRefers to `its.own_key` from its own config.\n")
+    result = run_validator(skill_dir)
+    assert result.returncode == 0
+    assert result.stderr == ""

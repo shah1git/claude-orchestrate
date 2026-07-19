@@ -248,6 +248,13 @@ Config.yaml's `shape.values.сборка.sequence` is the source of the `сбо�
 manual — how the lead actually walks it, end to end, once Step 0 assigns the `сборка`
 shape. A `разбирательство` run skips it entirely (closing note below).
 
+**Frontier entry (ADR-0004).** When the owner has already walked grill → spec → tickets
+*solo* — canonical skills invoked by hand, tickets published `ready-for-agent` with
+native blocking edges — execution belongs to the sibling skill **`/orchestrate-frontier`**:
+a thin entrance that validates the spine's provenance and starts at routing (Step 2),
+loading none of this section's prose. This section governs runs where the spine has not
+run yet; do not re-walk it over an already-published frontier — hand the run over.
+
 **Canonical files, and who executes them.** The spine composes seven skills, each with its
 canonical copy at `/root/.claude/skills/{grilling,domain-modeling,to-spec,to-tickets,
 implement,tdd,code-review}/SKILL.md`. Six of the seven were authored for a solo,

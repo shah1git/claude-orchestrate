@@ -214,9 +214,21 @@ def prose_violations(skill_dir: Path, config_data: dict, exceptions: set) -> lis
     references_dir = skill_dir / "references"
     if references_dir.is_dir():
         prose_files.extend(sorted(references_dir.glob("*.md")))
+    # Sibling entrance skills (ADR-0004): a skill/*/SKILL.md with NO config.yaml
+    # of its own shares this config.yaml as its single source of values, so its
+    # prose is held to the same reference discipline as the main playbook's.
+    # (A sibling that carries its own config.yaml is a separate skill — or a
+    # test fixture — and validates against its own config, not this one.)
+    for sibling in sorted(skill_dir.parent.glob("*/SKILL.md")):
+        if (sibling.resolve() != skill_md.resolve()
+                and not (sibling.parent / "config.yaml").exists()):
+            prose_files.append(sibling)
 
     for path in prose_files:
-        rel = path.relative_to(skill_dir)
+        try:
+            rel = path.relative_to(skill_dir)
+        except ValueError:  # sibling skill — name it relative to skill/
+            rel = path.relative_to(skill_dir.parent)
         for lineno, line in enumerate(path.read_text().splitlines(), start=1):
             for match in DOTTED_REF_RE.finditer(line):
                 ref = match.group(1)

@@ -22,6 +22,14 @@ accept any result until three independent reviewers have checked it.
 чей уровень действительно нужен для этой работы. Затем — не принимает результат, пока
 его не проверят три независимых ревьюера.
 
+У оркестрации **два входа** ([ADR-0004](docs/adr/0004-frontier-entry-skill.md)).
+Полный — `/orchestrate`: он сам проводит подготовительную фазу (грилл → спецификация →
+тикеты) в своей же сессии и остаётся входом для сырых задач и расследований. Второй,
+тонкий — `/orchestrate-frontier`: если владелец уже прошёл подготовку в сольной сессии
+и в трекере лежат готовые тикеты, исполнение стартует сразу с маршрутизации — в свежем
+контекстном окне и без прозы подготовительной фазы; без опубликованной спеки и
+восходящих к ней тикетов этот вход отказывается работать.
+
 Четыре штатных исполнителя, каждый закреплён за своим тиром модели:
 
 | Агент | Модель | Роль |
@@ -101,6 +109,12 @@ Standards никогда не пропускается молча.
 `/orchestrate` 把一个 Claude Code 主会话变成**首席编排者**：它拆解任务，把每一部分交给
 最适合该工作的模型层级来执行，然后在三位独立评审全部通过之前，拒绝接受任何结果。
 
+编排有**两个入口**（[ADR-0004](docs/adr/0004-frontier-entry-skill.md)）。完整入口是
+`/orchestrate`：它在同一会话中亲自走完筹备阶段（盘问 → 规格 → 工单），仍是原始任务与
+排查类工作的入口。第二个是轻量入口 `/orchestrate-frontier`：若负责人已在独立会话中完成
+筹备、工单追踪器中已有就绪工单，执行便直接从路由开始——使用全新的上下文窗口，且不加载
+筹备阶段的说明文字；缺少已发布的规格及其工单时，它会拒绝启动。
+
 四个常设执行者，各自绑定其真正需要的模型层级：
 
 | 智能体 | 模型 | 职责 |
@@ -168,6 +182,15 @@ Google Gemini、xAI Grok——首领也可路由至它们：作为 Standards 的
 triages a task, decomposes it, and hands each piece to the model tier that piece
 actually needs — then refuses to accept the result until three independent reviewers
 have checked it.
+
+There are **two entries** into orchestration (see
+[ADR-0004](docs/adr/0004-frontier-entry-skill.md)). The full one is `/orchestrate`:
+it runs the preparatory phase (grill → spec → tickets) inside its own session and
+remains the door for raw tasks and investigations. The second, thin one is
+`/orchestrate-frontier`: when the owner has already done the preparation in a solo
+session and ready tickets sit in the tracker, execution starts straight at routing —
+with a fresh context window and without the preparatory prose; with no published spec
+and tickets tracing to it, this entry refuses to run.
 
 Four standing executors, each pinned to its tier:
 
@@ -255,6 +278,7 @@ cd /opt/claude-orchestrate
 
 ```
 skill/orchestrate/          the skill itself (SKILL.md + config.yaml + references/)
+skill/orchestrate-frontier/ thin second entry: runs a prepared ticket frontier (ADR-0004)
 skill/orchestrate/tools/    config validator (deterministic seam over config + prose)
 agents/                     the four agent definitions
 benchmark/                  the role-comparison polygon (fixtures, tasks, grader tools)
@@ -264,7 +288,9 @@ install.sh                  wires ~/.claude/skills and ~/.claude/agents to this 
 ## Usage
 
 Invoke explicitly with `/orchestrate <task>`, or let Claude Code auto-invoke it on
-large, multi-part tasks that decompose into independent subtasks. The four agents are
+large, multi-part tasks that decompose into independent subtasks. If the preparatory
+phase already happened in a solo session and the tracker holds ready tickets, use the
+thin frontier entry instead: `/orchestrate-frontier` (ADR-0004). The four agents are
 also directly invocable on their own, without going through the skill.
 
 See [skill/orchestrate/README.md](skill/orchestrate/README.md) for the detailed docs
