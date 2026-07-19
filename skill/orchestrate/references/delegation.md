@@ -38,6 +38,34 @@ stages receive links, not transcripts). Disk artifacts also stay provenance-chec
 rules are instances of this one: "pass the first diff as INPUT to the second" (SKILL.md
 Step 3), per-ticket diff snapshots, Codex diff-from-disk.
 
+**State the source-outranks-ticket rule in every ticket that names a source.** The four
+Claude agents carry it in their standing definitions (`agents/*.md`): a document named in
+INPUTS — a spec, an ADR, a documented contract — outranks the ticket, and a worker who
+finds the two contradicting stops, builds neither side, and reports both statements with
+their locations rather than picking a winner. **Cross-provider workers never see those
+definitions** — a Codex, Kimi, Grok, or Gemini lane gets exactly the text you write — so
+for those the rule has to travel *in the ticket*, one line in BOUNDARIES:
+
+```
+BOUNDARIES: ... The documents named in INPUTS outrank this ticket. If an instruction here
+contradicts one of them — two statements that cannot both be true, not silence, not a
+strained reading, not this ticket merely narrowing its source — stop work on the part it
+affects, implement neither side, and report both statements with their locations. Deliver
+whatever the conflict does not touch. (On a review ticket: report the conflict as a
+finding rather than grading around it.)
+```
+
+**Which copy is canonical.** The *meaning* is maintained in `agents/*.md`; the BOUNDARIES
+line is a payload carried to environments where those definitions do not exist. Edit the
+agent definitions first and bring this line along in the same change — two copies exist
+only because there is no shared surface, and they are worth keeping only in lockstep.
+
+This closes the seam the lead's own hand introduces: a ticket criterion that contradicts
+the spec it was cut from is a defect no acceptance criterion catches, because the criterion
+*is* the defect, and the worker holding both texts is the cheapest reader who can see it
+(2026-07-19: a ticket declared a telemetry field optional while the spec required it on
+every record; the worker complied faithfully and the gate paid a review round for it).
+
 **No hedge words in a ticket.** "probably / likely / apparently / should be / I think / may"
 in a ticket marks unresolved recon, not a spec. Resolve each before dispatch — send a
 `scout`, read the file, or make the decision yourself — or promote it to an explicit line
@@ -204,7 +232,11 @@ OUTPUT: Edited code + a summary listing each file changed and why, plus the verb
 BOUNDARIES: Apply to BOTH endpoints (this instruction covers every endpoint listed, not
   just the first). Do not touch the schema, do not add config options beyond the plan, no
   refactoring outside the named files. If the plan conflicts with the code you find, stop
-  and report the conflict instead of improvising.
+  and report the conflict instead of improvising. The documents named in INPUTS outrank
+  this ticket: where an instruction here contradicts the plan or the spec's seams — two
+  statements that cannot both be true, not silence and not a strained reading — stop on
+  the affected part, implement neither side, report both statements with their locations,
+  and deliver whatever the conflict does not touch.
 ACCEPTANCE: `npm test` and `npm run typecheck` pass (output shown); both endpoints
   covered by a new test each; no files outside src/api/ and src/middleware/ modified;
   matches the plan's chosen algorithm.
