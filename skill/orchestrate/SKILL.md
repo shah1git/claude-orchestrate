@@ -799,19 +799,23 @@ free — the worker's report already carries it — and surfacing it per-return 
 abreast of cost and findings as they happen, instead of only in the final scorecard. The
 end-of-run scorecard (quality.md §5) still aggregates; the cards are the running commentary.
 
-Then append one JSONL record per delegated ticket to the routing telemetry log —
-`telemetry/routing-log.jsonl` next to this file (schema and recalibration thresholds:
-[references/quality.md](references/quality.md) §7; records carry the delegation
-`channel` — `oneshot | workflow | team`). The log is what turns the Step 2
-rubric from a priori doctrine into a calibrated one; skipping it on "small" sessions
-is how the data never accumulates. Include the token / tool-use figures from each Agent
-result's `usage` block in the record (quality.md §7).
-**Self-check each record before appending (v8):** canonical §7 field names and one of
-the seven verdict values only — an unusual outcome goes into `note` (`[was: …]` style),
-never into a new verdict spelling or an ad-hoc field. Drift is not cosmetic: the
-vocabulary pinned 2026-07-11 needed a full repair pass one day later, and every drifted
-record silently drops out of the gate-yield / escape-rate / proportionality-stop
-arithmetic that §3b and recalibration depend on.
+By this point every delegated ticket should already have its row in the routing
+telemetry log — `telemetry/routing-log.jsonl` next to this file — because each row is
+appended **when that ticket's final verdict lands**, via `tools/telemetry_append.py`
+(v21; schema and recalibration thresholds: [references/quality.md](references/quality.md)
+§7; records carry the delegation `channel` — `oneshot | workflow | team`). The tool is
+the old v8 "self-check before appending" made executable — it rejects drifted field
+names and non-canonical verdicts outright — and it is the session-budget fuse: each
+append prints the run's cumulative token spend against `session_budget.tokens_max`, and
+a breach exits non-zero, which means STOP DISPATCHING new tickets (quality.md §3;
+overrides are named, never silent). Never append by hand: the vocabulary drifted three
+times precisely through hand-written lines, and every drifted record silently drops out
+of the gate-yield / escape-rate / proportionality-stop arithmetic that §3b and
+recalibration depend on. Step 5's job is the completeness pass: confirm every delegated
+ticket has its row (a missed one is appended now, late but honest), include the token /
+tool-use figures from each Agent result's `usage` block, then append the run-summary
+record. The log is what turns the Step 2 rubric from a priori doctrine into a
+calibrated one; skipping it on "small" sessions is how the data never accumulates.
 
 ## Large fan-outs (≥ 5 similar items)
 

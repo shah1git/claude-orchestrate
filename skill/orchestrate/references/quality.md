@@ -192,16 +192,25 @@ concentrated in security/auth/transactional work — rounds beyond the caps re-d
 they do not converge; the 2026-07-12 a real project case (several "final reviews" costing
 more than the 210-line feature) is the incident that pinned this.
 
-**Session budget (v15).** The run-level counterpart of the proportionality stop: when
-the run's cumulative token spend across this run's §7 records crosses config
+**Session budget (v15; fuse v21).** The run-level counterpart of the proportionality
+stop: when the run's cumulative token spend across this run's §7 records crosses config
 `session_budget.tokens_max`, the lead stops dispatching new tickets, lets in-flight
 tickets finish their gates, and reports the remaining frontier as not-done — with
 tracker state left clean enough for a fresh run to pick up where this one stopped
-(`on_exceed: stop-dispatch-finish-gates-report`). The check is mechanical — sum the §7
-token figures at every dispatch point. Override is a named lead decision logged in
-telemetry, never silent. Grounding: the same 2026-07-17 neighbour-project incident — an
-overnight loop with no external budget spun to 4× the volume of everything previously
-accepted; per-ticket caps bound the loops *inside* a ticket, this bounds the run.
+(`on_exceed: stop-dispatch-finish-gates-report`). The check is not the lead's memory —
+it is computed by `tools/telemetry_append.py` on every record append (records land at
+ticket acceptance, §7), printed as a running total, and a breach exits non-zero: the
+signal arrives exactly between the acceptance just logged and the dispatch it should
+stop. Between appends — e.g. before committing to one more parallel wave — the same
+arithmetic is available on demand: `tools/telemetry_append.py --check-only --task
+<run>`. A run that legitimately needs more declares it up front via `--tokens-max`
+(mirroring `override: ticket-declared-only` on the diff ceiling); continuing past a
+breach is `--ack-over-budget "<reason>"` — a named lead decision in telemetry, never
+silent. Grounding, twice over: the 2026-07-17 neighbour-project incident — an overnight
+loop with no external budget spun to 4× the volume of everything previously accepted —
+and the 2026-07-18 first live run under v17, which crossed the 3.0M ceiling at ~3.9M
+unnoticed until the run summary because the then-prose-only check ran at no dispatch
+point at all. Per-ticket caps bound the loops *inside* a ticket; this bounds the run.
 
 ## 4. Rubric templates by deliverable type
 
@@ -317,10 +326,19 @@ sentence and lists what remains, with evidence.
 
 ## 7. Routing telemetry — calibrating the Step 2 rubric
 
-The complexity→tier rubric ships a priori; this log makes it empirical. At the end of
-every orchestrated session (SKILL.md Step 5) the lead appends one record per
-**delegated** ticket to `telemetry/routing-log.jsonl` in the skill directory. The file
-is data, not doctrine — read it for recalibration, never load it into a ticket.
+The complexity→tier rubric ships a priori; this log makes it empirical. The lead
+appends one record per **delegated** ticket to `telemetry/routing-log.jsonl` in the
+skill directory — **at the moment the ticket's final verdict lands** (gate accepted,
+FAIL declared, MISROUTE voided), not batched at the end of the session. Two reasons,
+both paid for in telemetry: the session-budget fuse (§3) can only stop the next
+dispatch if the sum exists *during* the run, and a mid-run session death loses no
+records (the v20 resume-pack logic then reads an honest log). Every append goes
+through `tools/telemetry_append.py` — the tool is the §7 contract made executable
+(field names, the seven-value verdict vocabulary, the config stamp) and the budget
+fuse in one write path; hand-appended lines are how the vocabulary drifted three
+times. Step 5 then verifies completeness — every delegated ticket has its row — and
+appends the run-summary record. The file is data, not doctrine — read it for
+recalibration, never load it into a ticket.
 
 One JSON object per line:
 
