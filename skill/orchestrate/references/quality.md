@@ -446,6 +446,27 @@ return no `usage` block to the lead — omit `tokens` rather than inventing it; 
 lead-measured `duration_ms` (wall-clock) is fine. Team-channel records feed the pilot's
 pre-committed keep/drop criterion (references/teams.md).
 
+Entry field (ADR-0004) — `entry` ∈ `full | frontier`. **Required on every new append**
+(config `telemetry.require_entry_on_append`, enforced by the writer); optional only on
+*read*, where a record predating the field is interpreted as `full`. The asymmetry is
+deliberate: old rows legitimately cannot state an entrance, but a row being written now
+always can, and an omission would silently enlarge the `full` sample with frontier work
+— corrupting the very comparison the field exists to make (found by the critic lens,
+2026-07-19; the writer, not the prose, now holds the rule) records which entrance ran the ticket: `full` = `/orchestrate`
+walked its inline spine (or a `разбирательство` thread) itself; `frontier` =
+`/orchestrate-frontier` executed a solo-prepared frontier (owner ran the spine by hand,
+tickets pre-published). Stamped on every delegated-ticket record and the run-summary.
+This is the comparison axis of the ADR-0004 pilot: once ~20 records exist per entrance,
+compare first-try pass rate and retries/escalations between `entry` values — if
+`frontier` runs are not at least at parity, the split's premise (a fresh execution
+window buys quality) is refuted and the entrance is retired. **Compare like with like:
+`frontier` against `full` records whose `shape` is `сборка`, never against the whole
+`full` population** — every `frontier` record is a сборка by construction, so pooling
+`разбирательство` runs into the baseline would measure the shape of the work rather
+than the entrance (2026-07-19, raised by the Spec lens as a decision-challenge against
+the ADR's original wording and adopted). A `frontier` record is
+always `shape: "сборка"` (a frontier exists only where tickets were cut).
+
 Recalibration — the numeric thresholds live in config.yaml `thresholds` (at pin time:
 first-try floor 0.80, review after 20 records per tier, critic-FAIL-rate floor 0.05) and
 are revised *there* as data accumulates. Review whenever any tier crosses the

@@ -17,3 +17,4 @@ codex.present
 codex.version
 gemini.models
 gemini.present
+issue_dependencies_summary.blocked_by   # поле GitHub Issues API (orchestrate-frontier: обнаружение фронтира), не ключ config.yaml

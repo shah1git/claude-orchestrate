@@ -95,8 +95,16 @@ def validate_record(row: dict, config: dict) -> dict:
     """Enforce the §7 contract; returns the row with verdict normalized.
 
     Provider-health rows (they carry `event` and, by design, no verdict) skip
-    the per-ticket contract — they are a different §7 citizen (config
-    telemetry.provider_health_events).
+    the per-ticket contract entirely — including the `entry` checks below —
+    because they are a different §7 citizen (config
+    telemetry.provider_health_events) and take no part in the entry comparison.
+
+    `entry` is validated against config telemetry.entry_values, and is REQUIRED
+    on new appends when telemetry.require_entry_on_append is set. The two rules
+    are not in conflict: records already in the log legitimately predate the
+    field and are read as `full` (quality.md §7), but a record being written
+    now can always state its entrance — and the pilot's whole falsifiability
+    rests on it doing so.
     """
     if "event" in row:
         return row
@@ -122,6 +130,36 @@ def validate_record(row: dict, config: dict) -> dict:
              f"{sorted(VERDICTS)} — an unusual outcome goes into note "
              f"('[was: …]' style), never into a new spelling (quality.md §7)")
     row["verdict"] = verdict
+
+    # v22: pre-ADR-0004 config snapshots have no entry_values; retain their
+    # backward-compatible interpretation that an omitted entry is `full`.
+    entry_values = config.get("telemetry", {}).get("entry_values", ["full"])
+    if not (isinstance(entry_values, list)
+            and all(isinstance(value, str) for value in entry_values)):
+        fail("telemetry.entry_values must be a list of strings in config.yaml")
+    # The entry->shape constraint is data, not code: config owns both the
+    # vocabulary and which entry demands which shape, so widening the axis
+    # never needs a code change (ADR-0004's zero-duplication rule).
+    requires_shape = config.get("telemetry", {}).get("entry_requires_shape", {})
+    if not (isinstance(requires_shape, dict)
+            and all(isinstance(k, str) and isinstance(v, str)
+                    for k, v in requires_shape.items())):
+        fail("telemetry.entry_requires_shape must be a mapping of "
+             "entry -> required shape in config.yaml")
+    if "entry" not in row and config.get("telemetry", {}).get(
+            "require_entry_on_append"):
+        fail("record lacks the entry stamp (field 'entry': "
+             f"one of {entry_values}) — required by "
+             "telemetry.require_entry_on_append: an omitted entry defaults to "
+             "'full' on read, silently contaminating the ADR-0004 comparison "
+             "the field exists to make")
+    if "entry" in row:
+        if row["entry"] not in entry_values:
+            fail(f"entry must be one of {entry_values}, got {row['entry']!r}")
+        needed = requires_shape.get(row["entry"])
+        if needed is not None and row.get("shape") != needed:
+            fail(f"entry {row['entry']!r} requires shape {needed!r} — a "
+                 f"frontier exists only after tickets have been cut (ADR-0004)")
 
     tokens = row.get("tokens")
     if not (tokens is None or isinstance(tokens, int) or tokens == "n/a"):
