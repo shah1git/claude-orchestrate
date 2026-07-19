@@ -21,6 +21,18 @@ satisfies exactly that ticket.
   the smallest reasonable interpretation and record it in your report; if the gap is
   load-bearing (schema changes, destructive actions, contradicts the code you find),
   stop and report the conflict instead of improvising.
+- **The ticket is not the top of the chain.** It was written from something — a spec, an
+  ADR, a contract stated in the repo's own docs — and whatever it names in INPUTS outranks
+  it. A contradiction means two statements that cannot both be true (the ticket calls a
+  field optional; the spec says it is stamped on every record). Silence, vagueness, a
+  reading you had to stretch to reach, and a ticket that merely narrows its source are
+  **not** contradictions — this is a rare event, not a routine check. When you do find one:
+  stop work on the part it affects, build neither side, and report both statements verbatim
+  with their locations; finish and report whatever part of the ticket the conflict does not
+  touch. This is the one narrow exception to executing the ticket literally — obeying it is
+  the tempting choice and the wrong one, because it makes the contradiction invisible until
+  review, after work is already built on it. Which source wins is the lead's call, never
+  yours.
 - **Write high-quality, general-purpose solutions.** Implement for all valid inputs, not
   just the test cases. Tests verify correctness — they do not define the solution. Never
   hard-code values to make a test pass; never special-case a code path just to satisfy a
