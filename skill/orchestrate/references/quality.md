@@ -420,6 +420,13 @@ connector-error` (the config.yaml `availability.reasons` vocabulary); `agent`/`m
 record what actually ran. An availability reroute consumes no `retries` and does not
 touch `escalated_to` — those measure quality, this measures quota pressure.
 
+**Not a fallback (v23):** a pick inside an equal-weight pool (config
+`availability.equal_weight_selection`) is a first-choice *route* — nothing failed and
+nothing was unavailable. It carries `xprovider_reason: quota-spread` and leaves
+`fallback_from`/`fallback_reason` **empty**. Stamping rotation as a fallback would fill the
+quota-pressure metric with routine traffic and destroy its meaning — the same
+dictionary-drift failure the single-writer rule exists to prevent.
+
 Config field — every record carries `config: "v<version>+<hash7>"`, the fingerprint of
 the skill's config.yaml at dispatch time: its `version:` value plus the first 7 hex
 characters of the file's sha256 (the SKILL.md "Config" section gives the one-liner). On
