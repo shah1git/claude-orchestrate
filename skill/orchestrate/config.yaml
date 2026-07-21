@@ -26,7 +26,18 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 25
+version: 26
+# v26 (2026-07-22, решение владельца): ЕДИНАЯ КОНСОЛЬНАЯ МОДЕЛЬ ВЫЗОВА для внешних
+#      лейнов. Мост /opt/tools/agent-bridge и MCP-серверы УБРАНЫ из пути лейнов —
+#      каждый внешний лейн вызывается своей vendor-CLI (transport объявлен у всех:
+#      codex-cli, grok-cli, agy-print, kimi-cli-headless). «Только кодекс шёл
+#      уникальным путём» — устранено. Claude-работники НЕ затронуты (Agent tool
+#      нативно; claude -p — только запас для не-Claude хоста). ADR-0005 (F7/F3
+#      уточнены: мост из проекта вон целиком, MCP — не транспорт лейна). Исполнитель
+#      run-lane (неломающийся argv) — следующие срезы; до него внешний лейн зовётся
+#      по документированной форме CLI, как grok/kimi уже сегодня.
+#      Здесь же собраны отложенные v26-правки: sol-xhigh/grok-4.5 в карты (дыра
+#      independence_filter, коммит 14ce9fe), defaults к реальности, шапка v24 схлопнута.
 # v25 (2026-07-21, поздний вечер): СНЯТИЕ GEMINI (v24) ОТМЕНЕНО — оно стояло на
 #      ошибке ИЗМЕРЕНИЯ, а не на данных. Модели сохраняли ответ ФАЙЛОМ, а грейдился
 #      их пересказ в печати, где вывод усекается. По файлам с диска: gemini-flash
@@ -546,20 +557,36 @@ cross_provider:
   auth: subscription-oauth-first
 
   lanes:
+    # ЕДИНАЯ МОДЕЛЬ ВЫЗОВА (v26, решение владельца 2026-07-22): каждый ВНЕШНИЙ лейн
+    # вызывается СВОЕЙ КОНСОЛЬНОЙ УТИЛИТОЙ (vendor CLI). Ни моста /opt/tools/agent-
+    # bridge, ни MCP-сервера в пути лейнов больше нет — «только кодекс шёл уникальным
+    # путём», теперь и он как все. Claude-работники в это НЕ входят (решение
+    # владельца): у них Agent tool внутри харнесса — нативный путь с worktree,
+    # телеметрией и контекстом; consoleный `claude -p` остаётся лишь запасом для
+    # не-Claude хоста (ADR-0005, §Claude-работники).
+    # ИНТЕРИМ: исполнитель tools/run-lane (ADR-0005, срезы 3–5) ещё не написан,
+    # поэтому до него внешний лейн вызывается лидом по документированной форме своего
+    # CLI — ровно как grok/kimi вызываются уже сегодня. Форма — references/cross-
+    # provider.md. Неломающийся вызов (единый argv, артефакт с диска, сверка модели)
+    # даст run-lane; это цель, а не текущее состояние.
+    # transport у КАЖДОГО лейна = имя его консольной утилиты.
     codex-critic:                  # кросс-модельная линза (зеркало Opus-xhigh критика)
       model: gpt-5.6-sol
       effort: xhigh                # `max` — по решению лида для труднейших вердиктов
       sandbox: read-only
+      transport: codex-cli         # `codex exec` (не MCP, не мост)
     codex-code:                    # кодинг-рука (зеркало builder/Sonnet-high)
       model: gpt-5.6-terra
       effort: high
       escalation: [terra-xhigh, sol-high, sol-xhigh]
       sandbox: workspace-write     # cwd = выделенный worktree; никогда danger-full-access
+      transport: codex-cli
     codex-recon:                   # дешёвая репо-разведка С shell (read-only)
       model: gpt-5.6-luna
       effort: medium
       bulk_effort: low
       sandbox: read-only
+      transport: codex-cli
     grok-build:                    # v18: продвинут из пилота в полноценный лейн (ключ
                                    # исторический — теперь роли шире сборки, см. roles).
                                    # Решение владельца 2026-07-19 на данных: architect t3/t4/t5
@@ -571,6 +598,7 @@ cross_provider:
       effort: high                 # high/medium/low; low для рутинной механики
       sandbox: orchestrate         # v17: fail-closed профиль (extends strict + deny),
                                    # references/grok/; worktree ОБЯЗАТЕЛЕН.
+      transport: grok-cli          # `grok -p` (консольная утилита xAI)
       hardening: grok_hardening    # v17: обязателен перед диспетчем
       roles: [builder, recon, diagnosis, standards-lens, spec-lens, critic]
       # v18: never_critic СНЯТ (был: METR reward-hacking). Оговорки к креслу критика:
@@ -581,9 +609,12 @@ cross_provider:
       critic_eligible: honesty-cleared-2026-07-19
       prefer_for: latency-sensitive   # быстрый оборот сборки/разведки без ultra-цены Codex
     composer-build:                # ПИЛОТ дешёвого исполнителя (v14; см. pilots ниже)
+                                   # ADR-0005 F2: кандидат на УДАЛЕНИЕ (не критик, не
+                                   # применялся, дублирует поверхность xAI).
       model: grok-composer-2.5-fast
                                    # reasoning-effort НЕ поддерживает (быстрая кодовая модель)
       sandbox: orchestrate         # v17: тот же кастомный fail-closed профиль (см. grok-build)
+      transport: grok-cli
       never_critic: true
       spell_out_conventions: true  # v14: t1-провал — угадал не тот порядок кодов; в тикет
                                    # Composer конвенции (порядок кодов/полей) писать ЯВНО
