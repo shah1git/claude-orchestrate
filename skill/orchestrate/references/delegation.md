@@ -115,6 +115,15 @@ if for a capable executor with zero tolerance for ambiguity:
   unverified coverage claim, not evidence of completeness — the lead treats it as
   unverified before building a plan on it (2026-07-11 picker incident: 4 of 9 sites
   missed by a one-angle sweep the plan then trusted; §8, incident 4).
+- **Write inventories as search-then-collect, not walk-and-count** (v23, config
+  `routing.classes.mechanical.inventory_method`). Cheap tiers do not hold a running count
+  in their head while walking files — Haiku scored 0.868 and Luna 0.921 on a 38-item sweep
+  that required it. The same Haiku scored a perfect 1.0/1.0 on a **450-item** key when the
+  items came out of one search and the work was transcribing its results. Size was never
+  the variable; method was. So: name the patterns and paths in the ticket (scout's rule 1
+  already binds it to them), and let the items fall out of the sweep. Routing up a tier is
+  for inventories that genuinely cannot be written this way — **rewrite the ticket before
+  you spend the tier**.
 - Keep tickets small: one question or one sweep per ticket. Ten small scout tickets in
   parallel beat one broad one — **down to a floor**: every delegation carries fixed
   overhead (spawn, context injection, report), so below some brief size splitting costs

@@ -73,7 +73,7 @@ surfaces**, and choosing the wrong one is the mistake to avoid:
 
 | Surface | Use it for | How | Gives back |
 |---|---|---|---|
-| **MCP tools** (`codex mcp-server`, `gemini-mcp-tool`) | quick, **interactive** "ask a second opinion" | `mcp__codex__codex`, `mcp__gemini-cli__ask-gemini` | prose in the lead's context; **no token/duration metadata; no strict schema** |
+| **MCP tools** (`codex mcp-server`, `gemini-mcp-tool`) | quick, **interactive** "ask a second opinion" only — **never a lane transport** (v23, owner 2026-07-21: `gemini-mcp-tool` hardcodes `supportsModelSelection: false` for the agy backend and silently drops the requested model, so agy falls back to its own default — verified 2026-07-21 as `Gemini 3.1 Pro (High)` while our config claimed Flash) | `mcp__codex__codex`, `mcp__gemini-cli__ask-gemini` | prose in the lead's context; **no token/duration metadata; no strict schema; no model guarantee** |
 | **agent-bridge** (`run-external-agent.mjs`) | **structured, machine-checkable verdicts** in a pipeline; the Codex coding hand | `node /opt/tools/agent-bridge/run-external-agent.mjs --tool codex\|gemini …` | clean JSON `{ok, output, durationMs, model, usage, sessionId, sandboxViolations, command, stderrTail}` — schema-validated |
 
 **Why the bridge for structured work (not MCP):** Codex's `--output-schema` is **silently
@@ -83,8 +83,16 @@ the bug's precondition doesn't even apply here — but the underlying argument s
 strict `APPROVED/WARNING/BLOCKED` verdict is only reliable through `codex exec --output-schema`
 — which is what the bridge runs.
 Verified live 2026-07-06: bridge Codex returned a schema-valid verdict and even reviewed a repo
-file itself; bridge Gemini ran `agy --print --model "Gemini 3.1 Pro (High)"` and honoured the
-model. The MCP `ask-gemini` path, by contrast, is model-locked to Flash in print mode — fine
+file itself; bridge Gemini ran `agy --print --model "Gemini 3.1 Pro (High)"` — **that command
+form is broken and the observation drawn from it is void** (v23, 2026-07-21): `--print`/`-p` is
+not a boolean, it consumes the next token as the prompt, so this invocation sent the prompt
+`--model` and never selected a model at all. The correct form is
+`agy --model "<name>" [--effort <level>] --print-timeout 5m -p "<prompt>" < /dev/null` — flags
+before `-p`, prompt last, stdin explicitly closed or the CLI hangs waiting on input. Verified
+live 2026-07-21: an unknown model name is now rejected with the available list, and
+`"Gemini 3.6 Flash (Low)"` produced 357 words in 5.5s. The MCP `ask-gemini` path, by contrast,
+reports itself model-locked to Flash in print mode — plausibly because that wrapper builds the
+same malformed command; unverified either way, so treat it as Flash-only until re-tested. Fine
 for recon, wrong for a Pro-tier critic.
 
 > **Bridge Gemini is unreliable for read-only *contracts* — regressed 2026-07-11 (incident
@@ -152,9 +160,9 @@ the Claude default it degrades to when no surface is present.
 | `codex-critic` | cross-model lens — the Standards axis's default route (`cross_provider.defaults.standards_lens`, fixed gate member, not opt-in) | `--tool codex --model gpt-5.6-sol --effort xhigh --schema <verdict> --sandbox read-only --cwd <repo>` | `mcp__codex__codex` (read-only) | `standards-lens` fallback chain → `sonnet-inline-note` |
 | `codex-code` | coding hand | `--tool codex --model gpt-5.6-terra --effort high --sandbox workspace-write --cwd <worktree>` | `mcp__codex__codex` (workspace-write) | `builder` (Sonnet) |
 | `codex-recon` | cheap repo-grounded recon with shell | `--tool codex --model gpt-5.6-luna --effort medium --sandbox read-only --cwd <repo>` | `mcp__codex__codex` (read-only) | `scout` (file-only) / `builder` (needs shell) |
-| `gemini-critic` | cross-model lens (alt) — the Standards axis's first fallback when `codex-critic` is unavailable; ⚠ bridge unreliable for review (incident #5), prefer `codex-critic`, or `ask-gemini` MCP inlined | `--tool gemini --model "Gemini 3.1 Pro (High)"` | `mcp__gemini-cli__ask-gemini` (Flash-only in print) | `standards-lens` fallback chain → `sonnet-inline-note` |
-| `gemini-recon` | big-context recon | `--tool gemini --model "Gemini 3.5 Flash (High)"` | `mcp__gemini-cli__ask-gemini` | `scout` (Haiku) |
-| `gemini-recon-cheap` | high-volume mechanical recon | `--tool gemini --model "Gemini 3.5 Flash (Low)"` | `mcp__gemini-cli__ask-gemini` | `scout` (Haiku) |
+| `gemini-critic` | cross-model lens (alt) — the Standards axis's first fallback when `codex-critic` is unavailable; ⚠ bridge unreliable for review (incident #5), prefer `codex-critic` | `agy --model "Gemini 3.6 Flash (High)" --print-timeout 5m -p "<prompt>" < /dev/null` (flags **before** `-p`; v23) | `mcp__gemini-cli__ask-gemini` (ignores the model pin — Flash-locked in print) | `standards-lens` fallback chain → `sonnet-inline-note` |
+| `gemini-recon` | big-context recon | `agy --model "Gemini 3.6 Flash (High)" -p "<prompt>" < /dev/null` (v23) | `mcp__gemini-cli__ask-gemini` (ignores the pin) | `scout` (Haiku) |
+| `gemini-recon-cheap` | high-volume mechanical recon — **scout default since v23** | `agy --model "Gemini 3.6 Flash (High)" -p "<prompt>" < /dev/null` (effort raised Low→High, owner 2026-07-21) | `mcp__gemini-cli__ask-gemini` (ignores the pin) | `scout` (Haiku) |
 
 The bridge calls above show the *shape*; the model/effort values substituted at routing
 time come from config.yaml `cross_provider.lanes` (the skill root), which is where lane
@@ -200,10 +208,15 @@ here, so they are not pinnable; `Gemini 3.5 Pro` is not yet public at all.)
 >   `--model` and `--effort` explicitly.** Bridge behavior otherwise unchanged: JSON Schema
 >   auto-strictified, structured `usage` + `sessionId` returned.
 > - **Gemini via `agy`**: reasoning effort is baked into the **model name suffix** —
->   `(High) | (Medium) | (Low)`. Models present in `agy models`: `Gemini 3.5 Flash (H/M/L)`,
->   `Gemini 3.1 Pro (L/H)` (agy also proxies `Claude Sonnet/Opus 4.6 (Thinking)`, `GPT-OSS 120B`).
->   **`Gemini 3.5 Pro` is not public / not listed** — use `Gemini 3.1 Pro (High)` for the
->   reasoning lens until 3.5 Pro actually ships, then re-verify and update this banner.
+>   `(High) | (Medium) | (Low)` — or, equivalently, the base slug plus a separate `--effort`
+>   flag (both verified 2026-07-21). Models present in `agy models` as of 2026-07-21:
+>   `Gemini 3.6 Flash (H/M/L)`, `Gemini 3.5 Flash (H/M/L)`, `Gemini 3.1 Pro (L/H)` (agy also
+>   proxies `Claude Sonnet/Opus 4.6 (Thinking)`, `GPT-OSS 120B` — do not route Claude through
+>   a third-party harness, see the vendor policy map above).
+>   **Standing owner rule (2026-07-21): always the latest Flash, and no Gemini Pro anywhere.**
+>   Every Gemini lane therefore pins `Gemini 3.6 Flash (High)`; when a newer Flash ships,
+>   update all four lanes at once. Cost accepted knowingly: Pro's 2M window is gone, so
+>   oversized reads and diffs get sliced.
 
 Codex pins are now **explicit slugs, not the floating CLI default**: the config default is
 the owner's interactive choice (`terra` + `ultra` — wrong effort profile for our lanes), and
@@ -216,9 +229,9 @@ generation bump (same "family, not version" policy as our Claude aliases).
 | `codex-critic` | **`gpt-5.6-sol`** | **xhigh** (`max` by lead judgment for the hardest verdicts) | adversarial verification — mirrors our Opus-xhigh critic; Sol is the frontier coding/cybersecurity tier (SOTA on agentic code-review at GA) |
 | `codex-code` | **`gpt-5.6-terra`** | **high** (escalation: terra-xhigh → sol high/xhigh) | implementation to spec — Terra sits at/above frontier on the Coding Agent Index at ~¼ the cost; mirrors builder/Sonnet-high |
 | `codex-recon` | **`gpt-5.6-luna`** | **medium** (`low` for bulk) | cheap repo-grounded *agentic* recon **with shell** in a read-only sandbox; native cwd file access, no staging copy (Luna ≈ Opus 4.8 on coding index at the family's lowest price) |
-| `gemini-critic` | **`Gemini 3.1 Pro (High)`** | High (in the name) | deep-reasoning cross-model lens (3.5 Pro not public yet) |
-| `gemini-recon` | **`Gemini 3.5 Flash (High)`** | High | big-context recon workhorse (1M ctx, cheap, fast) |
-| `gemini-recon-cheap` | **`Gemini 3.5 Flash (Low)`** | Low | high-volume mechanical sweeps — the Haiku-lane cross-provider scout |
+| `gemini-critic` | **`Gemini 3.6 Flash (High)`** | High (in the name, or `--effort high`) | cross-model lens. v23 (owner, 2026-07-21): **Pro is not used anywhere** — latest Flash replaces it. The lane's original point was Pro's 2M window for large diffs; that is gone, so oversized reviews get sliced. |
+| `gemini-recon` | **`Gemini 3.6 Flash (High)`** | High | big-context recon workhorse (cheap, fast) |
+| `gemini-recon-cheap` | **`Gemini 3.6 Flash (High)`** | High (raised from Low, owner 2026-07-21 — Low economised a quota that is not scarce) | high-volume mechanical sweeps — **the scout default since v23**, ahead of Haiku |
 
 **Effort ladder & the `ultra` policy (2026-07-09).** `max` is a plain escalation step —
 deeper reasoning, still one thread; usable anywhere xhigh is, by lead judgment. `ultra` makes
@@ -425,11 +438,12 @@ mismatch is a defect in this file, never in the canon.
 ## Use 2 — Gemini big-context recon (read-only alternative scout)
 
 For recon whose INPUT exceeds a Claude window — and, under the Use 4 baseline, the default
-web-recon lane. **Call**: `--tool gemini --model "Gemini 3.5 Flash (High)"` (or the MCP
+web-recon lane. **Call**: `agy --model "Gemini 3.6 Flash (High)" -p "<prompt>" < /dev/null` (or the MCP
 `ask-gemini`, which is Flash anyway), prompt = a **scout-contract** ticket (OBJECTIVE / INPUTS
 via `@file` where supported / exact bounded OUTPUT / read-only BOUNDARIES / ACCEPTANCE + the
 scout escape hatch `NEEDS_CLARIFICATION`, "0 matches is a valid answer"). For very high-volume
-*mechanical* sweeps drop to `Gemini 3.5 Flash (Low)`. Note `gemini-recon` is also the
+*mechanical* sweeps use `gemini-recon-cheap`, which since v23 also runs `Gemini 3.6 Flash
+(High)` — it is now a role name, not an effort tier. Note `gemini-recon` is also the
 designated home for *cheap web sweeps* generally: our Claude cheap tier has no web tools
 by design (scout is local read-only; builder has WebFetch but no WebSearch), so a
 coverage-style web verification task routes here, or to `builder`/`architect` on the

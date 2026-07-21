@@ -490,6 +490,18 @@ erroring on contact — is an availability event, not a quality event: it consum
 attempts on the Step 4 escalation ladder and says nothing about the deliverable. Reroute
 instead, along the ordered chain in config.yaml `availability.fallbacks` (one chain per
 agent and per cross-provider lane; edited there): the first *available* element wins.
+
+**Equal-weight pools (v23).** A chain element written as `equal: [...]` is not a preference
+order but a set of *peers*: on reaching it, pick **within** it by
+`availability.equal_weight_selection` — the peer dispatched least often so far this run,
+ties broken by written order (deterministic, so a run replays). Two chains carry one today:
+`architect` (Fable stays the default *above* the pool) and `critic`. Filters run first,
+rotation second — the breaker drops unhealthy providers and `independence_filter` drops the
+deliverable's own vendor, and only what survives both is rotated over. An explicitly
+latency-sensitive ticket (`cross_provider.latency_sensitive.applies_when`) overrides the rotation and takes
+the fastest peer. A pool pick is a **route, not a reroute**: it stamps
+`xprovider_reason: quota-spread` and never `fallback_from` — otherwise routine rotation
+would flood the very metric that makes quota pressure visible.
 Direction rule the chains must respect (and edits to them too): a fallback never drops
 below the class's quality floor — sideways to an equal tier of another provider, or up,
 never down (the grader stays an honesty-cleared, non-own-vendor critic even here — not
