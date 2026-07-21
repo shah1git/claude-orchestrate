@@ -87,8 +87,15 @@ file itself; bridge Gemini ran `agy --print --model "Gemini 3.1 Pro (High)"` —
 form is broken and the observation drawn from it is void** (v23, 2026-07-21): `--print`/`-p` is
 not a boolean, it consumes the next token as the prompt, so this invocation sent the prompt
 `--model` and never selected a model at all. The correct form is
-`agy --model "<name>" [--effort <level>] --print-timeout 5m -p "<prompt>" < /dev/null` — flags
-before `-p`, prompt last, stdin explicitly closed or the CLI hangs waiting on input. Verified
+`agy --model "<name>" [--effort <level>] --add-dir <abs-path> --print-timeout 5m -p "<prompt>" < /dev/null`
+— flags before `-p`, prompt last, stdin explicitly closed or the CLI hangs waiting on input, and
+**`--add-dir` is mandatory whenever the agent must read files**: `cd <dir> && agy …` does *not*
+place the agent there (v24, 2026-07-21). The log shows `workspaceDirs` set correctly while the
+agent's tools sit in agy's own scratch — so it cannot find the material and starts searching the
+filesystem for it. That, not misbehaviour, is what produced incident #6 (`find /` into a sibling
+workspace): the agent was hunting for materials it had not been given. Reproduced on three
+different models in a row (Gemini Flash, Claude Opus 4.6, gpt-oss) — a harness property, not a
+model one. Verified
 live 2026-07-21: an unknown model name is now rejected with the available list, and
 `"Gemini 3.6 Flash (Low)"` produced 357 words in 5.5s. The MCP `ask-gemini` path, by contrast,
 reports itself model-locked to Flash in print mode — plausibly because that wrapper builds the
