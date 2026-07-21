@@ -83,6 +83,10 @@ VALID_CONFIG = dedent("""\
       fallbacks:
         architect: [fable, opus, report-blocker]
       reasons: [quota-window, subscription, connector-absent, connector-error]
+      provider_map:
+        anthropic: [fable, opus]
+      surface_map:
+        anthropic-subscription: [fable, opus]
 
     thresholds:
       first_try_pass_min: 0.80
@@ -244,3 +248,28 @@ def test_sibling_with_its_own_config_is_not_scanned(tmp_path):
     result = run_validator(skill_dir)
     assert result.returncode == 0
     assert result.stderr == ""
+
+
+# A config whose fallback chain routes to a lane that is absent from
+# provider_map — the exact drift (sol-xhigh / grok-4.5 outside the map) that let
+# a critic grade its own vendor's work undetected.
+_CONFIG_LANE_OUTSIDE_MAP = VALID_CONFIG.replace(
+    "architect: [fable, opus, report-blocker]",
+    "architect: [fable, opus, grok-4.5, report-blocker]")
+
+
+def test_lane_absent_from_provider_map_is_flagged(tmp_path):
+    skill_dir = make_skill_dir(tmp_path, config_text=_CONFIG_LANE_OUTSIDE_MAP)
+    result = run_validator(skill_dir)
+    assert result.returncode == 1
+    assert "grok-4.5" in result.stderr
+    assert "provider_map" in result.stderr
+
+
+def test_chain_terminals_are_not_required_in_maps(tmp_path):
+    # report-blocker is a terminal behaviour, not a routable lane: it must NOT be
+    # demanded in provider_map/surface_map even though it appears in every chain.
+    skill_dir = make_skill_dir(tmp_path)
+    result = run_validator(skill_dir)
+    assert result.returncode == 0
+    assert "report-blocker" not in result.stderr
