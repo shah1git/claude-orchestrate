@@ -1,25 +1,46 @@
-# Cross-provider: non-Claude workers (Codex, Gemini/Antigravity)
+# Cross-provider: non-Claude workers (Codex, Gemini/Antigravity, Grok, Kimi)
 
 Source of truth for the cross-provider layer. Portability floor: with **no cross-provider
 surface present**, every routing decision resolves to a Claude worker and the run completes
-normally — the skill degrades to self-contained Claude-only. When surfaces ARE present
-(this machine: Codex + Antigravity `agy`), non-Claude workers are **regular members of the
-routing pool**, routed by the lead's judgment under the standing mandate below — not an
-exception layer. Judgment-driven, never silent: every non-Claude route carries a named
-reason into telemetry.
+normally — the skill degrades to self-contained Claude-only. When surfaces ARE present,
+non-Claude workers are **regular members of the routing pool**, routed by the lead's judgment
+under the standing mandate below — not an exception layer. Judgment-driven, never silent:
+every non-Claude route carries a named reason into telemetry.
+
+> **ONE INVOCATION MODEL (v26, owner 2026-07-22): every external lane is invoked by its own
+> VENDOR CONSOLE UTILITY (CLI).** There is no bridge and no MCP server in the lane path any
+> more — "only codex went a unique route" is gone; codex now runs through its CLI like
+> everyone else. Each lane declares its `transport` in config: `codex-cli`, `grok-cli`,
+> `agy-print` (Gemini + `agy-opus`), `kimi-cli-headless`. Claude workers are **NOT** in this
+> model (owner decision): they run natively through the harness Agent tool — worktree,
+> telemetry, context inheritance — and `claude -p` is only their portability fallback on a
+> non-Claude host (ADR-0005, §Claude-workers).
+>
+> **The bridge `/opt/tools/agent-bridge` is retired from this project.** It is no longer
+> referenced or depended on: its gemini path was broken in code and it never handled
+> grok/kimi/claude. Codex's structured-verdict capability (`codex exec --output-schema`) is
+> reached by calling the codex CLI directly — the same thing the bridge wrapped. The bridge's
+> own repo lives elsewhere in `/opt/tools`; its fate is outside this project.
+>
+> **Interim (ADR-0005, slices 3–5):** the drift-proof executor `tools/run-lane` (one argv,
+> artifact-from-disk, model-verification) is not written yet. Until it lands, an external lane
+> is invoked by the lead per its documented CLI form below — exactly as grok/kimi already are
+> today. Not a regression: codex is brought to the same state, all get the executor later.
+>
+> Historical notes further down that mention "the bridge" or "MCP as a Gemini path" are
+> **pre-v26 context, not current instruction** — the current path is always the vendor CLI.
 
 Design rationale — including *why external agents are workers/cross-reviewers and never a
-second orchestrator* — lives in an external ADR, not here: **`/opt/tools/agent-bridge/ADR-0001-external-agents-as-workers.md`**.
-On any conflict, that ADR (the canon for this machine's cross-provider setup) wins; we do not
-duplicate its reasoning.
+second orchestrator* — lives in an external ADR: **`/opt/tools/agent-bridge/ADR-0001-external-agents-as-workers.md`**
+(the reasoning is canon even though the bridge mechanism is retired from our lane path).
+Our own decision record for the invocation model is **`docs/adr/0005-lane-invocation-unification.md`**.
 
-> **We reference, we do not vendor.** The mechanism below (the `agent-bridge`) is a *separate
-> project* at `/opt/tools/agent-bridge`, with its own README, ADR, and lifecycle. orchestrate
-> is pure Markdown and owns no executable code — it *calls* the bridge if present, never
-> copies it in. Like the MCP connectors, the bridge is **capability-detected by presence**:
-> if `/opt/tools/agent-bridge/run-external-agent.mjs` exists in this environment, use it; else
-> fall back to an MCP surface (interactive only) or to the Claude-only default. Paths here are
-> environment-specific (this machine's layout), not a portable assumption.
+> **We reference, we do not vendor.** orchestrate is pure Markdown for its METHOD, but its own
+> thin tools (`validate_config.py`, `telemetry_append.py`, and the coming `run-lane`) live in
+> `tools/` and travel with the repo — that is what makes the skill portable (ADR-0005, F1). We
+> do not copy in foreign code: vendor CLIs are **capability-detected by presence** — if the CLI
+> exists and reports logged-in, its lane is available; else that lane falls back down its chain
+> to a Claude worker. Paths are environment-specific, not a portable assumption.
 
 ## Auth principle — subscription OAuth first (config v5; omp case study, 2026-07-12)
 
@@ -63,28 +84,33 @@ Residual gray zone for Google: their detection has produced false positives — 
 unexplained Google-account restriction on this machine is a possible detection misfire;
 surface it to the owner immediately.
 
-## Two surfaces — pick by what you need back
+## One path — the vendor's console utility
 
 A cross-provider "worker" is **the lead invoking an external CLI from the main loop** (only
 the lead has that access) with our ticket in the prompt, then grading the return with our
 normal gates. The external model's context is fresh by construction (it sees only the prompt),
-so producer≠grader and fresh-context independence hold automatically. There are **two
-surfaces**, and choosing the wrong one is the mistake to avoid:
+so producer≠grader and fresh-context independence hold automatically.
 
-| Surface | Use it for | How | Gives back |
-|---|---|---|---|
-| **MCP tools** (`codex mcp-server`, `gemini-mcp-tool`) | quick, **interactive** "ask a second opinion" only — **never a lane transport** (v23, owner 2026-07-21: `gemini-mcp-tool` hardcodes `supportsModelSelection: false` for the agy backend and silently drops the requested model, so agy falls back to its own default — verified 2026-07-21 as `Gemini 3.1 Pro (High)` while our config claimed Flash) | `mcp__codex__codex`, `mcp__gemini-cli__ask-gemini` | prose in the lead's context; **no token/duration metadata; no strict schema; no model guarantee** |
-| **agent-bridge** (`run-external-agent.mjs`) | **structured, machine-checkable verdicts** in a pipeline; the Codex coding hand | `node /opt/tools/agent-bridge/run-external-agent.mjs --tool codex\|gemini …` | clean JSON `{ok, output, durationMs, model, usage, sessionId, sandboxViolations, command, stderrTail}` — schema-validated |
+**There is one surface per lane: its vendor console utility** (v26). Not two, not a
+bridge-or-MCP choice — the drift that framing invited is exactly what cost a day. Each lane's
+`transport` in config names the CLI:
 
-**Why the bridge for structured work (not MCP):** Codex's `--output-schema` is **silently
-ignored while MCP is active** (codex bug #15451 — closed upstream 2026-07-09 with no
-documented fix visible on the issue). This machine doesn't have MCP configured for Codex, so
-the bug's precondition doesn't even apply here — but the underlying argument still holds: a
-strict `APPROVED/WARNING/BLOCKED` verdict is only reliable through `codex exec --output-schema`
-— which is what the bridge runs.
-Verified live 2026-07-06: bridge Codex returned a schema-valid verdict and even reviewed a repo
-file itself; bridge Gemini ran `agy --print --model "Gemini 3.1 Pro (High)"` — **that command
-form is broken and the observation drawn from it is void** (v23, 2026-07-21): `--print`/`-p` is
+| Lane | Console utility | Structured return |
+|---|---|---|
+| `codex-*` (critic/code/recon) | `codex exec` — `--output-schema` gives a strict `APPROVED/WARNING/BLOCKED` verdict, `--json` gives usage + session id | machine-checkable verdict + usage |
+| `grok-build` / `composer-build` | `grok -p` — `--json-schema`, `--output-format` | schema-checkable |
+| `gemini-*` / `agy-opus` | `agy` — see the mandatory-form box below; no strict schema (emulated by prompt, reported as `prompt_asked`) | prose/artifact + journal witness |
+| `kimi-k3` | `kimi -p` — `--output-format stream-json` | text/stream |
+
+**MCP is not a lane transport.** `mcp__codex__codex` survives only as an ad-hoc "ask a second
+opinion" outside the gate and outside these lanes; `gemini-mcp-tool` is removed entirely (it
+hardcodes `supportsModelSelection: false` and silently drops the requested model — verified
+2026-07-21 as serving `Gemini 3.1 Pro (High)` while config claimed Flash). Strict verdicts and
+model guarantees come from the CLI directly, never from an MCP wrapper.
+
+*(Historical: a `codex exec --output-schema` verdict was verified live 2026-07-06; the same
+run's bridge-Gemini form `agy --print --model …` is broken — kept below only as the worked
+example of the flag-order trap.)* That broken form — `--print`/`-p` is
 not a boolean, it consumes the next token as the prompt, so this invocation sent the prompt
 `--model` and never selected a model at all. The correct form is
 `agy --model "<name>" [--effort <level>] --add-dir <abs-path> --print-timeout 5m -p "<prompt>" < /dev/null`
@@ -140,40 +166,39 @@ for recon, wrong for a Pro-tier critic.
 > tier** (`availability.fallbacks.standards-lens`); `codex-critic` (Sol) stays the *preferred*
 > route on quality (8/8, 0 FP, honours its Pro pin) — it is `cross_provider.defaults.standards_lens`.
 
-> **File access — bridge v2 gives Gemini a repo too, via a copy, not a permission.** Bridge
-> `--tool codex` (`codex exec`) is an *agent* that reads files in its `cwd` sandbox itself —
-> point it at a repo and it opens what it needs, unchanged. Bridge `--tool gemini` (`agy
-> --print`) now gets file access as well when `--cwd` is passed: the bridge copies `--cwd`
-> into a throwaway staging directory (excluding `.git`, `node_modules`, `.venv`, `__pycache__`,
-> `dist`, `build`; 200 MB cap) and hands agy that copy via `--add-dir`, so it can open real file
-> content there. The isolation is **structural (a copy), not behavioural** — agy's own
-> restriction modes (`--mode plan`, its own `--sandbox`) are NOT a safety net for this: tested
-> live 2026-07-09, they proved non-deterministic (the same scenario sometimes honoured
-> read-only, sometimes wrote to disk anyway). So `read-only` (default) never lets agy touch the
-> real directory; whatever it creates or edits lives and dies with the copy, reported
-> best-effort in `sandboxViolations`. Bare `agy --print` invoked with no `--add-dir` at all still
-> has no file access — paste content inline (or `@file` where supported) for those calls. So:
-> Codex for repo-grounded review as before; Gemini is now also repo-grounded through the
-> bridge's staging copy, or inline-prompt when no `--cwd` is given.
+> **File access — per CLI, directly (v26; the bridge's staging-copy scheme is retired).**
+> `codex exec` is an *agent* that reads files in its `--cwd` sandbox itself — point it at a
+> worktree and it opens what it needs. `agy` gets file access through `--add-dir <abs>`
+> (mandatory — `cd` alone does not place the agent there, see the flag box above); it opens
+> real content in that directory. For lanes constrained to inlined material
+> (`requires_pregate_output_inline`, e.g. `gemini-critic`), the lead pastes the deliverable
+> and pre-gate output into the prompt and the lane does **not** walk the tree. Isolation for
+> writing lanes is the dedicated worktree plus each CLI's own `--sandbox`/hardening profile
+> (grok/kimi: `grok_hardening`/`kimi_hardening`, fail-closed), not a copy. Take the artifact
+> from the written file (`--out`/the file the agent wrote), never from truncated print.
 
 ## Connector registry
 
-Name capabilities, not frozen tool strings (survives the gemini-cli → `agy` migration). For
-each capability: the **bridge** call (structured) and the **MCP** fallback (interactive), plus
-the Claude default it degrades to when no surface is present.
+Name capabilities, not frozen tool strings. For each lane: the **console-utility (CLI)** call
+and the Claude default it degrades to when no surface is present. One column, one path — the
+vendor CLI (v26). No bridge column, no MCP column.
 
-| Capability | Use | Bridge (structured) | MCP (interactive) | Degrades to |
-|---|---|---|---|---|
-| `codex-critic` | cross-model lens — the Standards axis's default route (`cross_provider.defaults.standards_lens`, fixed gate member, not opt-in) | `--tool codex --model gpt-5.6-sol --effort xhigh --schema <verdict> --sandbox read-only --cwd <repo>` | `mcp__codex__codex` (read-only) | `standards-lens` fallback chain → `sonnet-inline-note` |
-| `codex-code` | coding hand | `--tool codex --model gpt-5.6-terra --effort high --sandbox workspace-write --cwd <worktree>` | `mcp__codex__codex` (workspace-write) | `builder` (Sonnet) |
-| `codex-recon` | cheap repo-grounded recon with shell | `--tool codex --model gpt-5.6-luna --effort medium --sandbox read-only --cwd <repo>` | `mcp__codex__codex` (read-only) | `scout` (file-only) / `builder` (needs shell) |
-| `gemini-critic` | cross-model lens (alt) — the Standards axis's first fallback when `codex-critic` is unavailable; ⚠ bridge unreliable for review (incident #5), prefer `codex-critic` | `agy --model "Gemini 3.6 Flash (High)" --print-timeout 5m -p "<prompt>" < /dev/null` (flags **before** `-p`; v23) | `mcp__gemini-cli__ask-gemini` (ignores the model pin — Flash-locked in print) | `standards-lens` fallback chain → `sonnet-inline-note` |
-| `gemini-recon` | big-context recon | `agy --model "Gemini 3.6 Flash (High)" -p "<prompt>" < /dev/null` (v23) | `mcp__gemini-cli__ask-gemini` (ignores the pin) | `scout` (Haiku) |
-| `gemini-recon-cheap` | high-volume mechanical recon — **scout default since v23** | `agy --model "Gemini 3.6 Flash (High)" -p "<prompt>" < /dev/null` (effort raised Low→High, owner 2026-07-21) | `mcp__gemini-cli__ask-gemini` (ignores the pin) | `scout` (Haiku) |
+| Lane | Use | Console utility (CLI) call — shape | Degrades to |
+|---|---|---|---|
+| `codex-critic` | cross-model lens — a Standards-axis route (fixed gate member, not opt-in) | `codex exec --model gpt-5.6-sol --effort xhigh --output-schema <verdict> --sandbox read-only --cwd <repo>` | `standards-lens` chain → `sonnet-inline-note` |
+| `codex-code` | coding hand | `codex exec --model gpt-5.6-terra --effort high --sandbox workspace-write --cwd <worktree>` | `builder` (Sonnet) |
+| `codex-recon` | cheap repo-grounded recon with shell | `codex exec --model gpt-5.6-luna --effort medium --sandbox read-only --cwd <repo>` | `scout` (file-only) / `builder` (needs shell) |
+| `gemini-critic` | cross-model lens (alt) — Standards-axis fallback; judges by inlined material only (`requires_pregate_output_inline`) | `agy --model "Gemini 3.6 Flash (High)" --add-dir <abs> --print-timeout 5m -p "<prompt>" < /dev/null` | `standards-lens` chain → `sonnet-inline-note` |
+| `gemini-recon` / `gemini-flash` | big-context recon | `agy --model "Gemini 3.6 Flash (High)" --add-dir <abs> -p "<prompt>" < /dev/null` | `scout` (Haiku) |
+| `agy-opus` | frontier-Claude on Google quota | `agy --model claude-opus-4-6-thinking --add-dir <abs> -p "<prompt>" < /dev/null` | `opus` (Anthropic quota) |
+| `grok-build` | fast builder/recon/judge | `grok -p --model grok-4.5 --json-schema <verdict> --sandbox <orchestrate> --cwd <worktree>` | `builder` / `codex-code` |
+| `kimi-k3` | 1M-context builder/judge | `kimi -p -m k3 --add-dir <abs> --output-format stream-json` | `sonnet` / `codex-code` |
 
-The bridge calls above show the *shape*; the model/effort values substituted at routing
-time come from config.yaml `cross_provider.lanes` (the skill root), which is where lane
-pins are edited.
+The calls above show the *shape*; the model/effort values substituted at routing time come
+from config.yaml `cross_provider.lanes` (the skill root), where lane pins — and each lane's
+`transport` (the CLI name) — are edited. `--add-dir <abs>` is mandatory for any lane that must
+read files (see the flag box above); the artifact is taken from `--out`/the written file, never
+from truncated print.
 
 ## Model & effort pins — verify against the connector, not the web
 
@@ -207,8 +232,8 @@ here, so they are not pinnable; `Gemini 3.5 Pro` is not yet public at all.)
 >   lives in the Responses API and the ChatGPT product only — **absent from the CLI catalog
 >   (checked 2026-07-10)**, so there is nothing to pin for our lanes. The 372k context figure is the CLI catalog's
 >   value; OpenAI has published no official 5.6 context window (product-side ChatGPT caps
->   differ) — treat circulating web figures as unconfirmed. Effort is pinned per call via the bridge's **`--effort`** flag
->   (added 2026-07-09) or `-c model_reasoning_effort=…` (direct CLI) / `config:{…}` (MCP).
+>   differ) — treat circulating web figures as unconfirmed. Effort is pinned per call via
+>   `codex exec --effort <level>` or `-c model_reasoning_effort=…` on the codex CLI.
 >   **Config-inheritance hazard:** `~/.codex/config.toml` pins the owner's interactive
 >   default to `terra` + effort **`ultra`** — a routed call that omits `--effort` silently
 >   inherits ultra and its multi-agent cost, so **every routed Codex call must pin both
@@ -264,16 +289,14 @@ family bump (same policy as delegation.md banners).
 
 ## Detection & graceful degradation
 
-- **Detection** (once per capability at Step 2): a single call, `node
-  /opt/tools/agent-bridge/run-external-agent.mjs --detect` (no `--tool` needed), returns JSON
-  covering both CLIs in one shot — `codex.present`/`codex.loggedIn`/`codex.version` and
-  `gemini.present`/`gemini.models` — and always exits 0, so absence is data, not an error. A
-  bridge capability is *available* iff the bridge script is present and the relevant CLI reports
-  present+logged-in in that JSON; an MCP capability iff its tool is in the lead's tool set.
-  Record availability in the routing plan. **Fallback** (if `--detect` itself is unavailable,
-  e.g. an older bridge): the old three-check method — presence of
-  `/opt/tools/agent-bridge/run-external-agent.mjs` plus `codex login status` / `agy models`
-  succeeding individually.
+- **Detection** (once per lane at Step 2, v26 — per-CLI, no bridge): probe each vendor console
+  utility directly by presence + logged-in. A lane is *available* iff its `transport` CLI is on
+  PATH and reports authenticated: `codex login status` (codex-*), `agy models` (gemini-* /
+  `agy-opus` — a non-empty catalog also confirms the Google surface), `grok --version` +
+  its login check (grok-*), `kimi --version` + its login check (kimi-k3). Each probe is cheap,
+  local, and does not spend model quota; absence is data, not an error. Record availability in
+  the routing plan. (Future `tools/run-lane --detect` will fold these into one call, ADR-0005 —
+  until then probe per lane.)
 - **Degradation**: if a route selects a cross-provider capability that detection finds absent,
   walk that lane's ordered fallback chain in config.yaml `availability.fallbacks` (the
   registry's "Degrades to" column shows the same terminal Claude default; the operative,
@@ -394,31 +417,27 @@ mismatch is a defect in this file, never in the canon.
 
 ### Calling the axis
 
-- **Call (structured, preferred) — primary lane `codex-critic`**: `node
-  /opt/tools/agent-bridge/run-external-agent.mjs --tool codex --model gpt-5.6-sol --effort
-  xhigh --schema <verdict.json> --sandbox read-only --cwd <repo>`, prompt on **stdin** = the
-  deliverable + the ticket's ACCEPTANCE verbatim + "try to refute; a finding needs a concrete
-  failure scenario." Verdict schema = **the bridge's machine-checkable shape** (`status ∈
-  APPROVED|WARNING|BLOCKED`, `summary`, `issues[]`; see the agent-bridge README) — this is
-  *distinct* from our critic's prose PASS/FAIL verdict (quality.md §3); the lead maps
-  `BLOCKED`/`WARNING`-with-a-real-scenario onto a FAIL. Read the parsed `output`.
-  **`--resume` is forbidden here**: a lens's context must be fresh-by-construction
-  (producer≠grader depends on it), and `--resume` is reserved for the coding hand (Use 3)
-  alone.
-- **`gemini-critic` fallback — `ask-gemini` MCP only, never the bridge.** The bridge's Gemini
-  review path (`--tool gemini --model "Gemini 3.1 Pro (High)"`) is disqualified for review
-  contracts ("Bridge Gemini is unreliable for read-only *contracts*" above, incident #5): on
-  this exact call shape it edited the deliverable instead of returning findings, twice, with
-  no gradeable verdict either time. Call `mcp__gemini-cli__ask-gemini` instead, with the
-  deliverable and the full lens brief (including the smell baseline) inlined in the prompt —
-  do not pin a `model`, the connector Flash-locks it in print mode regardless. Honest caveat:
-  **this path is Flash-tier, not a Pro-tier peer of `codex-critic`** — never claim a "3.1 Pro
-  lens" was run through it (pin only what the connector exposes). It returns prose, not the
-  bridge's strict schema (Two surfaces table above); ask it to state status/summary/issues in
-  that shape anyway and parse the prose by hand.
-- **Call (quick, interactive)**: `mcp__codex__codex` (read-only, effort xhigh) — prose only,
-  no strict verdict; use only for an ad hoc second opinion outside the gate, never as the
-  gate's Standards call itself (no schema to grade against).
+- **Call (structured, preferred) — primary lane `codex-critic`**: `codex exec --model
+  gpt-5.6-sol --effort xhigh --output-schema <verdict.json> --sandbox read-only --cwd <repo>`,
+  prompt on **stdin** = the deliverable + the ticket's ACCEPTANCE verbatim + "try to refute; a
+  finding needs a concrete failure scenario." Verdict schema = the CLI's machine-checkable
+  shape (`status ∈ APPROVED|WARNING|BLOCKED`, `summary`, `issues[]`) — *distinct* from our
+  critic's prose PASS/FAIL verdict (quality.md §3); the lead maps `BLOCKED`/`WARNING`-with-a-
+  real-scenario onto a FAIL. Read the parsed `output`. **`--resume` is forbidden here**: a
+  lens's context must be fresh-by-construction (producer≠grader depends on it), and `--resume`
+  is reserved for the coding hand (Use 3) alone.
+- **`gemini-critic` fallback — direct `agy`, judged by inlined material.** Call `agy --model
+  "Gemini 3.6 Flash (High)" --add-dir <abs> --print-timeout 5m -p "<prompt>" < /dev/null` with
+  the deliverable and the full lens brief (including the smell baseline) inlined in the prompt.
+  This lane judges by inlined material only (`requires_pregate_output_inline`), does not run
+  live tools, and takes its artifact from the written file, not truncated print. Honest caveat:
+  Flash-tier, no strict schema — ask it to state status/summary/issues in that shape and parse
+  the prose by hand. *(History, incident #5: an old bridge-Gemini path once edited the
+  deliverable instead of returning findings; that path is retired — the direct-agy form with
+  the flag-order fix and `requires_pregate_output_inline` is the current, verified one.)*
+- **Ad-hoc second opinion (outside the gate)**: `mcp__codex__codex` (read-only, effort xhigh) —
+  prose only, no strict verdict; the ONE surviving MCP use, never the gate's Standards call
+  itself (no schema to grade against).
 - **Lens brief — mandatory contents (v8; extended v12 for the smell baseline).** An external
   lens knows nothing of the home doctrine; its prompt must carry, in order: (1) the
   deliverable (diff) and the ticket's ACCEPTANCE verbatim; (2) the **full smell baseline**
@@ -479,10 +498,10 @@ workspace root where other agents' work lives. Config: `cross_provider.staging_i
 ## Use 3 — Codex coding hand (peer builder; writes only in a worktree)
 
 A peer coding lane, chosen at routing time by lead judgment — the Use 4 baseline makes it
-the default for well-specified builder tickets when detected. **Call (preferred)**:
-`--tool codex --model gpt-5.6-terra --effort high --sandbox workspace-write --cwd <worktree>`
-via the bridge (structured result + `durationMs` + structured `usage` token counts); MCP
-`mcp__codex__codex` is the interactive fallback. Params: prompt = a **builder-contract**
+the default for well-specified builder tickets when detected. **Call**:
+`codex exec --model gpt-5.6-terra --effort high --sandbox workspace-write --cwd <worktree>`
+(`--json` gives `durationMs` + structured `usage` token counts). Params: prompt = a
+**builder-contract**
 ticket (full spec, explicit scope, "run scoped checks yourself"); `cwd` = a dedicated
 **worktree** path (structural write-scoping); **never `danger-full-access`**; effort **high**
 — for a genuinely hard ticket escalate terra-xhigh, then `gpt-5.6-sol` high/xhigh; `ultra`
