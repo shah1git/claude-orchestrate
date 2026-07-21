@@ -180,6 +180,66 @@ def schema_violations(config_data: dict, config_path: Path) -> list:
     return violations
 
 
+# Terminal chain elements are honest behaviours, not routable lanes/agents: they
+# have no vendor and no surface, so the completeness check below skips them.
+_CHAIN_TERMINALS = frozenset({
+    "report-blocker", "lead-inline", "skip-third-lens", "sonnet-inline-note",
+})
+
+
+def _chain_members(chain) -> list:
+    """Flatten a fallback chain into the names it can route to. An element is
+    either a bare name (str) or an equal-weight pool `{"equal": [...]}`."""
+    names = []
+    for element in chain:
+        if isinstance(element, dict) and "equal" in element:
+            names.extend(element["equal"])
+        elif isinstance(element, str):
+            names.append(element)
+    return names
+
+
+def map_completeness_violations(config_data: dict, config_path: Path) -> list:
+    """Every name that a fallback chain can route to must resolve to a vendor
+    (availability.provider_map) AND a surface (availability.surface_map) — else
+    the independence_filter and the provider breaker silently skip it.
+
+    This is the check config.yaml's own comment has long *promised* ("Валидатор
+    проверяет полноту") but that never existed in code — the exact gap that let
+    the sol-xhigh / grok-4.5 aliases sit in judging chains outside provider_map,
+    so a critic could grade its own vendor's work undetected. Making it a
+    deterministic gate means the drift cannot recur silently."""
+    violations = []
+    availability = config_data.get("availability")
+    if not isinstance(availability, dict):
+        return violations
+    fallbacks = availability.get("fallbacks") or {}
+    provider_map = availability.get("provider_map") or {}
+    surface_map = availability.get("surface_map") or {}
+
+    in_providers = {name for names in provider_map.values() for name in names}
+    in_surfaces = {name for names in surface_map.values() for name in names}
+
+    routable = set()
+    for chain in fallbacks.values():
+        if isinstance(chain, list):
+            routable.update(_chain_members(chain))
+    routable -= _CHAIN_TERMINALS
+
+    for name in sorted(routable):
+        if name not in in_providers:
+            violations.append(
+                f"{config_path}: routable lane '{name}' is absent from "
+                f"availability.provider_map — independence_filter cannot resolve "
+                f"its vendor and will silently skip it")
+        if surface_map and name not in in_surfaces:
+            violations.append(
+                f"{config_path}: routable lane '{name}' is absent from "
+                f"availability.surface_map — the provider breaker cannot resolve "
+                f"its surface and will silently skip it")
+    return violations
+
+
 DOTTED_REF_RE = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)`")
 
 # A backtick span shaped like a dotted path but ending in one of these is a
@@ -272,6 +332,8 @@ def main(argv=None) -> int:
     config_data, violations = load_config(skill_dir / "config.yaml")
     if config_data is not None:
         violations += schema_violations(config_data, skill_dir / "config.yaml")
+        violations += map_completeness_violations(
+            config_data, skill_dir / "config.yaml")
         exceptions = load_exceptions(exceptions_path)
         violations += prose_violations(skill_dir, config_data, exceptions)
 

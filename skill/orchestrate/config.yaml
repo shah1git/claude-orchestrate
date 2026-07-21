@@ -752,34 +752,12 @@ cross_provider:
       # ОБЯЗАН вложить вывод прегейта. Линза без вложенного вывода = не исполненная ось.
       requires_pregate_output_inline: true
     # =====================================================================
-    # v24 (2026-07-21, решение владельца): GEMINI СНЯТ СО ВСЕХ РОЛЕЙ.
-    # Формулировка владельца: «ему нельзя верить». Определения лейнов ниже
-    # ОСТАВЛЕНЫ (на них ссылается проза и цепочки), но НЕ МАРШРУТИЗИРУЮТСЯ:
-    # `routed: false` на каждом. Снят из scout, critic, spec-lens,
-    # standards-lens и из трёх дефолтов cross_provider.
-    #
-    # ОСНОВАНИЕ — прогон полигона 2026-07-21 на исправленном транспорте
-    # (benchmark/results/2026-07-21-gemini-3.6-flash/scores.jsonl):
-    #   architect t3/t4/t5 — ЗАЧЁТ 3/3 (t5 со сведением величины +1620);
-    #   recon t1 (48 меток) — 48/48;
-    #   recon t3 (601 файл, 450 меток) — ПРОВАЛ 36/450.
-    # Природа провала: НЕ объём и НЕ пропуски. Место найдено идеально —
-    # файл и строка верны 450/450 (по местам счёт 1.000). Провалено
-    # ЦИТИРОВАНИЕ: 414 из 450 текстов переписаны по шаблону с подменой
-    # существительного («vector» вместо «window»).
-    # ПРОБА на исправимость поручением (t3-verbatim-probe): добавлено прямое
-    # требование побуквенной копии И законный выход «пропусти, честный пропуск
-    # засчитывается». Результат: тексты стали ХУЖЕ (20/450), честных пропусков
-    # НОЛЬ. Заполнение пробела правдоподобным сильнее прямого запрета.
-    # Та же подпись в architect t5: диагноз верен, а пути в ссылках домышлены.
-    #
-    # ЦЕНА РЕШЕНИЯ, записана честно: Google-квота была самым большим
-    # неисчерпаемым резервом владельца, и мандат квота-спреда теряет его
-    # целиком. Дешёвого ВЕБ-лейна не остаётся вовсе (см. defaults.web_recon).
-    # Пересмотр возможен только на новых данных: сдать recon t3 с точностью
-    # текстов >= 0.95 ЛИБО показать честные пропуски вместо выдумки.
-    # Прежнее правило владельца (последний Flash; Pro не используем) остаётся
-    # записанным, но СПЯЩИМ — применять при возможном возврате.
+    # NB: v24 СНИМАЛ Gemini со всех ролей и ОТМЕНЁН в v25 (см. шапку файла) —
+    # снятие стояло на ошибке ИЗМЕРЕНИЯ (грейдился пересказ в печати, а не файл
+    # с диска; по файлам gemini и claude-opus-4.6 дали 450/450). Настоящий счёт
+    # Gemini: диагностика 3/3, разведка 48/48 и 450/450, ни одного провала.
+    # Поле `routed: false` из того плана НИКОГДА не вводилось; лейны маршрутизируются.
+    # Полный разбор — benchmark/results/2026-07-21-gemini-3.6-flash/RESULTS.md.
     # =====================================================================
     gemini-recon:                  # большой контекст / веб-разведка
       model: "Gemini 3.6 Flash (High)"   # v23: 3.5 -> 3.6 (вышла 2026-07-21)
@@ -874,13 +852,13 @@ cross_provider:
   # при 3–4 параллельных проектах недельное окно Claude стабильно исчерпывается
   # за 1–2 дня до сброса; ждать исчерпания значит опоздать ровно на эти дни.
   defaults:
-    # v24 (2026-07-21): три дефолта указывали на снятые gemini-лейны.
-    # Дешёвого ВЕБ-лейна теперь нет вовсе: у Claude-тиров веб-поиска нет по
-    # построению (scout — локальный read-only; builder несёт WebFetch, но не
-    # WebSearch). Дыра названа прямо, а не замаскирована подстановкой неподходящего.
-    web_recon: lead-inline
-    big_context_recon: kimi-k3                      # 1M-контекст вместо gemini
-    inline_mechanical_sweeps: scout                 # обратно на haiku
+    # v26: три ключа возвращены к реальности после отмены снятия Gemini (v25).
+    # Они дублируют головы соответствующих цепочек и потому дрейфуют при каждой
+    # правке — ADR-slice 2 предлагает РАСТВОРИТЬ этот блок в пользу цепочек; до
+    # решения владельца держим согласованным вручную.
+    web_recon: gemini-recon                         # веб-разведка (Gemini восстановлен)
+    big_context_recon: gemini-recon                 # 1M-контекст Flash; альт. kimi-k3
+    inline_mechanical_sweeps: gemini-recon-cheap    # = голова цепочки scout
     shell_mechanical_sweeps: codex-recon            # нужен shell (у scout его нет)
     well_specified_builder_tickets: codex-code
     # v12 (срез 4, issue #8): постоянный маршрут Standards-оси фиксированного гейта —
@@ -1187,8 +1165,15 @@ availability:
   provider_map:
     anthropic: [architect, builder, scout, critic, opus, fable, sonnet, haiku, spec-lens, lead,
                 agy-opus]
-    openai:    [codex-critic, codex-code, codex-recon, sol]
-    xai:       [grok-build, composer-build]
+    # v26: добавлены sol-xhigh и grok-4.5 — они стоят в судейских цепочках как
+    # алиасы усилия (sol-xhigh = sol на xhigh; grok-4.5 = модель лейна grok-build),
+    # но в карте их не было -> independence_filter НЕ опознавал их вендора и молча
+    # пропускал (Grok мог судить работу Grok). Дыра существовала с ввода алиасов в
+    # цепочки; закрыта здесь + валидатором ниже (tools/validate_config.py), чтобы
+    # не открылась снова. КОРЕНЬ (за пределами этой правки, задача ADR-слайса 1):
+    # цепочки мешают четыре словаря имён — агенты, алиасы моделей, лейны, терминалы.
+    openai:    [codex-critic, codex-code, codex-recon, sol, sol-xhigh]
+    xai:       [grok-build, composer-build, grok-4.5]
     moonshot:  [kimi-k3]
     google:    [gemini-recon, gemini-recon-cheap, gemini-pro-recon, gemini-critic, gemini-flash]
 
@@ -1202,8 +1187,8 @@ availability:
                              spec-lens, lead]
     google-antigravity:     [gemini-recon, gemini-recon-cheap, gemini-pro-recon, gemini-critic,
                              gemini-flash, agy-opus]
-    openai-codex:           [codex-critic, codex-code, codex-recon, sol]
-    xai:                    [grok-build, composer-build]
+    openai-codex:           [codex-critic, codex-code, codex-recon, sol, sol-xhigh]
+    xai:                    [grok-build, composer-build, grok-4.5]
     moonshot:               [kimi-k3]
 
   # Предохранитель по провайдеру (§1 проекта). Run-scoped, ведёт лид на естественных
