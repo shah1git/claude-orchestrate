@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from run_lane import adapters, artifact, config_resolve, envelope, substrate
+from run_lane import adapters, artifact, config_resolve, envelope, hardening, substrate
 from run_lane.envelope import LaneError
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent
@@ -56,13 +56,29 @@ cross_provider:
       capabilities:
         supports_schema: no
     codex-critic-test-lane:            # stand-in for the real, reachable
-                                       # codex-critic/codex-code/grok-build/
-                                       # kimi-k3 lanes — transport codex-cli
-                                       # has NO adapter body in slice 3
-                                       # (CAPS is None, a declared stub).
+                                       # codex-critic/codex-code lanes —
+                                       # transport codex-cli, CodexAdapter
+                                       # (slice 4).
       transport: codex-cli
       model: "gpt-5.6-sol"
       effort: xhigh
+      sandbox: read-only
+    grok-test-lane:                    # stand-in for grok-build — transport
+                                       # grok-cli, GrokAdapter (slice 5).
+      transport: grok-cli
+      model: "grok-4.5"
+      effort: high
+      sandbox: orchestrate
+    kimi-test-lane:                    # stand-in for kimi-k3 — transport
+                                       # kimi-cli-headless, KimiAdapter
+                                       # (slice 5, no effort surface).
+      transport: kimi-cli-headless
+      model: "k3"
+    claude-print-test-lane:            # not-Claude-host fallback transport,
+                                       # ClaudePrintAdapter (slice 4).
+      transport: claude-print
+      model: "claude-fable-5"
+      effort: high
 availability:
   aliases:
     agy-alias: agy-test-lane
@@ -122,6 +138,91 @@ def _write_fake_agy(tmp_path: Path) -> Path:
     bin_dir.mkdir(exist_ok=True)
     fake = bin_dir / "agy"
     fake.write_text(_FAKE_AGY_SOURCE.format(python=sys.executable))
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return fake
+
+
+# A fake `codex` binary: reads the WHOLE prompt from stdin (so a test can
+# prove the real bytes reached the child, not merely an empty pipe — the
+# exact defect the substrate.py stdin_data fix targets), emits a small
+# --json JSONL stream (thread.started/turn.completed/item.completed, the
+# same event shapes CodexAdapter parses), and writes the declared -o
+# artifact. FAKE_CODEX_MODEL_EVENT adds an early event carrying a bare
+# "model" field, to exercise the 'stream' branch of parse_model_witness.
+_FAKE_CODEX_SOURCE = '''#!%%PYTHON%%
+import json
+import os
+import sys
+from pathlib import Path
+
+argv = sys.argv[1:]
+
+
+def opt(flag):
+    return argv[argv.index(flag) + 1] if flag in argv else None
+
+
+model = opt("-m") or ""
+out_path = opt("-o")
+stdin_text = sys.stdin.read()
+
+events = []
+if os.environ.get("FAKE_CODEX_MODEL_EVENT") == "1":
+    events.append({"type": "some.early.event", "model": model})
+events.append({"type": "thread.started", "thread_id": "thread-fake-123"})
+events.append({"type": "turn.completed", "usage": {"input_tokens": 11, "output_tokens": 22}})
+events.append({"type": "item.completed", "item": {"type": "agent_message", "text": "codex final response"}})
+
+for ev in events:
+    sys.stdout.write(json.dumps(ev) + "\\n")
+
+if out_path and os.environ.get("FAKE_CODEX_SKIP_OUT") != "1":
+    Path(out_path).write_text("fake codex artifact\\nstdin-length=" + str(len(stdin_text)) + "\\n")
+
+sys.exit(int(os.environ.get("FAKE_CODEX_EXIT", "0")))
+'''
+
+
+def _write_fake_codex(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    fake = bin_dir / "codex"
+    fake.write_text(_FAKE_CODEX_SOURCE.replace("%%PYTHON%%", sys.executable))
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return fake
+
+
+# A fake `claude` binary that dumps the environment it actually received
+# (via FAKE_CLAUDE_ENV_DUMP_PATH) — used to prove SubprocessSubstrate's
+# env_unset really erases CLAUDECODE/CLAUDE_CODE_ENTRYPOINT rather than
+# merely failing to override them — and prints a minimal
+# `--output-format json`-shaped envelope.
+_FAKE_CLAUDE_SOURCE = '''#!%%PYTHON%%
+import json
+import os
+import sys
+from pathlib import Path
+
+dump_path = os.environ.get("FAKE_CLAUDE_ENV_DUMP_PATH")
+if dump_path:
+    Path(dump_path).write_text(json.dumps(dict(os.environ)))
+
+result = {
+    "model": "claude-fable-5",
+    "usage": {"input_tokens": 5, "output_tokens": 6},
+    "session_id": "sess-fake-1",
+    "result": "claude final response",
+}
+sys.stdout.write(json.dumps(result))
+sys.exit(0)
+'''
+
+
+def _write_fake_claude(tmp_path: Path) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    fake = bin_dir / "claude"
+    fake.write_text(_FAKE_CLAUDE_SOURCE.replace("%%PYTHON%%", sys.executable))
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return fake
 
@@ -410,19 +511,47 @@ def test_effective_capabilities_rejects_unquoted_yaml_bool_value():
     assert "bool" in excinfo.value.message
 
 
+class _DummyStubAdapter(adapters.LaneAdapter):
+    """A locally-defined stand-in for "an adapter class registered with
+    CAPS is None" — every real adapter is implemented as of slice 5, so
+    this regression (originally reproduced live via CodexAdapter in slice
+    3) needs its own fixture class rather than borrowing a now-implemented
+    one."""
+
+    transport = "dummy-stub"
+    CAPS = None
+
+    def build_invocation(self, lane, req):
+        raise NotImplementedError("dummy stub — not implemented on purpose")
+
+    def parse_model_witness(self, res, inv):
+        raise NotImplementedError
+
+    def parse_usage(self, res):
+        raise NotImplementedError
+
+    def parse_session_id(self, res):
+        raise NotImplementedError
+
+    def parse_printed_text(self, res):
+        raise NotImplementedError
+
+
 def test_effective_capabilities_on_stub_adapter_raises_not_implemented():
-    """CAPS is None on every not-yet-implemented adapter (codex/grok/kimi/
-    claude-print) — effective_capabilities must fail the SAME way
-    build_invocation does (NotImplementedError), not crash inside
-    dataclasses.replace(None, ...) with an unclassified TypeError. This is
-    the exact call __main__.run() makes BEFORE build_invocation, on a real,
-    reachable lane (codex-critic et al.)."""
+    """CAPS is None on any adapter class not yet filled in —
+    effective_capabilities must fail the SAME way build_invocation does
+    (NotImplementedError), not crash inside dataclasses.replace(None, ...)
+    with an unclassified TypeError. This is the exact call __main__.run()
+    makes BEFORE build_invocation, on a real, reachable lane — critic-gate
+    finding, originally reproduced live via CodexAdapter before it was
+    implemented (slice 3); CodexAdapter itself is implemented as of slice
+    4, so the regression fixture moves to a dedicated dummy class."""
     lane = config_resolve.LaneRecord(
-        name="codex-critic", transport="codex-cli", model="gpt-5.6-sol",
-        effort="xhigh", vendor=None, surface=None, sandbox=None, roles=(),
+        name="dummy-lane", transport="dummy-stub", model="M",
+        effort="medium", vendor=None, surface=None, sandbox=None, roles=(),
         status=None, capabilities_override={}, raw={})
     with pytest.raises(NotImplementedError):
-        adapters.CodexAdapter().effective_capabilities(lane)
+        _DummyStubAdapter().effective_capabilities(lane)
 
 
 # =============================================================================
@@ -446,12 +575,15 @@ def test_get_adapter_unknown_transport_is_config_error():
     ("grok-cli", adapters.GrokAdapter),
     ("kimi-cli-headless", adapters.KimiAdapter),
     ("claude-print", adapters.ClaudePrintAdapter),
+    ("agy-print", adapters.AgyAdapter),
 ])
-def test_unimplemented_adapters_raise_not_implemented(transport, cls):
+def test_get_adapter_returns_the_right_class_for_every_registered_transport(transport, cls):
+    """As of slice 5 every registered transport has a real adapter body —
+    the slice-3/4 placeholder version of this test (asserting
+    NotImplementedError on the four not-yet-shipped adapters) is retired;
+    this is its replacement, covering the full registry."""
     adapter = adapters.get_adapter(transport)
     assert isinstance(adapter, cls)
-    with pytest.raises(NotImplementedError):
-        adapter.build_invocation(lane=None, req=None)
 
 
 # =============================================================================
@@ -753,37 +885,6 @@ def test_cli_lane_without_transport_is_config_error(tmp_path):
     assert envelope_out["error"]["class"] == "config"
 
 
-def test_cli_stub_transport_lane_prints_one_config_envelope_not_a_traceback(tmp_path):
-    """Critic-gate finding (major): `run-lane --lane codex-critic ...` is a
-    REAL, reachable input (codex-critic/codex-code/grok-build/kimi-k3 are
-    live config lanes) whose transport has no adapter body in slice 3.
-    Before the fix, `effective_capabilities` blew up inside
-    `dataclasses.replace(None, ...)` with an unclassified TypeError that
-    escaped both `except NotImplementedError` and `except LaneError` in
-    __main__ — bare traceback on stderr, EMPTY stdout, unparseable by the
-    lead. Must now print exactly one JSON envelope with error.class:config,
-    never a traceback, never empty stdout."""
-    workdir, prompt_file, out = _make_workdir(tmp_path)
-    config = tmp_path / "config.yaml"
-    config.write_text(MINIMAL_CONFIG)
-    env = _cli_env(tmp_path)
-
-    result = _run_cli([
-        "--lane", "codex-critic-test-lane", "--config", str(config),
-        "--prompt-file", str(prompt_file), "--workdir", str(workdir),
-        "--out", str(out),
-    ], env=env)
-
-    assert result.stdout.strip() != "", (
-        f"stdout was empty — a bare traceback escaped to stderr instead of "
-        f"an envelope; stderr was:\n{result.stderr}")
-    assert "Traceback" not in result.stderr
-    envelope_out = json.loads(result.stdout)      # must be exactly one JSON object
-    assert envelope_out["ok"] is False
-    assert envelope_out["error"]["class"] == "config"
-    assert result.returncode == 1
-
-
 def test_cli_unquoted_yaml_no_capability_override_is_loud_config_error(tmp_path):
     """Critic-gate finding (minor): an UNQUOTED `capabilities: {supports_schema:
     no}` parses as `{"supports_schema": False}` (YAML 1.1 bool keyword);
@@ -860,3 +961,720 @@ def test_cli_requires_all_mandatory_flags():
         [sys.executable, str(RUN_LANE)], capture_output=True, text=True)
     assert result.returncode != 0
     assert result.stdout == ""
+
+
+# =============================================================================
+# 10. CodexAdapter — argv shape, strictify, --json stream parsing (slice 4)
+# =============================================================================
+
+
+def test_codex_build_invocation_argv_shape(tmp_path):
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    lane = config_resolve.LaneRecord(
+        name="codex-critic-test-lane", transport="codex-cli", model="gpt-5.6-sol",
+        effort="xhigh", vendor=None, surface=None, sandbox="read-only", roles=(),
+        status=None, capabilities_override={}, raw={})
+    adapter = adapters.CodexAdapter()
+    req = adapters.InvocationRequest(
+        prompt_file=prompt_file, workdir=workdir, out=out,
+        effort="xhigh", model="gpt-5.6-sol")
+    inv = adapter.build_invocation(lane=lane, req=req)
+
+    assert inv.argv[:2] == ["codex", "exec"]
+    assert "-m" in inv.argv
+    assert inv.argv[inv.argv.index("-m") + 1] == "gpt-5.6-sol"
+    # NOT --effort — the flag does not exist on the live CLI.
+    assert "--effort" not in inv.argv
+    assert "-c" in inv.argv
+    assert inv.argv[inv.argv.index("-c") + 1] == "model_reasoning_effort=xhigh"
+    assert "-s" in inv.argv
+    assert inv.argv[inv.argv.index("-s") + 1] == "read-only"
+    assert "-C" in inv.argv
+    assert inv.argv[inv.argv.index("-C") + 1] == str(workdir)
+    assert "--json" in inv.argv
+    assert "-o" in inv.argv
+    assert inv.argv[inv.argv.index("-o") + 1] == str(out)
+
+    # the prompt travels over stdin, never as an argv element
+    assert inv.stdin_policy == "pipe"
+    assert inv.stdin_data == prompt_file.read_text()
+    assert not any("do the thing" in str(a) for a in inv.argv)
+
+
+def test_codex_build_invocation_omits_optional_flags_when_absent(tmp_path):
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    adapter = adapters.CodexAdapter()
+    req = adapters.InvocationRequest(prompt_file=prompt_file, workdir=workdir, out=out)
+    inv = adapter.build_invocation(lane=None, req=req)
+    assert "-m" not in inv.argv
+    assert "-c" not in inv.argv
+    assert "-s" not in inv.argv
+    assert "--output-schema" not in inv.argv
+
+
+def test_codex_build_invocation_missing_prompt_file_is_config_error(tmp_path):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    adapter = adapters.CodexAdapter()
+    req = adapters.InvocationRequest(
+        prompt_file=workdir / "missing.md", workdir=workdir, out=workdir / "out.md")
+    with pytest.raises(LaneError) as excinfo:
+        adapter.build_invocation(lane=None, req=req)
+    assert excinfo.value.error_class == "config"
+
+
+def test_codex_build_invocation_schema_is_strictified_and_written_to_disk(tmp_path):
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    schema_file = workdir / "schema.json"
+    schema_file.write_text(json.dumps({
+        "type": "object",
+        "properties": {"verdict": {"type": "string"}, "score": {"type": "number"}},
+    }))
+    adapter = adapters.CodexAdapter()
+    req = adapters.InvocationRequest(
+        prompt_file=prompt_file, workdir=workdir, out=out, schema=schema_file)
+    inv = adapter.build_invocation(lane=None, req=req)
+
+    assert "--output-schema" in inv.argv
+    written_path = Path(inv.argv[inv.argv.index("--output-schema") + 1])
+    assert written_path.is_file()
+    strict = json.loads(written_path.read_text())
+    assert strict["additionalProperties"] is False
+    assert set(strict["required"]) == {"verdict", "score"}
+
+
+def test_strictify_for_codex_sets_additional_properties_false_and_required_all_keys():
+    schema = {
+        "type": "object",
+        "properties": {
+            "a": {"type": "string"},
+            "b": {"type": "object", "properties": {"c": {"type": "number"}}},
+        },
+    }
+    strict = adapters.strictify_for_codex(schema)
+    assert strict["additionalProperties"] is False
+    assert set(strict["required"]) == {"a", "b"}
+    # recursive: the nested object gets the same treatment
+    assert strict["properties"]["b"]["additionalProperties"] is False
+    assert strict["properties"]["b"]["required"] == ["c"]
+
+
+def test_strictify_for_codex_leaves_non_object_nodes_untouched():
+    schema = {"type": "array", "items": {"type": "string"}}
+    strict = adapters.strictify_for_codex(schema)
+    assert "additionalProperties" not in strict
+    assert strict == schema
+
+
+def test_codex_parse_model_witness_uses_stream_event_when_present():
+    res = substrate.RunResult(
+        exit_code=0, stdout=(
+            '{"type": "thread.started", "thread_id": "t1", "model": "gpt-5.6-sol"}\n'
+            '{"type": "turn.completed", "usage": {"input_tokens": 1}}\n'
+        ), stderr="", duration_ms=5, timed_out=False)
+    inv = adapters.Invocation(argv=["codex", "exec", "-m", "gpt-5.6-sol"], env={},
+                               stdin_policy="pipe", cwd=None, prompt_addendum=None,
+                               log_file=None)
+    obs = adapters.CodexAdapter().parse_model_witness(res, inv)
+    assert obs.observed == "gpt-5.6-sol"
+    assert obs.verification == "stream"
+    assert obs.error is None
+
+
+def test_codex_parse_model_witness_falls_back_to_pinned_flag_when_no_stream_event():
+    res = substrate.RunResult(
+        exit_code=0, stdout='{"type": "thread.started", "thread_id": "t1"}\n',
+        stderr="", duration_ms=5, timed_out=False)
+    inv = adapters.Invocation(argv=["codex", "exec", "-m", "gpt-5.6-sol"], env={},
+                               stdin_policy="pipe", cwd=None, prompt_addendum=None,
+                               log_file=None)
+    obs = adapters.CodexAdapter().parse_model_witness(res, inv)
+    assert obs.observed == "gpt-5.6-sol"
+    assert obs.verification == "pin-validated"
+    assert obs.error is None
+
+
+def test_codex_parse_usage_session_id_and_printed_text_from_jsonl_fixture():
+    stdout = "\n".join([
+        json.dumps({"type": "thread.started", "thread_id": "thread-abc"}),
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 7, "output_tokens": 3}}),
+        json.dumps({"type": "item.completed",
+                    "item": {"type": "agent_message", "text": " final answer "}}),
+    ])
+    res = substrate.RunResult(exit_code=0, stdout=stdout, stderr="", duration_ms=5,
+                               timed_out=False)
+    adapter = adapters.CodexAdapter()
+    assert adapter.parse_session_id(res) == "thread-abc"
+    assert adapter.parse_usage(res) == {"input_tokens": 7, "output_tokens": 3}
+    text, truncated = adapter.parse_printed_text(res)
+    assert text == "final answer"
+    assert truncated is False
+
+
+def test_codex_adapter_never_imports_subprocess_directly():
+    # covered globally by test_adapters_module_never_imports_subprocess below,
+    # kept local as a fast sanity check tied to this section.
+    assert "subprocess" not in adapters.CodexAdapter.__module__
+
+
+def test_codex_cli_end_to_end_stdin_reaches_child_and_events_parse(tmp_path):
+    """Proves the substrate.py stdin_data fix: without it, `stdin=PIPE` with
+    no `input=` closes stdin immediately and codex would receive an EMPTY
+    prompt. The fake binary reports the stdin length it actually read into
+    the artifact file, so this is a real end-to-end check, not just an argv
+    shape assertion."""
+    workdir, prompt_file, out = _make_workdir(tmp_path, prompt_text="a real prompt body")
+    config = tmp_path / "config.yaml"
+    config.write_text(MINIMAL_CONFIG)
+    fake_codex = _write_fake_codex(tmp_path)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_codex.parent}{os.pathsep}{env.get('PATH', '')}"
+
+    result = _run_cli([
+        "--lane", "codex-critic-test-lane", "--config", str(config),
+        "--prompt-file", str(prompt_file), "--workdir", str(workdir),
+        "--out", str(out),
+    ], env=env)
+    envelope_out = json.loads(result.stdout)
+    assert envelope_out["ok"] is True, envelope_out
+    assert envelope_out["sessionId"] == "thread-fake-123"
+    assert envelope_out["usage"] == {"input_tokens": 11, "output_tokens": 22}
+    assert envelope_out["printed_text"] == "codex final response"
+    assert envelope_out["artifact"]["present"] is True
+    artifact_text = out.read_text()
+    assert f"stdin-length={len(prompt_file.read_text())}" in artifact_text
+
+
+def test_codex_cli_end_to_end_model_event_yields_stream_verification(tmp_path):
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    config = tmp_path / "config.yaml"
+    config.write_text(MINIMAL_CONFIG)
+    fake_codex = _write_fake_codex(tmp_path)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_codex.parent}{os.pathsep}{env.get('PATH', '')}"
+    env["FAKE_CODEX_MODEL_EVENT"] = "1"
+
+    result = _run_cli([
+        "--lane", "codex-critic-test-lane", "--config", str(config),
+        "--prompt-file", str(prompt_file), "--workdir", str(workdir),
+        "--out", str(out),
+    ], env=env)
+    envelope_out = json.loads(result.stdout)
+    assert envelope_out["ok"] is True, envelope_out
+    assert envelope_out["model_observed"] == "gpt-5.6-sol"
+
+
+# =============================================================================
+# 11. GrokAdapter — argv shape, prompt-file addendum, JSON envelope parsing
+# =============================================================================
+
+
+def test_grok_build_invocation_argv_shape(tmp_path):
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    schema_file = workdir / "schema.json"
+    schema_file.write_text('{"type": "object"}')
+    lane = config_resolve.LaneRecord(
+        name="grok-test-lane", transport="grok-cli", model="grok-4.5", effort="high",
+        vendor="xai", surface="xai", sandbox="orchestrate", roles=(), status=None,
+        capabilities_override={}, raw={})
+    adapter = adapters.GrokAdapter()
+    req = adapters.InvocationRequest(
+        prompt_file=prompt_file, workdir=workdir, out=out, effort="high",
+        model="grok-4.5", schema=schema_file, resume="sess-1")
+    inv = adapter.build_invocation(lane=lane, req=req)
+
+    assert inv.argv[0] == "grok"
+    assert "--prompt-file" in inv.argv
+    prompt_path = Path(inv.argv[inv.argv.index("--prompt-file") + 1])
+    assert prompt_path.is_file()
+    assert f"RUN-LANE-ARTIFACT-PATH: {out}" in prompt_path.read_text()
+    assert "--output-format" in inv.argv
+    assert inv.argv[inv.argv.index("--output-format") + 1] == "json"
+    assert "-m" in inv.argv
+    assert inv.argv[inv.argv.index("-m") + 1] == "grok-4.5"
+    assert "--reasoning-effort" in inv.argv
+    assert inv.argv[inv.argv.index("--reasoning-effort") + 1] == "high"
+    assert "--sandbox" in inv.argv
+    assert inv.argv[inv.argv.index("--sandbox") + 1] == "orchestrate"
+    assert inv.env["GROK_SANDBOX"] == "orchestrate"
+    assert "--cwd" in inv.argv
+    assert inv.argv[inv.argv.index("--cwd") + 1] == str(workdir)
+    assert "--resume" in inv.argv
+    assert inv.argv[inv.argv.index("--resume") + 1] == "sess-1"
+    assert "--json-schema" in inv.argv
+    assert inv.argv[inv.argv.index("--json-schema") + 1] == '{"type": "object"}'
+    assert inv.stdin_policy == "devnull"
+
+
+def test_grok_build_invocation_omits_optional_flags_when_absent(tmp_path):
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    adapter = adapters.GrokAdapter()
+    req = adapters.InvocationRequest(prompt_file=prompt_file, workdir=workdir, out=out)
+    inv = adapter.build_invocation(lane=None, req=req)
+    assert "-m" not in inv.argv
+    assert "--reasoning-effort" not in inv.argv
+    assert "--sandbox" not in inv.argv
+    assert "--resume" not in inv.argv
+    assert "--json-schema" not in inv.argv
+    assert inv.env == {}
+
+
+def test_grok_build_invocation_missing_prompt_file_is_config_error(tmp_path):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    adapter = adapters.GrokAdapter()
+    req = adapters.InvocationRequest(
+        prompt_file=workdir / "missing.md", workdir=workdir, out=workdir / "out.md")
+    with pytest.raises(LaneError) as excinfo:
+        adapter.build_invocation(lane=None, req=req)
+    assert excinfo.value.error_class == "config"
+
+
+def test_grok_parse_model_witness_stream_when_envelope_carries_model():
+    res = substrate.RunResult(
+        exit_code=0, stdout=json.dumps({"model": "grok-4.5", "usage": {"x": 1}}),
+        stderr="", duration_ms=1, timed_out=False)
+    obs = adapters.GrokAdapter().parse_model_witness(res, inv=None)
+    assert obs.observed == "grok-4.5"
+    assert obs.verification == "stream"
+    assert obs.error is None
+
+
+def test_grok_parse_model_witness_honestly_none_when_envelope_carries_no_model():
+    res = substrate.RunResult(
+        exit_code=0, stdout=json.dumps({"usage": {"x": 1}}),
+        stderr="", duration_ms=1, timed_out=False)
+    obs = adapters.GrokAdapter().parse_model_witness(res, inv=None)
+    assert obs.observed is None
+    assert obs.verification == "none"
+    assert obs.error is None                      # not an error — an honest ceiling
+
+
+def test_grok_parse_usage_session_and_printed_text_from_fixture_json():
+    stdout = json.dumps({
+        "usage": {"input_tokens": 4}, "session_id": "grok-sess-9",
+        "result": "grok final response",
+    })
+    res = substrate.RunResult(exit_code=0, stdout=stdout, stderr="", duration_ms=1,
+                               timed_out=False)
+    adapter = adapters.GrokAdapter()
+    assert adapter.parse_usage(res) == {"input_tokens": 4}
+    assert adapter.parse_session_id(res) == "grok-sess-9"
+    text, truncated = adapter.parse_printed_text(res)
+    assert text == "grok final response"
+    assert truncated is False
+
+
+def test_grok_caps_default_to_agent_writes_file_and_honest_none_witness():
+    caps = adapters.GrokAdapter.CAPS
+    assert caps.artifact_channel == "agent-writes-file"
+    assert caps.model_verification == "none"
+    assert caps.supports_effort == "flag"
+    assert caps.supports_schema == "strict"
+    assert caps.has_own_sandbox == "strong"
+
+
+def test_one_grok_invocation_runs_through_fake_and_subprocess_substrate(tmp_path):
+    """Same axis-separation proof as the agy test in section 8, run against
+    a second adapter — one Invocation, two substrates, adapter never knows
+    which ran it."""
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    lane = config_resolve.LaneRecord(
+        name="grok-test-lane", transport="grok-cli", model="grok-4.5", effort="high",
+        vendor="xai", surface="xai", sandbox="orchestrate", roles=(), status=None,
+        capabilities_override={}, raw={})
+    adapter = adapters.GrokAdapter()
+    req = adapters.InvocationRequest(
+        prompt_file=prompt_file, workdir=workdir, out=out, effort="high", model="grok-4.5")
+    inv = adapter.build_invocation(lane, req)
+
+    canned = substrate.RunResult(exit_code=0, stdout='{"result": "ok"}', stderr="",
+                                  duration_ms=1, timed_out=False)
+    fake_sub = FakeSubstrate(canned)
+    assert fake_sub.run(inv, timeout=30) is canned
+    assert fake_sub.received_invocation is inv
+
+    # a fake `grok` binary that just writes the addendum-declared artifact
+    bin_dir = tmp_path / "bin2"
+    bin_dir.mkdir()
+    fake_grok = bin_dir / "grok"
+    prompt_path_repr = repr(str(inv.argv[inv.argv.index("--prompt-file") + 1]))
+    fake_grok_source = (
+        "#!%%PYTHON%%\n"
+        "import re, sys\n"
+        f"prompt = open({prompt_path_repr}).read()\n"
+        r"m = re.search(r'RUN-LANE-ARTIFACT-PATH: (\S+)', prompt)" "\n"
+        "if m:\n"
+        "    open(m.group(1), 'w').write('fake grok artifact\\n')\n"
+        "sys.stdout.write('{}')\n"
+    ).replace("%%PYTHON%%", sys.executable)
+    fake_grok.write_text(fake_grok_source)
+    fake_grok.chmod(fake_grok.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    inv_for_subprocess = dataclasses.replace(inv, argv=[str(fake_grok)] + inv.argv[1:])
+    real_sub = substrate.SubprocessSubstrate()
+    res_real = real_sub.run(inv_for_subprocess, timeout=30)
+    assert res_real.exit_code == 0
+    art = artifact.capture(out)
+    assert art["present"] is True
+
+
+# =============================================================================
+# 12. KimiAdapter — argv shape (no effort surface), stream-json parsing
+# =============================================================================
+
+
+def test_kimi_build_invocation_argv_shape(tmp_path):
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    adapter = adapters.KimiAdapter()
+    req = adapters.InvocationRequest(prompt_file=prompt_file, workdir=workdir, out=out, model="k3")
+    inv = adapter.build_invocation(lane=None, req=req)
+
+    assert inv.argv[0] == "kimi"
+    assert "--add-dir" in inv.argv
+    assert inv.argv[inv.argv.index("--add-dir") + 1] == str(workdir)
+    assert "--output-format" in inv.argv
+    assert inv.argv[inv.argv.index("--output-format") + 1] == "stream-json"
+    assert "-m" in inv.argv
+    assert inv.argv[inv.argv.index("-m") + 1] == "k3"
+    assert "-p" in inv.argv
+    assert inv.argv[-1] != "-p"
+    assert f"RUN-LANE-ARTIFACT-PATH: {out}" in inv.argv[-1]
+    # kimi's own --help carries no effort flag at all, regardless of what
+    # the request asks for
+    assert "--effort" not in inv.argv
+    assert "--reasoning-effort" not in inv.argv
+
+
+def test_kimi_build_invocation_omits_model_when_absent(tmp_path):
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    adapter = adapters.KimiAdapter()
+    req = adapters.InvocationRequest(prompt_file=prompt_file, workdir=workdir, out=out)
+    inv = adapter.build_invocation(lane=None, req=req)
+    assert "-m" not in inv.argv
+
+
+def test_kimi_caps_supports_effort_no():
+    assert adapters.KimiAdapter.CAPS.supports_effort == "no"
+    assert adapters.KimiAdapter.CAPS.has_own_sandbox == "none"
+    assert adapters.KimiAdapter.CAPS.model_verification == "none"
+
+
+def test_kimi_parse_model_witness_from_stream_json_event():
+    stdout = "\n".join([
+        json.dumps({"type": "start"}),
+        json.dumps({"model": "k3", "usage": {"input_tokens": 2}}),
+    ])
+    res = substrate.RunResult(exit_code=0, stdout=stdout, stderr="", duration_ms=1,
+                               timed_out=False)
+    obs = adapters.KimiAdapter().parse_model_witness(res, inv=None)
+    assert obs.observed == "k3"
+    assert obs.verification == "stream"
+
+
+def test_kimi_parse_model_witness_honestly_none_when_absent():
+    res = substrate.RunResult(exit_code=0, stdout=json.dumps({"type": "start"}),
+                               stderr="", duration_ms=1, timed_out=False)
+    obs = adapters.KimiAdapter().parse_model_witness(res, inv=None)
+    assert obs.observed is None
+    assert obs.verification == "none"
+    assert obs.error is None
+
+
+def test_kimi_parse_usage_session_and_printed_text_from_stream_json_fixture():
+    stdout = "\n".join([
+        json.dumps({"session_id": "kimi-sess-1"}),
+        json.dumps({"usage": {"input_tokens": 9}}),
+        json.dumps({"text": "hello "}),
+        json.dumps({"text": "world"}),
+    ])
+    res = substrate.RunResult(exit_code=0, stdout=stdout, stderr="", duration_ms=1,
+                               timed_out=False)
+    adapter = adapters.KimiAdapter()
+    assert adapter.parse_session_id(res) == "kimi-sess-1"
+    assert adapter.parse_usage(res) == {"input_tokens": 9}
+    text, truncated = adapter.parse_printed_text(res)
+    assert text == "hello world"
+    assert truncated is False
+
+
+def test_cli_kimi_unsupported_effort_request_is_config_error(tmp_path):
+    """__main__'s existing capability gate (unchanged) already refuses
+    --effort on a supports_effort:no lane BEFORE build_invocation runs —
+    this proves KimiAdapter's declared CAPS actually reaches that gate."""
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    config = tmp_path / "config.yaml"
+    config.write_text(MINIMAL_CONFIG)
+    env = _cli_env(tmp_path)
+
+    result = _run_cli([
+        "--lane", "kimi-test-lane", "--config", str(config),
+        "--prompt-file", str(prompt_file), "--workdir", str(workdir),
+        "--out", str(out), "--effort", "high",
+    ], env=env)
+    envelope_out = json.loads(result.stdout)
+    assert envelope_out["ok"] is False
+    assert envelope_out["error"]["class"] == "config"
+
+
+# =============================================================================
+# 13. ClaudePrintAdapter — argv shape, env erasure, JSON envelope parsing
+# =============================================================================
+
+
+def test_claude_print_build_invocation_argv_shape(tmp_path):
+    workdir, prompt_file, out = _make_workdir(tmp_path, prompt_text="review this diff")
+    adapter = adapters.ClaudePrintAdapter()
+    req = adapters.InvocationRequest(
+        prompt_file=prompt_file, workdir=workdir, out=out, role="critic",
+        effort="high", model="claude-fable-5")
+    inv = adapter.build_invocation(lane=None, req=req)
+
+    assert inv.argv[0] == "claude"
+    assert inv.argv[1] == "-p"
+    assert "--model" in inv.argv
+    assert inv.argv[inv.argv.index("--model") + 1] == "claude-fable-5"
+    assert "--agent" in inv.argv
+    assert inv.argv[inv.argv.index("--agent") + 1] == "critic"
+    assert "--effort" in inv.argv
+    assert inv.argv[inv.argv.index("--effort") + 1] == "high"
+    assert "--add-dir" in inv.argv
+    assert inv.argv[inv.argv.index("--add-dir") + 1] == str(workdir)
+    assert "--output-format" in inv.argv
+    assert inv.argv[inv.argv.index("--output-format") + 1] == "json"
+    # the prompt is a plain positional argument — claude's own `-p` is a
+    # boolean print-mode flag, unlike agy's consuming `-p`
+    assert inv.argv[-1] == "review this diff"
+    assert inv.stdin_policy == "devnull"
+
+
+def test_claude_print_build_invocation_omits_optional_flags_when_absent(tmp_path):
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    adapter = adapters.ClaudePrintAdapter()
+    req = adapters.InvocationRequest(prompt_file=prompt_file, workdir=workdir, out=out)
+    inv = adapter.build_invocation(lane=None, req=req)
+    assert "--model" not in inv.argv
+    assert "--agent" not in inv.argv
+    assert "--effort" not in inv.argv
+
+
+def test_claude_print_build_invocation_missing_prompt_file_is_config_error(tmp_path):
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    adapter = adapters.ClaudePrintAdapter()
+    req = adapters.InvocationRequest(
+        prompt_file=workdir / "missing.md", workdir=workdir, out=workdir / "out.md")
+    with pytest.raises(LaneError) as excinfo:
+        adapter.build_invocation(lane=None, req=req)
+    assert excinfo.value.error_class == "config"
+
+
+def test_claude_print_build_invocation_declares_nested_spawn_env_unset(tmp_path):
+    """ADR-0005 §"Claude-работники": CLAUDECODE/CLAUDE_CODE_ENTRYPOINT must
+    be ERASED, not merely overridden — this is the field the
+    SubprocessSubstrate fix (section 13's env test below) actually acts on."""
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    adapter = adapters.ClaudePrintAdapter()
+    req = adapters.InvocationRequest(prompt_file=prompt_file, workdir=workdir, out=out)
+    inv = adapter.build_invocation(lane=None, req=req)
+    assert set(inv.env_unset) == {"CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"}
+
+
+def test_claude_print_env_unset_actually_strips_nested_spawn_keys_end_to_end(tmp_path, monkeypatch):
+    """The behavioural half of the ADR-0005 requirement: run the built
+    Invocation through the REAL SubprocessSubstrate with CLAUDECODE/
+    CLAUDE_CODE_ENTRYPOINT set in the parent process env (as they would be
+    inside a nested Claude Code spawn) and prove the fake `claude` child
+    never sees them — while ordinary inherited vars (PATH) still arrive,
+    proving this is a targeted erasure, not env=={}."""
+    fake_claude = _write_fake_claude(tmp_path)
+    dump_path = tmp_path / "env-dump.json"
+    monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "cli")
+    monkeypatch.setenv("FAKE_CLAUDE_ENV_DUMP_PATH", str(dump_path))
+
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    adapter = adapters.ClaudePrintAdapter()
+    req = adapters.InvocationRequest(
+        prompt_file=prompt_file, workdir=workdir, out=out, model="claude-fable-5")
+    inv = adapter.build_invocation(lane=None, req=req)
+    inv = dataclasses.replace(inv, argv=[str(fake_claude)] + inv.argv[1:])
+
+    res = substrate.SubprocessSubstrate().run(inv, timeout=30)
+    assert res.exit_code == 0, res.stderr
+    dumped_env = json.loads(dump_path.read_text())
+    assert "CLAUDECODE" not in dumped_env
+    assert "CLAUDE_CODE_ENTRYPOINT" not in dumped_env
+    assert "PATH" in dumped_env
+
+
+def test_claude_print_parse_model_usage_session_printed_text_from_fixture_json():
+    stdout = json.dumps({
+        "model": "claude-fable-5", "usage": {"input_tokens": 5, "output_tokens": 6},
+        "session_id": "sess-fake-1", "result": "claude final response",
+    })
+    res = substrate.RunResult(exit_code=0, stdout=stdout, stderr="", duration_ms=1,
+                               timed_out=False)
+    adapter = adapters.ClaudePrintAdapter()
+    obs = adapter.parse_model_witness(res, inv=None)
+    assert obs.observed == "claude-fable-5"
+    assert obs.verification == "stream"
+    assert obs.error is None
+    assert adapter.parse_usage(res) == {"input_tokens": 5, "output_tokens": 6}
+    assert adapter.parse_session_id(res) == "sess-fake-1"
+    text, truncated = adapter.parse_printed_text(res)
+    assert text == "claude final response"
+    assert truncated is False
+
+
+def test_claude_print_parse_model_witness_missing_model_is_an_error():
+    """CAPS.model_verification is fixed 'stream' for claude-print — unlike
+    grok/kimi's honest 'none' — so a missing model field here IS a
+    transport-level defect, not an accepted ceiling."""
+    res = substrate.RunResult(exit_code=0, stdout=json.dumps({"result": "ok"}),
+                               stderr="", duration_ms=1, timed_out=False)
+    obs = adapters.ClaudePrintAdapter().parse_model_witness(res, inv=None)
+    assert obs.observed is None
+    assert obs.error is not None
+
+
+def test_claude_print_caps_are_a_declared_degradation():
+    caps = adapters.ClaudePrintAdapter.CAPS
+    assert caps.artifact_channel == "stdout-capture"
+    assert caps.model_verification == "stream"
+    assert caps.has_own_sandbox == "none"
+
+
+# =============================================================================
+# 14. hardening.py — F6 env mix-in, config bootstrap, fail-closed gate
+# =============================================================================
+
+CONFIG_WITH_HARDENING = {
+    "cross_provider": {
+        "grok_hardening": {
+            "config_file": "references/grok/config.toml",
+            "env": {"GROK_SANDBOX": "orchestrate", "GROK_TELEMETRY_ENABLED": "0"},
+        },
+        "kimi_hardening": {
+            "config_file": "references/kimi/config.toml",
+            "env": {"KIMI_DISABLE_TELEMETRY": "1"},
+        },
+    },
+}
+
+
+def _hardened_lane(hardening_key_value):
+    return config_resolve.LaneRecord(
+        name="grok-build", transport="grok-cli", model="grok-4.5", effort="high",
+        vendor="xai", surface="xai", sandbox="orchestrate", roles=(), status=None,
+        capabilities_override={}, raw={"hardening": hardening_key_value})
+
+
+def _plain_lane():
+    return config_resolve.LaneRecord(
+        name="agy-test-lane", transport="agy-print", model="M", effort="medium",
+        vendor=None, surface=None, sandbox=None, roles=(), status=None,
+        capabilities_override={}, raw={})
+
+
+def test_hardening_key_and_applies_to():
+    assert hardening.hardening_key(_hardened_lane("grok_hardening")) == "grok_hardening"
+    assert hardening.hardening_key(_hardened_lane("kimi_hardening")) == "kimi_hardening"
+    assert hardening.hardening_key(_plain_lane()) is None
+    assert hardening.applies_to(_hardened_lane("grok_hardening")) is True
+    assert hardening.applies_to(_plain_lane()) is False
+
+
+def _bare_invocation():
+    return adapters.Invocation(
+        argv=["grok"], env={"GROK_SANDBOX": "adapter-default"}, stdin_policy="devnull",
+        cwd=None, prompt_addendum=None, log_file=None)
+
+
+def test_hardening_apply_merges_env_and_hardening_wins_on_conflict():
+    inv = _bare_invocation()
+    merged = hardening.apply(_hardened_lane("grok_hardening"), inv, CONFIG_WITH_HARDENING)
+    assert merged.env["GROK_SANDBOX"] == "orchestrate"      # hardening's own value wins
+    assert merged.env["GROK_TELEMETRY_ENABLED"] == "0"
+    assert merged.argv == inv.argv                          # never touches argv
+
+
+def test_hardening_apply_is_noop_for_a_lane_without_a_hardening_key():
+    inv = _bare_invocation()
+    result = hardening.apply(_plain_lane(), inv, CONFIG_WITH_HARDENING)
+    assert result is inv
+
+
+def test_hardening_apply_rejects_non_mapping_env_block():
+    bad_config = {"cross_provider": {"grok_hardening": {"env": "not-a-mapping"}}}
+    with pytest.raises(LaneError) as excinfo:
+        hardening.apply(_hardened_lane("grok_hardening"), _bare_invocation(), bad_config)
+    assert excinfo.value.error_class == "config"
+
+
+def test_hardening_ensure_config_file_installs_when_missing(tmp_path):
+    repo_root = tmp_path / "repo"
+    (repo_root / "references" / "grok").mkdir(parents=True)
+    (repo_root / "references" / "grok" / "config.toml").write_text("sandbox = true\n")
+    home = tmp_path / "home"
+
+    target, installed = hardening.ensure_config_file(
+        _hardened_lane("grok_hardening"), CONFIG_WITH_HARDENING, repo_root, home)
+    assert installed is True
+    assert target == home / ".grok" / "config.toml"
+    assert target.read_text() == "sandbox = true\n"
+
+
+def test_hardening_ensure_config_file_never_overwrites_existing(tmp_path):
+    repo_root = tmp_path / "repo"
+    (repo_root / "references" / "grok").mkdir(parents=True)
+    (repo_root / "references" / "grok" / "config.toml").write_text("sandbox = true\n")
+    home = tmp_path / "home"
+    (home / ".grok").mkdir(parents=True)
+    (home / ".grok" / "config.toml").write_text("# operator's own edits\n")
+
+    target, installed = hardening.ensure_config_file(
+        _hardened_lane("grok_hardening"), CONFIG_WITH_HARDENING, repo_root, home)
+    assert installed is False
+    assert target.read_text() == "# operator's own edits\n"
+
+
+def test_hardening_gate_passes_on_fictitious_profile_applied_evidence(tmp_path):
+    events = tmp_path / "sandbox-events.jsonl"
+    events.write_text('{"event": "ProfileApplied", "profile": "orchestrate"}\n')
+    hardening.gate(_hardened_lane("grok_hardening"), sandbox_events_path=events)  # no raise
+
+
+def test_hardening_gate_fails_closed_when_no_evidence_file_at_all(tmp_path):
+    with pytest.raises(LaneError) as excinfo:
+        hardening.gate(_hardened_lane("grok_hardening"),
+                        sandbox_events_path=tmp_path / "does-not-exist.jsonl")
+    assert excinfo.value.error_class == "hardening-gate"
+
+
+def test_hardening_gate_fails_closed_when_file_lacks_profile_applied(tmp_path):
+    events = tmp_path / "sandbox-events.jsonl"
+    events.write_text('{"event": "SomethingElse"}\n')
+    with pytest.raises(LaneError) as excinfo:
+        hardening.gate(_hardened_lane("grok_hardening"), sandbox_events_path=events)
+    assert excinfo.value.error_class == "hardening-gate"
+
+
+def test_hardening_gate_fails_closed_on_apply_failed_in_stderr_even_with_stale_evidence(tmp_path):
+    events = tmp_path / "sandbox-events.jsonl"
+    events.write_text('{"event": "ProfileApplied"}\n')   # stale from a PREVIOUS run
+    with pytest.raises(LaneError) as excinfo:
+        hardening.gate(_hardened_lane("grok_hardening"), sandbox_events_path=events,
+                        stderr="fatal: sandbox could not be applied")
+    assert excinfo.value.error_class == "hardening-gate"
+
+
+def test_hardening_gate_is_a_noop_for_kimi_hardening_lanes():
+    """kimi has no filesystem sandbox of its own to apply (config.yaml
+    kimi_hardening carries no preflight_verify/dispatch_gate field) — the
+    gate must not fail-closed on a lane that was never meant to produce
+    ProfileApplied evidence in the first place."""
+    hardening.gate(_hardened_lane("kimi_hardening"), sandbox_events_path=None)  # no raise
+
+
+def test_hardening_gate_is_a_noop_for_a_lane_without_any_hardening_key():
+    hardening.gate(_plain_lane(), sandbox_events_path=None)  # no raise
