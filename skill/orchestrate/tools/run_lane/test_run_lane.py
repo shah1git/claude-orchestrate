@@ -703,6 +703,35 @@ def test_orca_terminal_substrate_marks_missing_sentinel_as_timeout(tmp_path):
     assert [command[1:3] for command in calls][-1] == ["terminal", "close"]
 
 
+def test_orca_terminal_substrate_degrades_nonnumeric_sentinel_to_timeout(tmp_path):
+    # Defensive: `echo "$?"` can only ever write digits, but if a complete
+    # (newline-terminated) rc file somehow held a non-numeric line, the poll
+    # must NOT crash with an uncaught ValueError — it degrades to a clean
+    # timeout so the failure still flows through the envelope error taxonomy.
+    calls = []
+
+    def fake_orca_runner(command, **kwargs):
+        calls.append(command)
+        if command[1:3] == ["terminal", "create"]:
+            shell_words = shlex.split(command[command.index("--command") + 1])
+            Path(shell_words[-1]).write_text("not-a-number\n")  # whole but garbage
+            payload = {"ok": True, "result": {"terminal": {"handle": "term_junk"}}}
+        else:
+            payload = {"ok": True, "result": {}}
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    ticks = iter((1.0, 1.0, 1.6, 2.1, 2.2))
+    inv = adapters.Invocation(argv=["opaque-command"], env={}, stdin_policy="devnull",
+                               cwd=str(tmp_path), prompt_addendum=None, log_file=None)
+    result = substrate.OrcaTerminalSubstrate(
+        runner=fake_orca_runner, clock=lambda: next(ticks),
+        sleep=lambda _s: None).run(inv, timeout=1)
+
+    assert result.exit_code == -1        # never parsed a bogus exit code
+    assert result.timed_out is True      # degraded to a clean timeout, not a crash
+    assert [command[1:3] for command in calls][-1] == ["terminal", "close"]
+
+
 # =============================================================================
 # 8. axis separation — ONE AgyAdapter, TWO substrates (N+M, not NxM)
 # =============================================================================
