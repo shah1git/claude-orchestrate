@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from run_lane import __main__ as run_lane_main
 from run_lane import adapters, artifact, config_resolve, envelope, hardening, substrate
 from run_lane.envelope import LaneError
 
@@ -208,7 +209,7 @@ if dump_path:
     Path(dump_path).write_text(json.dumps(dict(os.environ)))
 
 result = {
-    "model": "claude-fable-5",
+    "modelUsage": {"claude-fable-5": {"inputTokens": 5, "outputTokens": 6}},
     "usage": {"input_tokens": 5, "output_tokens": 6},
     "session_id": "sess-fake-1",
     "result": "claude final response",
@@ -1230,17 +1231,18 @@ def test_grok_build_invocation_missing_prompt_file_is_config_error(tmp_path):
     assert excinfo.value.error_class == "config"
 
 
-def test_grok_parse_model_witness_stream_when_envelope_carries_model():
+def test_grok_parse_model_witness_stream_from_model_usage_key():
     res = substrate.RunResult(
-        exit_code=0, stdout=json.dumps({"model": "grok-4.5", "usage": {"x": 1}}),
+        exit_code=0,
+        stdout=json.dumps({"modelUsage": {"grok-4.5-build": {"x": 1}}, "usage": {"x": 1}}),
         stderr="", duration_ms=1, timed_out=False)
     obs = adapters.GrokAdapter().parse_model_witness(res, inv=None)
-    assert obs.observed == "grok-4.5"
+    assert obs.observed == "grok-4.5-build"
     assert obs.verification == "stream"
     assert obs.error is None
 
 
-def test_grok_parse_model_witness_honestly_none_when_envelope_carries_no_model():
+def test_grok_parse_model_witness_honestly_none_when_model_usage_is_missing_or_empty():
     res = substrate.RunResult(
         exit_code=0, stdout=json.dumps({"usage": {"x": 1}}),
         stderr="", duration_ms=1, timed_out=False)
@@ -1248,6 +1250,11 @@ def test_grok_parse_model_witness_honestly_none_when_envelope_carries_no_model()
     assert obs.observed is None
     assert obs.verification == "none"
     assert obs.error is None                      # not an error — an honest ceiling
+
+    empty = substrate.RunResult(
+        exit_code=0, stdout=json.dumps({"modelUsage": {}}), stderr="", duration_ms=1,
+        timed_out=False)
+    assert adapters.GrokAdapter().parse_model_witness(empty, inv=None).verification == "none"
 
 
 def test_grok_parse_usage_session_and_printed_text_from_fixture_json():
@@ -1265,10 +1272,10 @@ def test_grok_parse_usage_session_and_printed_text_from_fixture_json():
     assert truncated is False
 
 
-def test_grok_caps_default_to_agent_writes_file_and_honest_none_witness():
+def test_grok_caps_default_to_agent_writes_file_and_stream_witness():
     caps = adapters.GrokAdapter.CAPS
     assert caps.artifact_channel == "agent-writes-file"
-    assert caps.model_verification == "none"
+    assert caps.model_verification == "stream"
     assert caps.supports_effort == "flag"
     assert caps.supports_schema == "strict"
     assert caps.has_own_sandbox == "strong"
@@ -1509,7 +1516,9 @@ def test_claude_print_env_unset_actually_strips_nested_spawn_keys_end_to_end(tmp
 
 def test_claude_print_parse_model_usage_session_printed_text_from_fixture_json():
     stdout = json.dumps({
-        "model": "claude-fable-5", "usage": {"input_tokens": 5, "output_tokens": 6},
+        "model": None,
+        "modelUsage": {"claude-fable-5": {"inputTokens": 5, "outputTokens": 6}},
+        "usage": {"input_tokens": 5, "output_tokens": 6},
         "session_id": "sess-fake-1", "result": "claude final response",
     })
     res = substrate.RunResult(exit_code=0, stdout=stdout, stderr="", duration_ms=1,
@@ -1526,15 +1535,42 @@ def test_claude_print_parse_model_usage_session_printed_text_from_fixture_json()
     assert truncated is False
 
 
-def test_claude_print_parse_model_witness_missing_model_is_an_error():
+def test_claude_print_parse_model_witness_missing_model_usage_is_an_error():
     """CAPS.model_verification is fixed 'stream' for claude-print — unlike
-    grok/kimi's honest 'none' — so a missing model field here IS a
+    grok's honest 'none' when modelUsage is absent — so a missing modelUsage
+    field here IS a
     transport-level defect, not an accepted ceiling."""
     res = substrate.RunResult(exit_code=0, stdout=json.dumps({"result": "ok"}),
                                stderr="", duration_ms=1, timed_out=False)
     obs = adapters.ClaudePrintAdapter().parse_model_witness(res, inv=None)
     assert obs.observed is None
     assert obs.error is not None
+
+
+def test_claude_materialize_artifact_writes_result_from_json(tmp_path):
+    out = tmp_path / "result.md"
+    res = substrate.RunResult(
+        exit_code=0,
+        stdout=json.dumps({"result": "captured Claude result"}),
+        stderr="", duration_ms=1, timed_out=False)
+
+    adapters.ClaudePrintAdapter().materialize_artifact(res, out)
+
+    assert out.read_text() == "captured Claude result"
+
+
+@pytest.mark.parametrize("adapter_cls", [
+    adapters.AgyAdapter, adapters.CodexAdapter, adapters.GrokAdapter, adapters.KimiAdapter,
+])
+def test_native_artifact_adapters_materialize_hook_is_a_noop(tmp_path, adapter_cls):
+    out = tmp_path / "already-written.md"
+    out.write_text("native artifact")
+    res = substrate.RunResult(exit_code=0, stdout='{"result": "replacement"}', stderr="",
+                              duration_ms=1, timed_out=False)
+
+    adapter_cls().materialize_artifact(res, out)
+
+    assert out.read_text() == "native artifact"
 
 
 def test_claude_print_caps_are_a_declared_degradation():
@@ -1678,3 +1714,145 @@ def test_hardening_gate_is_a_noop_for_kimi_hardening_lanes():
 
 def test_hardening_gate_is_a_noop_for_a_lane_without_any_hardening_key():
     hardening.gate(_plain_lane(), sandbox_events_path=None)  # no raise
+
+
+# =============================================================================
+# 15. __main__ tail wiring — hardening, materialization, witnessed aliases
+# =============================================================================
+
+
+def _main_args(tmp_path, config_text, lane, out_name="out.md"):
+    workdir, prompt_file, _ = _make_workdir(tmp_path)
+    config = tmp_path / "config.yaml"
+    config.write_text(config_text)
+    out = workdir / out_name
+    args = run_lane_main.build_parser().parse_args([
+        "--lane", lane, "--config", str(config), "--prompt-file", str(prompt_file),
+        "--workdir", str(workdir), "--out", str(out),
+    ])
+    return args, out
+
+
+class _CannedSubstrate:
+    result = None
+    received_invocation = None
+
+    def run(self, inv, timeout):
+        type(self).received_invocation = inv
+        return type(self).result
+
+
+def test_main_applies_hardening_then_returns_hardening_gate_envelope(tmp_path, monkeypatch, capsys):
+    config_text = """
+cross_provider:
+  grok_hardening:
+    env: {GROK_SANDBOX: orchestrate, GROK_TELEMETRY_ENABLED: "0"}
+  lanes:
+    grok-hardened:
+      transport: grok-cli
+      model: grok-4.5
+      effort: high
+      hardening: grok_hardening
+"""
+    args, _ = _main_args(tmp_path, config_text, "grok-hardened")
+    _CannedSubstrate.result = substrate.RunResult(
+        exit_code=0, stdout='{"modelUsage": {"grok-4.5-build": {}}}', stderr="",
+        duration_ms=1, timed_out=False)
+    monkeypatch.setitem(run_lane_main.SUBSTRATES, "subprocess", _CannedSubstrate)
+    monkeypatch.setattr(run_lane_main, "GROK_SANDBOX_EVENTS_PATH",
+                        tmp_path / "no-ProfileApplied-evidence.jsonl")
+
+    assert run_lane_main.main([
+        "--lane", "grok-hardened", "--config", str(args.config),
+        "--prompt-file", str(args.prompt_file), "--workdir", str(args.workdir),
+        "--out", str(args.out),
+    ]) == 1
+
+    env = json.loads(capsys.readouterr().out)
+    assert env["ok"] is False
+    assert env["error"]["class"] == "hardening-gate"
+    assert _CannedSubstrate.received_invocation.env["GROK_SANDBOX"] == "orchestrate"
+    assert _CannedSubstrate.received_invocation.env["GROK_TELEMETRY_ENABLED"] == "0"
+
+
+def test_main_claude_materializes_result_before_artifact_capture(tmp_path, monkeypatch):
+    config_text = """
+cross_provider:
+  lanes:
+    claude-fixture:
+      transport: claude-print
+      model: claude-fable-5
+      effort: high
+"""
+    args, out = _main_args(tmp_path, config_text, "claude-fixture")
+    _CannedSubstrate.result = substrate.RunResult(
+        exit_code=0,
+        stdout=json.dumps({
+            "result": "materialized from stdout",
+            "modelUsage": {"claude-fable-5": {}},
+            "session_id": "sess-materialize",
+        }),
+        stderr="", duration_ms=1, timed_out=False)
+    monkeypatch.setitem(run_lane_main.SUBSTRATES, "subprocess", _CannedSubstrate)
+
+    env = run_lane_main.run(args)
+
+    assert out.read_text() == "materialized from stdout"
+    assert env["artifact"]["present"] is True
+    assert env["ok"] is True
+
+
+@pytest.mark.parametrize(("observed", "ok"), [
+    ("grok-4.5-build", True),
+    ("sonnet", False),
+])
+def test_main_grok_build_witness_alias_is_normalized_but_real_mismatch_fails(
+        tmp_path, monkeypatch, observed, ok):
+    config_text = """
+cross_provider:
+  lanes:
+    grok-fixture:
+      transport: grok-cli
+      model: grok-4.5
+      effort: high
+"""
+    args, out = _main_args(tmp_path, config_text, "grok-fixture")
+
+    class WritesArtifactSubstrate:
+        def run(self, inv, timeout):
+            out.write_text("fixture grok artifact")
+            return substrate.RunResult(
+                exit_code=0,
+                stdout=json.dumps({"modelUsage": {observed: {}}, "usage": {"total_tokens": 12}}),
+                stderr="", duration_ms=1, timed_out=False)
+
+    monkeypatch.setitem(run_lane_main.SUBSTRATES, "subprocess", WritesArtifactSubstrate)
+    env = run_lane_main.run(args)
+
+    assert env["model_observed"] == observed
+    assert env["ok"] is ok
+
+
+def test_main_grok_without_model_usage_remains_an_honest_unverified_pass(tmp_path, monkeypatch):
+    config_text = """
+cross_provider:
+  lanes:
+    grok-fixture:
+      transport: grok-cli
+      model: grok-4.5
+      effort: high
+"""
+    args, out = _main_args(tmp_path, config_text, "grok-fixture")
+
+    class WritesArtifactSubstrate:
+        def run(self, inv, timeout):
+            out.write_text("fixture grok artifact")
+            return substrate.RunResult(
+                exit_code=0, stdout=json.dumps({"modelUsage": {}}), stderr="",
+                duration_ms=1, timed_out=False)
+
+    monkeypatch.setitem(run_lane_main.SUBSTRATES, "subprocess", WritesArtifactSubstrate)
+    env = run_lane_main.run(args)
+
+    assert env["model_observed"] is None
+    assert env["ok"] is True

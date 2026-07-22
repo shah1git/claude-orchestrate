@@ -133,6 +133,15 @@ class LaneAdapter(ABC):
     def parse_printed_text(self, res) -> tuple:
         ...
 
+    def materialize_artifact(self, res, out_path) -> None:
+        """Give stdout-capture transports a chance to create their artifact.
+
+        Native-output and agent-writes-file transports keep the default
+        no-op, which is important: this hook must never overwrite a file
+        already written by the CLI or the agent.
+        """
+        return None
+
     def effective_capabilities(self, lane) -> Capabilities:
         """F-Caps hybrid (ADR-0005 поправка B): CAPS is the per-transport
         constant; a lane's `capabilities:` mapping overrides individual
@@ -189,6 +198,28 @@ class LaneAdapter(ABC):
                 f"supports_schema: \"no\")")
 
         return replace(self.CAPS, **override)
+
+
+def model_witness_matches(transport: str, declared, observed) -> bool:
+    """Compare a declared model to a witnessed model without weakening the
+    normal exact-match rule.
+
+    Grok's confirmed JSON format reports build-qualified keys such as
+    ``grok-4.5-build`` while its invocation pin is ``grok-4.5``.  Only that
+    documented ``-build`` qualification (optionally followed by another
+    dash-separated build detail) is accepted; a merely similar model name
+    is still a mismatch.
+    """
+    if declared == observed:
+        return True
+    if not isinstance(declared, str) or not isinstance(observed, str):
+        return False
+    return (
+        transport == "grok-cli"
+        and observed.startswith(f"{declared}-build")
+        and (len(observed) == len(declared) + len("-build")
+             or observed[len(declared) + len("-build")] == "-")
+    )
 
 
 # --- agy (slice 3) -----------------------------------------------------------
@@ -528,12 +559,8 @@ class GrokAdapter(LaneAdapter):
     (env GROK_SANDBOX)/--cwd/--output-format/-r/--json-schema` all present.
     Artifact channel is `agent-writes-file` (same prompt-instruction trick
     as agy/kimi — grok has no native `--out`-equivalent flag either);
-    `--output-format json`'s envelope is a SECONDARY, best-effort surface
-    for `model`/`usage`/`session_id`, honestly declared `none` at the
-    capability level (design-runlane.md §9 open question 1 — no live
-    snapshot has confirmed the envelope actually carries a model field, and
-    a guessed 'stream' would be exactly the invented witness ADR-0005 §5
-    forbids)."""
+    `--output-format json` reports the executed model as the key of its
+    `modelUsage` mapping, alongside usage and sessionId."""
 
     transport = "grok-cli"
     CAPS = Capabilities(
@@ -541,7 +568,7 @@ class GrokAdapter(LaneAdapter):
         supports_schema="strict",
         has_own_sandbox="strong",
         artifact_channel="agent-writes-file",
-        model_verification="none",
+        model_verification="stream",
     )
 
     def build_invocation(self, lane, req: InvocationRequest) -> Invocation:
@@ -596,12 +623,13 @@ class GrokAdapter(LaneAdapter):
 
     def parse_model_witness(self, res, inv: Invocation) -> ModelObservation:
         envelope = _extract_single_json(res.stdout if res else "")
-        if isinstance(envelope, dict) and isinstance(envelope.get("model"), str):
-            return ModelObservation(envelope["model"], "stream", json.dumps(envelope), error=None)
-        # Honest 'none' (CAPS.model_verification), not 'unavailable' — the
-        # capability itself declares no witness is expected here, so a
-        # missing model field is not an error, just the documented ceiling
-        # (design-runlane.md §9 open question 1).
+        model_usage = envelope.get("modelUsage") if isinstance(envelope, dict) else None
+        if isinstance(model_usage, dict):
+            observed = next((key for key in model_usage if isinstance(key, str) and key), None)
+            if observed is not None:
+                return ModelObservation(observed, "stream", json.dumps(envelope), error=None)
+        # An empty/missing modelUsage is an honest absence of evidence, not a
+        # parser failure: Grok can still return a usable response.
         return ModelObservation(None, "none", None, error=None)
 
     def parse_usage(self, res):
@@ -779,12 +807,21 @@ class ClaudePrintAdapter(LaneAdapter):
 
     def parse_model_witness(self, res, inv: Invocation) -> ModelObservation:
         envelope = _extract_single_json(res.stdout if res else "")
-        if isinstance(envelope, dict) and isinstance(envelope.get("model"), str):
-            return ModelObservation(envelope["model"], "stream", json.dumps(envelope), error=None)
+        model_usage = envelope.get("modelUsage") if isinstance(envelope, dict) else None
+        if isinstance(model_usage, dict):
+            observed = next((key for key in model_usage if isinstance(key, str) and key), None)
+            if observed is not None:
+                return ModelObservation(observed, "stream", json.dumps(envelope), error=None)
         return ModelObservation(
             None, "stream", None,
-            error="claude --output-format json carried no 'model' field — "
+            error="claude --output-format json carried no modelUsage key — "
                   "cannot verify the model that actually ran")
+
+    def materialize_artifact(self, res, out_path) -> None:
+        envelope = _extract_single_json(res.stdout if res else "")
+        result = envelope.get("result") if isinstance(envelope, dict) else None
+        if isinstance(result, str):
+            Path(out_path).write_text(result, encoding="utf-8")
 
     def parse_usage(self, res):
         envelope = _extract_single_json(res.stdout if res else "")
