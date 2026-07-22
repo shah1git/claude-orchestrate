@@ -609,7 +609,8 @@ def test_orca_terminal_shell_and_control_commands_preserve_invocation_recipe(tmp
         env={"ADDED": "value with spaces"}, env_unset=("REMOVED",),
         stdin_policy="pipe", cwd=str(tmp_path), prompt_addendum=None, log_file=None)
     shell_command = substrate.build_orca_shell_command(
-        inv, tmp_path / "stdout", tmp_path / "stderr", tmp_path / "stdin")
+        inv, tmp_path / "stdout", tmp_path / "stderr", tmp_path / "rc",
+        tmp_path / "stdin")
     words = shlex.split(shell_command)
 
     assert words[:5] == ["env", "-u", "REMOVED", "ADDED=value with spaces", "opaque-command"]
@@ -617,12 +618,11 @@ def test_orca_terminal_shell_and_control_commands_preserve_invocation_recipe(tmp
     assert words[words.index(">") + 1] == str(tmp_path / "stdout")
     assert words[words.index("2>") + 1] == str(tmp_path / "stderr")
     assert words[words.index("<") + 1] == str(tmp_path / "stdin")
+    # exit-code sentinel written last (the "finished" signal the substrate polls)
+    assert shell_command.rstrip().endswith(f'echo "$?" > {shlex.quote(str(tmp_path / "rc"))}')
     assert substrate.build_orca_create_command("path:/work", "run-lane", shell_command) == [
         "orca", "terminal", "create", "--worktree", "path:/work", "--title",
         "run-lane", "--command", shell_command, "--json"]
-    assert substrate.build_orca_wait_command("term_fixture", 7) == [
-        "orca", "terminal", "wait", "--terminal", "term_fixture", "--for",
-        "exit", "--timeout-ms", "7000", "--json"]
     assert substrate.build_orca_close_command("term_fixture") == [
         "orca", "terminal", "close", "--terminal", "term_fixture", "--json"]
 
@@ -641,61 +641,64 @@ def test_orca_terminal_substrate_reads_clean_disk_output_and_closes(tmp_path):
             stdout_path = Path(shell_words[shell_words.index(">") + 1])
             stderr_path = Path(shell_words[shell_words.index("2>") + 1])
             stdin_path = Path(shell_words[shell_words.index("<") + 1])
-            created_paths.update(stdout=stdout_path, stderr=stderr_path, stdin=stdin_path)
+            # rc sentinel is the target of the trailing `echo "$?" > <rc>`
+            rc_path = Path(shell_words[-1])
+            created_paths.update(stdout=stdout_path, stderr=stderr_path,
+                                 stdin=stdin_path, rc=rc_path)
             assert stdin_path.read_text() == "prompt via stdin"
             stdout_path.write_text("\x1b]133;C\x07\x1b[36m{\"type\": \"event\"}\x1b[0m\n")
             stderr_path.write_text("\x1b]133;D\x1b\\warning\x1b[31m!\x1b[0m\n")
+            rc_path.write_text("17\n")  # command finished with exit code 17
             payload = {"ok": True, "result": {"terminal": {"handle": "term_fixture"}}}
-        elif action == ["terminal", "wait"]:
-            assert command[-3:] == ["--timeout-ms", "2500", "--json"]
-            payload = {"ok": True, "result": {"wait": {
-                "condition": "exit", "satisfied": True, "status": "exited", "exitCode": 17}}}
         elif action == ["terminal", "close"]:
             payload = {"ok": True, "result": {}}
         else:
             raise AssertionError(command)
         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
 
-    ticks = iter((100.0, 100.123))
+    ticks = iter((100.0, 100.0, 100.123))
     inv = adapters.Invocation(
         argv=["opaque-command", "--json"], env={"EXTRA": "yes"},
         env_unset=("INHERITED",), stdin_policy="pipe", stdin_data="prompt via stdin",
         cwd=str(tmp_path), prompt_addendum=None, log_file=None)
 
     result = substrate.OrcaTerminalSubstrate(
-        runner=fake_orca_runner, clock=lambda: next(ticks)).run(inv, timeout=2.5)
+        runner=fake_orca_runner, clock=lambda: next(ticks),
+        sleep=lambda _s: None).run(inv, timeout=2.5)
 
     assert result == substrate.RunResult(
         exit_code=17, stdout='{"type": "event"}\n', stderr="warning!\n",
         duration_ms=123, timed_out=False)
+    # exit code comes from the on-disk sentinel poll — no `terminal wait` call
     assert [command[1:3] for command in calls] == [
-        ["terminal", "create"], ["terminal", "wait"], ["terminal", "close"]]
+        ["terminal", "create"], ["terminal", "close"]]
     assert all(not path.exists() for path in created_paths.values())
 
 
-def test_orca_terminal_substrate_marks_unsatisfied_wait_as_timeout(tmp_path):
+def test_orca_terminal_substrate_marks_missing_sentinel_as_timeout(tmp_path):
     calls = []
 
     def fake_orca_runner(command, **kwargs):
         calls.append(command)
         if command[1:3] == ["terminal", "create"]:
             shell_words = shlex.split(command[command.index("--command") + 1])
+            # command wrote partial stdout but NEVER the rc sentinel → still running
             Path(shell_words[shell_words.index(">") + 1]).write_text("partial\n")
             payload = {"ok": True, "result": {"terminal": {"handle": "term_timeout"}}}
-        elif command[1:3] == ["terminal", "wait"]:
-            payload = {"ok": True, "result": {"wait": {
-                "condition": "exit", "satisfied": False, "status": "running", "exitCode": 143}}}
         else:
             payload = {"ok": True, "result": {}}
         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
 
+    # clock crosses wait_started + budget (1.0 + 1) so the poll loop times out
+    ticks = iter((1.0, 1.0, 1.6, 2.1, 2.2))
     inv = adapters.Invocation(argv=["opaque-command"], env={}, stdin_policy="devnull",
                                cwd=str(tmp_path), prompt_addendum=None, log_file=None)
     result = substrate.OrcaTerminalSubstrate(
-        runner=fake_orca_runner, clock=iter((1.0, 1.01)).__next__).run(inv, timeout=1)
+        runner=fake_orca_runner, clock=lambda: next(ticks),
+        sleep=lambda _s: None).run(inv, timeout=1)
 
-    assert result.exit_code == 143
-    assert result.stdout == "partial\n"
+    assert result.exit_code == -1
+    assert result.stdout == "partial\n"   # partial disk output preserved
     assert result.timed_out is True
     assert [command[1:3] for command in calls][-1] == ["terminal", "close"]
 

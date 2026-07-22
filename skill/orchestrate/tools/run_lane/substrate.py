@@ -6,8 +6,10 @@ argv without executing it, this module executes argv without building it.
 
 Slice 3 shipped `SubprocessSubstrate`. `OrcaTerminalSubstrate` is now **fully
 implemented** (2026-07-22): it runs the opaque `Invocation` inside an Orca
-terminal (`orca terminal create/wait/read/close`), captures stdout/stderr via
-on-disk redirect files (terminal scrollback is unreliable for a fast exit),
+terminal (`orca terminal create` … `close`), captures stdout/stderr via on-disk
+redirect files (terminal scrollback is unreliable for a fast exit), waits for
+completion by polling an on-disk exit-code sentinel the shell command writes
+last (`orca terminal wait --for exit` proved unreliable live — see run()),
 strips shell-integration control sequences, and returns the same `RunResult` as
 `SubprocessSubstrate`. It knows no vendor-CLI name — `orca` is its mechanism,
 exactly as `subprocess` is the other substrate's.
@@ -126,12 +128,21 @@ def strip_terminal_control(text: str) -> str:
 
 def build_orca_shell_command(
         inv: Invocation, stdout_path: str | Path, stderr_path: str | Path,
-        stdin_path: str | Path | None = None) -> str:
+        rc_path: str | Path, stdin_path: str | Path | None = None) -> str:
     """Build the shell command run inside an Orca terminal.
 
     This deliberately knows only the Invocation recipe.  ``env`` expresses
     additions/overrides and removals before the opaque argv; redirections keep
     output in ordinary files rather than relying on terminal scrollback.
+
+    LIVE FIX (2026-07-22, e2e): the Orca terminal runs an *interactive* shell
+    that does NOT reliably transition to an "exited" state that
+    `terminal wait --for exit` detects — verified live, it times out even for a
+    fast `sleep 4; exit 0`. So the command's exit code is written to an on-disk
+    **sentinel file** (`rc_path`) which the substrate polls, exactly the
+    artifact-from-disk discipline applied to the exit code. `wait` is no longer
+    trusted for the code. Deterministic fakes could not surface this — only a
+    live Orca round-trip did.
     """
     command = ["env"]
     for key in getattr(inv, "env_unset", ()) or ():
@@ -148,6 +159,10 @@ def build_orca_shell_command(
         shell_command += f" < {shlex.quote(str(stdin_path))}"
     elif inv.stdin_policy in {"devnull", "pipe"}:
         shell_command += " < /dev/null"
+    # Write the exit code to the sentinel LAST — its presence is the "command
+    # finished" signal the substrate polls for. Space around `;` keeps it a
+    # separate shell token (valid either way; also keeps shlex-based tests clean).
+    shell_command += f' ; echo "$?" > {shlex.quote(str(rc_path))}'
     return shell_command
 
 
@@ -160,16 +175,6 @@ def build_orca_create_command(worktree_selector: str, title: str,
     ]
 
 
-def build_orca_wait_command(handle: str, timeout: int | None) -> list[str]:
-    """Build the control-plane request that waits for terminal exit."""
-    command = ["orca", "terminal", "wait", "--terminal", handle,
-               "--for", "exit"]
-    if timeout is not None:
-        command.extend(["--timeout-ms", str(int(timeout * 1000))])
-    command.append("--json")
-    return command
-
-
 def build_orca_close_command(handle: str) -> list[str]:
     """Build the best-effort terminal cleanup request."""
     return ["orca", "terminal", "close", "--terminal", handle, "--json"]
@@ -178,11 +183,13 @@ def build_orca_close_command(handle: str) -> list[str]:
 class OrcaTerminalSubstrate(Substrate):
     """Run an opaque Invocation command inside an Orca worktree terminal."""
 
-    def __init__(self, runner=None, clock=None):
+    def __init__(self, runner=None, clock=None, sleep=None):
         # Kept injectable so deterministic tests exercise the control-plane
-        # protocol without creating a live Orca terminal.
+        # protocol without creating a live Orca terminal. `sleep` paces the
+        # exit-code sentinel poll (see run()).
         self._runner = runner or subprocess.run
         self._clock = clock or time.monotonic
+        self._sleep = sleep or time.sleep
 
     def _run_orca(self, command: list[str]):
         proc = self._runner(command, capture_output=True, text=True)
@@ -208,6 +215,7 @@ class OrcaTerminalSubstrate(Substrate):
         stdout_file = None
         stderr_file = None
         stdin_file = None
+        rc_file = None
         handle = None
         wait_started = None
 
@@ -228,8 +236,13 @@ class OrcaTerminalSubstrate(Substrate):
                 stdin_file.write(stdin_data)
                 stdin_file.close()
 
+            rc_file = tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", delete=False, dir=temp_dir,
+                prefix=".run-lane-orca-rc-")
+            rc_file.close()
+
             shell_command = build_orca_shell_command(
-                inv, stdout_file.name, stderr_file.name,
+                inv, stdout_file.name, stderr_file.name, rc_file.name,
                 stdin_file.name if stdin_file is not None else None)
             created = self._run_orca(build_orca_create_command(
                 worktree_selector, "run-lane", shell_command))
@@ -237,11 +250,28 @@ class OrcaTerminalSubstrate(Substrate):
             if not handle:
                 raise OSError("orca terminal create response has no terminal handle")
 
+            # Poll the on-disk exit-code sentinel — NOT `orca terminal wait`,
+            # which (verified live) times out even when the command has already
+            # exited. The sentinel is written last by the shell command, so a
+            # complete rc file means "finished"; absence within the timeout is a
+            # real timeout. Bound the poll by the ticket timeout (default 5 min).
+            # The trailing newline `echo "$?"` appends is the completion marker:
+            # only once it is present is the write whole, so a read racing the
+            # write can never parse a torn partial integer.
             wait_started = self._clock()
-            waited = self._run_orca(build_orca_wait_command(handle, timeout))
-            wait = waited.get("wait") or {}
-            timed_out = not wait.get("satisfied", False) or wait.get("status") != "exited"
-            exit_code = wait.get("exitCode", -1)
+            budget_s = float(timeout) if timeout else 300.0
+            exit_code = -1
+            timed_out = True
+            while self._clock() - wait_started < budget_s:
+                try:
+                    rc_text = Path(rc_file.name).read_text()
+                except OSError:
+                    rc_text = ""
+                if rc_text.endswith("\n") and rc_text.strip():
+                    exit_code = int(rc_text.strip().splitlines()[-1].strip())
+                    timed_out = False
+                    break
+                self._sleep(0.5)
             duration_ms = int((self._clock() - wait_started) * 1000)
             stdout = strip_terminal_control(Path(stdout_file.name).read_text())
             stderr = strip_terminal_control(Path(stderr_file.name).read_text())
@@ -268,7 +298,7 @@ class OrcaTerminalSubstrate(Substrate):
                     # The run result is already evidence of the terminal's
                     # work; cleanup is still attempted but cannot replace it.
                     pass
-            for file_obj in (stdout_file, stderr_file, stdin_file):
+            for file_obj in (stdout_file, stderr_file, stdin_file, rc_file):
                 if file_obj is not None:
                     try:
                         os.unlink(file_obj.name)
