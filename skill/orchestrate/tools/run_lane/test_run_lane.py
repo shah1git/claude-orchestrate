@@ -1979,3 +1979,98 @@ cross_provider:
 
     assert env["model_observed"] is None
     assert env["ok"] is True
+
+
+# =============================================================================
+# 16. Command-verb dispatcher — flag form remains the legacy run contract
+# =============================================================================
+
+
+def test_main_run_verb_uses_the_legacy_run_path(tmp_path, monkeypatch):
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    legacy_argv = [
+        "--lane", "fixture", "--config", str(tmp_path / "config.yaml"),
+        "--prompt-file", str(prompt_file), "--workdir", str(workdir),
+        "--out", str(out),
+    ]
+    received = []
+
+    def fake_run(args):
+        received.append(args)
+        return {"ok": True}
+
+    monkeypatch.setattr(run_lane_main, "run", fake_run)
+
+    assert run_lane_main.main(legacy_argv) == 0
+    assert run_lane_main.main(["run", *legacy_argv]) == 0
+    assert len(received) == 2
+    assert vars(received[0]) == vars(received[1])
+
+
+def test_main_dispatches_smoke_verb_to_guardrail(capsys):
+    """`run-lane smoke` with no selector reaches smoke.main → quota guardrail,
+    not a stub blob (both detect and smoke are shipped now)."""
+    assert run_lane_main.main(["smoke", "--future-argument"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "refusing to burn model quota" in captured.err
+
+
+def test_lane_named_like_a_verb_reaches_run_not_the_verb(tmp_path, monkeypatch):
+    """Collision guarantee (S2a critic note): a lane whose name equals a verb
+    keyword is still reachable via the flag form `--lane <verb>` — the verb
+    dispatcher fires only on a bare (non-flag) first token, so `--lane detect`
+    goes to the run pipeline, never to detect.main."""
+    received = []
+
+    def fake_run(args):
+        received.append(args)
+        return {"ok": True, "lane": args.lane}   # _main_run reads env.get("ok")
+
+    monkeypatch.setattr(run_lane_main, "run", fake_run)
+    rc = run_lane_main.main([
+        "--lane", "detect", "--config", "c.yaml",
+        "--prompt-file", "p", "--workdir", ".", "--out", "o",
+    ])
+    assert rc == 0
+    assert len(received) == 1
+    assert received[0].lane == "detect"   # reached run() with the lane, not the verb
+
+
+def test_main_dispatches_detect_verb_returns_map(capsys, monkeypatch, tmp_path):
+    """Verb dispatch for detect still returns 0; body is the transport map (S2b)."""
+    from run_lane import detect as detect_mod
+    from run_lane.substrate import RunResult
+
+    config_path = tmp_path / "cfg.yaml"
+    config_path.write_text(
+        "cross_provider:\n  lanes:\n    codex-code:\n      transport: codex-cli\n"
+    )
+
+    class _Fake:
+        def run(self, inv, timeout=None):
+            return RunResult(0, "Logged in as test\n", "", 1, False)
+
+    # Avoid live vendor probes: route detect.main through a canned substrate
+    # and a fixture config (deterministic; mirrors test_detect.py).
+    real_main = detect_mod.main
+
+    def wrapped(argv, substrate=None):
+        return real_main(
+            ["--config", str(config_path), *(argv or [])],
+            substrate=substrate or _Fake(),
+        )
+
+    monkeypatch.setattr(detect_mod, "main", wrapped)
+    assert run_lane_main.main(["detect"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert "codex-cli" in out
+    assert {"cli", "present", "logged_in", "evidence", "lanes"} <= set(out["codex-cli"])
+
+
+def test_main_rejects_unknown_bare_verb(capsys):
+    assert run_lane_main.main(["frobnicate"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "unknown command 'frobnicate'" in captured.err
+    assert "run, detect, smoke" in captured.err

@@ -22,10 +22,13 @@ every non-Claude route carries a named reason into telemetry.
 > reached by calling the codex CLI directly — the same thing the bridge wrapped. The bridge's
 > own repo lives elsewhere in `/opt/tools`; its fate is outside this project.
 >
-> **Interim (ADR-0005, slices 3–5):** the drift-proof executor `tools/run-lane` (one argv,
-> artifact-from-disk, model-verification) is not written yet. Until it lands, an external lane
-> is invoked by the lead per its documented CLI form below — exactly as grok/kimi already are
-> today. Not a regression: codex is brought to the same state, all get the executor later.
+> **Landed (ADR-0005, slices 3–6 + S2a/S2b/S3, 2026-07-22):** the drift-proof executor
+> `tools/run-lane` (one argv, artifact-from-disk, model-verification, one JSON envelope) IS the
+> dispatch path. An external lane is run as **`run-lane --lane <name> --config config.yaml
+> --prompt-file … --workdir … --out …`**, not by the lead shelling out to the vendor CLI by
+> hand. The documented CLI forms below are the invocation recipes run-lane builds internally
+> (its per-transport adapters) — kept here as the source of each lane's recipe, no longer a
+> hand-invocation instruction.
 >
 > Historical notes further down that mention "the bridge" or "MCP as a Gemini path" are
 > **pre-v26 context, not current instruction** — the current path is always the vendor CLI.
@@ -37,8 +40,9 @@ though its bridge/MCP *mechanism* is retired, superseded by run-lane + vendor-CL
 Our own decision record for the invocation model is **`docs/adr/0005-lane-invocation-unification.md`**.
 
 > **We reference, we do not vendor.** orchestrate is pure Markdown for its METHOD, but its own
-> thin tools (`validate_config.py`, `telemetry_append.py`, and the coming `run-lane`) live in
-> `tools/` and travel with the repo — that is what makes the skill portable (ADR-0005, F1). We
+> thin tools (`validate_config.py`, `telemetry_append.py`, `run-lane`, `dispatch_ledger.py`)
+> live in `tools/` and travel with the repo — that is what makes the skill portable (ADR-0005,
+> F1). We
 > do not copy in foreign code: vendor CLIs are **capability-detected by presence** — if the CLI
 > exists and reports logged-in, its lane is available; else that lane falls back down its chain
 > to a Claude worker. Paths are environment-specific, not a portable assumption.
@@ -294,14 +298,17 @@ family bump (same policy as delegation.md banners).
 
 ## Detection & graceful degradation
 
-- **Detection** (once per lane at Step 2, v26 — per-CLI, no bridge): probe each vendor console
-  utility directly by presence + logged-in. A lane is *available* iff its `transport` CLI is on
-  PATH and reports authenticated: `codex login status` (codex-*), `agy models` (gemini-* /
-  `agy-opus` — a non-empty catalog also confirms the Google surface), `grok --version` +
-  its login check (grok-*), `kimi --version` + its login check (kimi-k3). Each probe is cheap,
-  local, and does not spend model quota; absence is data, not an error. Record availability in
-  the routing plan. (Future `tools/run-lane --detect` will fold these into one call, ADR-0005 —
-  until then probe per lane.)
+- **Detection** (once at Step 2 — per-CLI, no bridge): run **`run-lane detect`** — one call that
+  probes each *distinct transport* (one probe per vendor CLI, not per lane) by presence +
+  logged-in and returns a machine-readable map `{transport: {cli, present, logged_in, evidence,
+  lanes}}`. Its internal recipes: `codex login status` (codex-*), `agy models` (gemini-* /
+  `agy-opus` — a non-empty catalog also confirms the Google surface), `grok --version` + login
+  check (grok-*), `kimi --version` + login check (kimi-k3), auth check for claude-print. Each
+  probe is cheap, local, and spends no model quota; logged-in is read from a **success token,
+  not merely exit 0** (a CLI that prints a login prompt yet exits 0 is `logged_in:false`);
+  absence is data, not an error. Record availability in the routing plan. (For a stronger check,
+  `run-lane smoke --lanes <names>` fires one trivial real call per lane end-to-end — it *does*
+  spend quota, so it refuses to run without an explicit `--lanes`/`--all` selector.)
 - **Degradation**: if a route selects a cross-provider capability that detection finds absent,
   walk that lane's ordered fallback chain in config.yaml `availability.fallbacks` (the
   registry's "Degrades to" column shows the same terminal Claude default; the operative,
