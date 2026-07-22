@@ -29,11 +29,12 @@ confirmed `'none'` (no model in stream-json), codex `'pin-validated'` (no model
 in `--json`); `hardening.gate` wired with grok's evidence path
 (`~/.grok/sandbox-events.jsonl`); claude-print materialize hook landed.
 
-Live end-to-end has since been exercised (2026-07-22): the agy, codex, and grok
-lanes each ran real builder tickets through run-lane, and `OrcaTerminalSubstrate`
-completed a live Orca round-trip (gemini-flash through an Orca terminal, ok:true,
-model witness matched). Still unverified live: the kimi lane (its `k3` model needs
-a `[models."k3"]` entry in the machine's kimi config.toml) and claude-print. The
-parsing/argv/strip logic stays unit-tested against fixtures; the live round-trips
-are integration checks, now run at least once for those three adapters + Orca.
+Live end-to-end has since been exercised (2026-07-22): the agy, codex, grok, and
+kimi lanes each returned a real `ok:true` through run-lane (kimi via the full
+model alias `kimi-code/k3` — a bare `k3` is a config.invalid), and
+`OrcaTerminalSubstrate` completed a live Orca round-trip (gemini-flash through an
+Orca terminal, ok:true, model witness matched). Still unverified live:
+claude-print. The parsing/argv/strip logic stays unit-tested against fixtures;
+the live round-trips are integration checks, now run at least once per adapter
+except claude-print, plus Orca.
 """

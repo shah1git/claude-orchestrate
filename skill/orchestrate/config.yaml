@@ -723,14 +723,16 @@ cross_provider:
                                    # контекст 1M, подписка Allegretto (OAuth). Решение
                                    # владельца 2026-07-19 на данных: architect t3/t4/t5 FULL
                                    # наравне с Opus + тест честности пройден.
-      model: k3                    # ТРЕБУЕТ записи [models."k3"] с max_context_size в
-                                   # ~/.kimi-code/config.toml на машине — иначе kimi выходит
-                                   # config.invalid, run-lane классифицирует как transport-death
-                                   # и лейн деградирует (fallback по пулу). Средовое требование
-                                   # лейна, зафиксировано 2026-07-22.
-      # effort НЕ объявляем: адаптер kimi-cli-headless не несёт флага reasoning-effort
-      # (run_lane capability supports_effort=no). Раньше стоял effort: high — run-lane
-      # честно (fail-closed) отвергал такой вызов; снято в S_E (config-гигиена 2026-07-22).
+      model: kimi-code/k3          # ПОЛНЫЙ алиас модели из ~/.kimi-code/config.toml —
+                                   # провайдерный префикс ОБЯЗАТЕЛЕН. Голый `k3` даёт
+                                   # config.invalid → transport-death (модель ищется как
+                                   # [models."k3"], а она объявлена как [models."kimi-code/k3"]).
+                                   # Проверено живьём 2026-07-22: KIMI_OK за 17с. k3 = контекст 1M.
+      # effort НЕ объявляем: у kimi CLI НЕТ флага per-call reasoning-effort — эффорт берётся
+      # из ~/.kimi-code/config.toml ([thinking].effort / модельный default_effort; у k3 = max).
+      # Поэтому run_lane capability supports_effort=no, и лейн эффорт не задаёт. ВНИМАНИЕ:
+      # max = самое тщательное обдумывание, но и самое медленное — крупный деливерабл может
+      # упереться в timeout (так S3 и словил 900с); большим тикетам давать запас по --timeout.
       transport: kimi-cli-headless # `kimi -p` (немодифиц. официальный CLI, ToS-совместимо),
                                    # драйвинг Orca-терминалом; НЕ через bridge (подписочный
                                    # токен нельзя переиспользовать — бан по ToS).
