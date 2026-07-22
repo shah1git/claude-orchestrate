@@ -21,7 +21,7 @@ from types import SimpleNamespace
 from . import adapters, config_resolve
 from .adapters import Invocation
 from .envelope import LaneError
-from .substrate import SubprocessSubstrate
+from .substrate import RunLimits, SubprocessSubstrate
 
 # skill/orchestrate/config.yaml — parents: run_lane -> tools -> orchestrate
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config.yaml"
@@ -102,7 +102,8 @@ def detect_transports(config: dict, substrate=None) -> dict:
             continue
 
         inv = _probe_invocation(argv)
-        res = substrate.run(inv, timeout=PROBE_TIMEOUT_SECONDS)
+        res = substrate.run(inv, RunLimits(idle_s=PROBE_TIMEOUT_SECONDS,
+                                           max_s=PROBE_TIMEOUT_SECONDS))
         parsed = adapter.parse_probe(res)
         result[transport] = {
             "cli": str(argv[0]),

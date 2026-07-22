@@ -207,7 +207,8 @@ def smoke_lane(
             out=out_path,
             role=None,
             schema=None,
-            timeout=timeout,
+            timeout=timeout,          # per-lane max ceiling (ADR-0007); None → lane envelope
+            idle_timeout=None,        # liveness bound falls to the lane's resolved idle
             resume=None,
             substrate="subprocess",
             effort=None,

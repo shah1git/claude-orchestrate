@@ -664,7 +664,7 @@ def test_orca_terminal_substrate_reads_clean_disk_output_and_closes(tmp_path):
 
     result = substrate.OrcaTerminalSubstrate(
         runner=fake_orca_runner, clock=lambda: next(ticks),
-        sleep=lambda _s: None).run(inv, timeout=2.5)
+        sleep=lambda _s: None).run(inv, substrate.RunLimits(idle_s=10))
 
     assert result == substrate.RunResult(
         exit_code=17, stdout='{"type": "event"}\n', stderr="warning!\n",
@@ -689,17 +689,19 @@ def test_orca_terminal_substrate_marks_missing_sentinel_as_timeout(tmp_path):
             payload = {"ok": True, "result": {}}
         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
 
-    # clock crosses wait_started + budget (1.0 + 1) so the poll loop times out
-    ticks = iter((1.0, 1.0, 1.6, 2.1, 2.2))
+    # stdout grew once (iter1) then went silent; the second poll finds no growth
+    # and no rc, so silence past idle_s=1 → idle death (ADR-0007 liveness).
+    ticks = iter((1.0, 1.0, 2.5, 2.6))
     inv = adapters.Invocation(argv=["opaque-command"], env={}, stdin_policy="devnull",
                                cwd=str(tmp_path), prompt_addendum=None, log_file=None)
     result = substrate.OrcaTerminalSubstrate(
         runner=fake_orca_runner, clock=lambda: next(ticks),
-        sleep=lambda _s: None).run(inv, timeout=1)
+        sleep=lambda _s: None).run(inv, substrate.RunLimits(idle_s=1))
 
     assert result.exit_code == -1
-    assert result.stdout == "partial\n"   # partial disk output preserved
+    assert result.stdout == "partial\n"       # partial disk output preserved
     assert result.timed_out is True
+    assert result.timeout_kind == "idle"       # silence, not envelope
     assert [command[1:3] for command in calls][-1] == ["terminal", "close"]
 
 
@@ -720,16 +722,104 @@ def test_orca_terminal_substrate_degrades_nonnumeric_sentinel_to_timeout(tmp_pat
             payload = {"ok": True, "result": {}}
         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
 
-    ticks = iter((1.0, 1.0, 1.6, 2.1, 2.2))
+    # rc is non-numeric (never parses) and nothing grows, so the poll degrades
+    # to a clean idle timeout past idle_s=1 rather than crashing on ValueError.
+    ticks = iter((1.0, 1.0, 2.5, 2.6))
     inv = adapters.Invocation(argv=["opaque-command"], env={}, stdin_policy="devnull",
                                cwd=str(tmp_path), prompt_addendum=None, log_file=None)
     result = substrate.OrcaTerminalSubstrate(
         runner=fake_orca_runner, clock=lambda: next(ticks),
-        sleep=lambda _s: None).run(inv, timeout=1)
+        sleep=lambda _s: None).run(inv, substrate.RunLimits(idle_s=1))
 
     assert result.exit_code == -1        # never parsed a bogus exit code
     assert result.timed_out is True      # degraded to a clean timeout, not a crash
     assert [command[1:3] for command in calls][-1] == ["terminal", "close"]
+
+
+# =============================================================================
+# ADR-0007 — liveness bounds. A process still producing output is never killed
+# for taking long; only silence past idle_s, or total duration past max_s.
+# =============================================================================
+
+
+def test_classify_wait_never_kills_a_still_streaming_process():
+    """PRIMARY regress guard (ADR-0007, §2.10): the old wall-clock timeout killed
+    a slow lane by conflating 'hung' with 'thinking'. classify_wait must NEVER
+    return death for a process whose output keeps advancing, at ANY total
+    duration, as long as the envelope max_s is not crossed."""
+    limits = substrate.RunLimits(idle_s=10, max_s=None)
+    for elapsed in (0, 5, 50, 500, 5_000, 500_000):
+        # last_output_at == now → just produced output → alive, forever.
+        assert substrate.classify_wait(
+            now=elapsed, last_output_at=elapsed, started_at=0, limits=limits) == "continue"
+
+
+def test_classify_wait_kills_on_silence_past_idle():
+    limits = substrate.RunLimits(idle_s=10, max_s=None)
+    assert substrate.classify_wait(now=9, last_output_at=0, started_at=0, limits=limits) == "continue"
+    assert substrate.classify_wait(now=10, last_output_at=0, started_at=0, limits=limits) == "idle"
+
+
+def test_classify_wait_kills_a_forever_streamer_at_the_envelope():
+    """A process that never goes idle (keeps streaming) is still stopped once
+    total duration crosses the recorded envelope ceiling — the second bound."""
+    limits = substrate.RunLimits(idle_s=10, max_s=100)
+    assert substrate.classify_wait(now=99, last_output_at=99, started_at=0, limits=limits) == "continue"
+    assert substrate.classify_wait(now=100, last_output_at=100, started_at=0, limits=limits) == "envelope"
+
+
+def test_subprocess_substrate_runs_a_live_streamer_to_completion(tmp_path):
+    """Integration (ADR-0007): a child that streams for LONGER than idle_s but
+    never falls silent longer than idle_s runs to the end — not killed for its
+    total duration. This is the defect ('slow but working' → killed) closed."""
+    child = tmp_path / "streamer.py"
+    child.write_text(
+        "import sys, time\n"
+        "for i in range(6):\n"
+        "    sys.stdout.write(f'chunk {i}\\n'); sys.stdout.flush()\n"
+        "    time.sleep(0.2)\n")   # ~1.2s total, gaps 0.2s
+    inv = adapters.Invocation(argv=[sys.executable, str(child)], env={},
+                               stdin_policy="devnull", cwd=str(tmp_path),
+                               prompt_addendum=None, log_file=None)
+    res = substrate.SubprocessSubstrate().run(
+        inv, substrate.RunLimits(idle_s=1.0, max_s=None))  # total>idle, each gap<idle
+    assert res.timed_out is False
+    assert res.exit_code == 0
+    assert res.stdout.count("chunk") == 6
+
+
+def test_subprocess_substrate_kills_a_silent_child_on_idle_and_keeps_partial(tmp_path):
+    child = tmp_path / "silent.py"
+    child.write_text(
+        "import sys, time\n"
+        "sys.stdout.write('before\\n'); sys.stdout.flush()\n"
+        "time.sleep(5)\n"
+        "sys.stdout.write('after\\n')\n")
+    inv = adapters.Invocation(argv=[sys.executable, str(child)], env={},
+                               stdin_policy="devnull", cwd=str(tmp_path),
+                               prompt_addendum=None, log_file=None)
+    res = substrate.SubprocessSubstrate().run(
+        inv, substrate.RunLimits(idle_s=0.5, max_s=None))
+    assert res.timed_out is True
+    assert res.timeout_kind == "idle"
+    assert "before" in res.stdout      # partial output flushed before the kill is kept
+    assert "after" not in res.stdout   # killed during the silent sleep
+
+
+def test_subprocess_substrate_kills_a_forever_streamer_at_envelope(tmp_path):
+    child = tmp_path / "forever.py"
+    child.write_text(
+        "import sys, time\n"
+        "while True:\n"
+        "    sys.stdout.write('x\\n'); sys.stdout.flush()\n"
+        "    time.sleep(0.05)\n")   # streams forever, never idle
+    inv = adapters.Invocation(argv=[sys.executable, str(child)], env={},
+                               stdin_policy="devnull", cwd=str(tmp_path),
+                               prompt_addendum=None, log_file=None)
+    res = substrate.SubprocessSubstrate().run(
+        inv, substrate.RunLimits(idle_s=10, max_s=0.5))  # never idle, but bounded
+    assert res.timed_out is True
+    assert res.timeout_kind == "envelope"
 
 
 # =============================================================================
@@ -747,7 +837,7 @@ class FakeSubstrate:
         self.result = result
         self.received_invocation = None
 
-    def run(self, inv, timeout):
+    def run(self, inv, limits):
         self.received_invocation = inv
         return self.result
 
@@ -770,7 +860,7 @@ def test_one_adapter_runs_through_fake_and_subprocess_substrate(tmp_path):
     canned = substrate.RunResult(exit_code=0, stdout="fake-agy: ok\n", stderr="",
                                   duration_ms=1, timed_out=False)
     fake_sub = FakeSubstrate(canned)
-    res_fake = fake_sub.run(inv, timeout=30)
+    res_fake = fake_sub.run(inv, substrate.RunLimits(idle_s=30))
     assert res_fake is canned
     assert fake_sub.received_invocation is inv
 
@@ -779,7 +869,7 @@ def test_one_adapter_runs_through_fake_and_subprocess_substrate(tmp_path):
     inv_for_subprocess = dataclasses.replace(
         inv, argv=[str(fake_agy)] + inv.argv[1:], env={})
     real_sub = substrate.SubprocessSubstrate()
-    res_real = real_sub.run(inv_for_subprocess, timeout=30)
+    res_real = real_sub.run(inv_for_subprocess, substrate.RunLimits(idle_s=30))
     assert res_real.exit_code == 0
     assert res_real.timed_out is False
     assert "fake-agy: ok" in res_real.stdout
@@ -1425,7 +1515,7 @@ def test_one_grok_invocation_runs_through_fake_and_subprocess_substrate(tmp_path
     canned = substrate.RunResult(exit_code=0, stdout='{"result": "ok"}', stderr="",
                                   duration_ms=1, timed_out=False)
     fake_sub = FakeSubstrate(canned)
-    assert fake_sub.run(inv, timeout=30) is canned
+    assert fake_sub.run(inv, substrate.RunLimits(idle_s=30)) is canned
     assert fake_sub.received_invocation is inv
 
     # a fake `grok` binary that just writes the addendum-declared artifact
@@ -1446,7 +1536,7 @@ def test_one_grok_invocation_runs_through_fake_and_subprocess_substrate(tmp_path
     fake_grok.chmod(fake_grok.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     inv_for_subprocess = dataclasses.replace(inv, argv=[str(fake_grok)] + inv.argv[1:])
     real_sub = substrate.SubprocessSubstrate()
-    res_real = real_sub.run(inv_for_subprocess, timeout=30)
+    res_real = real_sub.run(inv_for_subprocess, substrate.RunLimits(idle_s=30))
     assert res_real.exit_code == 0
     art = artifact.capture(out)
     assert art["present"] is True
@@ -1633,7 +1723,7 @@ def test_claude_print_env_unset_actually_strips_nested_spawn_keys_end_to_end(tmp
     inv = adapter.build_invocation(lane=None, req=req)
     inv = dataclasses.replace(inv, argv=[str(fake_claude)] + inv.argv[1:])
 
-    res = substrate.SubprocessSubstrate().run(inv, timeout=30)
+    res = substrate.SubprocessSubstrate().run(inv, substrate.RunLimits(idle_s=30))
     assert res.exit_code == 0, res.stderr
     dumped_env = json.loads(dump_path.read_text())
     assert "CLAUDECODE" not in dumped_env
@@ -1864,7 +1954,7 @@ class _CannedSubstrate:
     result = None
     received_invocation = None
 
-    def run(self, inv, timeout):
+    def run(self, inv, limits):
         type(self).received_invocation = inv
         return type(self).result
 
@@ -1946,7 +2036,7 @@ cross_provider:
     args, out = _main_args(tmp_path, config_text, "grok-fixture")
 
     class WritesArtifactSubstrate:
-        def run(self, inv, timeout):
+        def run(self, inv, limits):
             out.write_text("fixture grok artifact")
             return substrate.RunResult(
                 exit_code=0,
@@ -1972,7 +2062,7 @@ cross_provider:
     args, out = _main_args(tmp_path, config_text, "grok-fixture")
 
     class WritesArtifactSubstrate:
-        def run(self, inv, timeout):
+        def run(self, inv, limits):
             out.write_text("fixture grok artifact")
             return substrate.RunResult(
                 exit_code=0, stdout=json.dumps({"modelUsage": {}}), stderr="",
@@ -2052,7 +2142,7 @@ def test_main_dispatches_detect_verb_returns_map(capsys, monkeypatch, tmp_path):
     )
 
     class _Fake:
-        def run(self, inv, timeout=None):
+        def run(self, inv, limits=None):
             return RunResult(0, "Logged in as test\n", "", 1, False)
 
     # Avoid live vendor probes: route detect.main through a canned substrate

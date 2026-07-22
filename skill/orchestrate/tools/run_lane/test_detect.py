@@ -63,7 +63,7 @@ class FakeSubstrate:
         self.results_by_cli = results_by_cli or {}
         self.default = default or RunResult(0, "ok", "", 1, False)
 
-    def run(self, inv, timeout=None) -> RunResult:
+    def run(self, inv, limits=None) -> RunResult:
         self.calls.append(inv)
         cli = inv.argv[0] if inv.argv else None
         if cli in self.results_by_cli:

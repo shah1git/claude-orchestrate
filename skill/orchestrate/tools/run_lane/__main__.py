@@ -29,9 +29,11 @@ from pathlib import Path
 
 from . import adapters, artifact, config_resolve, envelope, hardening
 from .envelope import LaneError
-from .substrate import OrcaTerminalSubstrate, SubprocessSubstrate
+from .substrate import OrcaTerminalSubstrate, RunLimits, SubprocessSubstrate
 
-DEFAULT_TIMEOUT_SECONDS = 300
+# No wall-clock DEFAULT_TIMEOUT any more (ADR-0007): the wait is bounded by
+# liveness (idle) plus the lane's recorded latency envelope, resolved per lane
+# in config_resolve, never a single arbitrary default.
 # This is deliberately a concrete, expanded path: grok writes its sandbox
 # journal outside the invocation worktree, and the post-run gate must inspect
 # the same file the CLI does.  Keeping it as a module constant also makes the
@@ -58,7 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--role")
     ap.add_argument("--schema", type=Path)
-    ap.add_argument("--timeout", type=int)
+    # --timeout is the MAX latency envelope (total-duration ceiling), kept under
+    # its historical name for backward compatibility; --idle-timeout is the
+    # liveness bound (max silence). Both override the lane's resolved envelope.
+    ap.add_argument("--timeout", type=float)
+    ap.add_argument("--idle-timeout", type=float, dest="idle_timeout")
     ap.add_argument("--resume")
     ap.add_argument("--substrate", choices=sorted(SUBSTRATES), default="subprocess")
     ap.add_argument("--effort")
@@ -71,8 +77,20 @@ def _classify_run_result(res) -> dict | None:
     run-lane only classifies; re-dispatch is the lead's decision, and the
     escalation ladder must not be spent on a transport failure."""
     if res.timed_out:
+        # ADR-0007: name WHICH bound fired. 'idle' — went silent past the
+        # liveness threshold (a genuine hang → transport-death, midflight
+        # `timeout-no-output`). 'envelope' — kept producing output but exceeded
+        # the lane's recorded latency ceiling; run-lane only classifies (it
+        # still surfaces `kind` so the lead can route it down the midflight
+        # ambiguity/quality path rather than treat it as a dead transport).
+        kind = getattr(res, "timeout_kind", None)
+        detail = ("went idle (no output past the liveness threshold)"
+                  if kind == "idle"
+                  else "exceeded the lane's latency envelope while still producing output"
+                  if kind == "envelope" else "without exiting")
         return {"class": "transport-death",
-                "message": f"lane timed out after {res.duration_ms}ms without exiting"}
+                "message": f"lane timed out after {res.duration_ms}ms — {detail}",
+                "kind": kind}
     if res.exit_code != 0:
         stderr_tail = (res.stderr or "").strip()
         return {"class": "transport-death",
@@ -94,6 +112,11 @@ def run(args: argparse.Namespace) -> dict:
     resolved_effort = args.effort if args.effort is not None else lane.effort
     resolved_model = args.model if args.model is not None else lane.model
 
+    # Liveness bounds (ADR-0007): CLI flags override the lane's resolved envelope.
+    resolved_idle_s = args.idle_timeout if args.idle_timeout is not None else lane.idle_timeout_s
+    resolved_max_s = args.timeout if args.timeout is not None else lane.max_envelope_s
+    limits = RunLimits(idle_s=resolved_idle_s, max_s=resolved_max_s)
+
     if resolved_effort and caps.supports_effort == "no":
         raise LaneError(
             "config", f"lane '{lane.name}' does not support --effort "
@@ -109,7 +132,7 @@ def run(args: argparse.Namespace) -> dict:
         out=args.out,
         role=args.role,
         schema=args.schema,
-        timeout=args.timeout,
+        timeout=resolved_max_s,   # adapter-internal deadline (agy --print-timeout) = the envelope ceiling
         resume=args.resume,
         effort=resolved_effort,
         model=resolved_model,
@@ -124,7 +147,7 @@ def run(args: argparse.Namespace) -> dict:
         inv = hardening.apply(lane, inv, config)
 
     substrate_impl = SUBSTRATES[args.substrate]()
-    res = substrate_impl.run(inv, args.timeout or DEFAULT_TIMEOUT_SECONDS)
+    res = substrate_impl.run(inv, limits)
 
     # Best-effort scratch cleanup: an adapter that materialized a temp file in
     # the workdir (e.g. grok's `--prompt-file`) lists it in `inv.cleanup_paths`;

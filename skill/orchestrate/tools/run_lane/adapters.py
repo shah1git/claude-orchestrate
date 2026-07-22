@@ -300,9 +300,10 @@ class AgyAdapter(LaneAdapter):
 
         argv = ["agy", "--add-dir", workdir, "--log-file", str(log_file)]
         if req.timeout:
-            # agy's own flag takes a Go duration string; --timeout is
-            # contracted in whole seconds (ADR-0005).
-            argv += ["--print-timeout", f"{req.timeout}s"]
+            # agy's own flag takes a Go duration string in whole seconds. req.timeout
+            # now carries the resolved max envelope (float | None, ADR-0007); when
+            # None the flag is omitted and agy's own default print-timeout governs.
+            argv += ["--print-timeout", f"{int(req.timeout)}s"]
         if req.model:
             argv += ["--model", req.model]
         if req.effort:

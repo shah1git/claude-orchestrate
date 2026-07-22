@@ -63,6 +63,9 @@ VALID_CONFIG = dedent("""\
       enabled: auto-detect
       staging_inputs_only: required
       auth: subscription-oauth-first
+      execution:
+        idle_default_s: 300
+        max_default_s: null
       lanes:
         codex-critic: {model: gpt-5.6-sol, effort: xhigh}
       defaults:
@@ -334,3 +337,31 @@ def test_alias_resolves_without_duplicate_map_entry(tmp_path):
     result = run_validator(skill_dir)
     assert result.returncode == 0
     assert result.stderr == ""
+
+
+# --- ADR-0007 latency-envelope regress guard -------------------------------
+
+
+def test_burst_only_lane_without_latency_envelope_is_a_violation(tmp_path):
+    """ADR-0007 §2.10: a burst-only transport (silent while working) MUST declare
+    a latency_envelope, else the idle floor would kill correct-but-slow work."""
+    broken = VALID_CONFIG.replace(
+        "    codex-critic: {model: gpt-5.6-sol, effort: xhigh}",
+        "    codex-critic: {model: gpt-5.6-sol, effort: xhigh}\n"
+        "    kimi-lane: {model: k, transport: kimi-cli-headless}")
+    assert "kimi-cli-headless" in broken  # sanity: the burst-only lane was added
+    skill_dir = make_skill_dir(tmp_path, config_text=broken)
+    result = run_validator(skill_dir)
+    assert result.returncode == 1
+    assert "latency_envelope" in result.stderr
+
+
+def test_missing_execution_floor_is_a_violation(tmp_path):
+    """The executor must always have a liveness floor (idle_default_s)."""
+    broken = VALID_CONFIG.replace(
+        "  execution:\n    idle_default_s: 300\n    max_default_s: null\n", "")
+    assert "execution:" not in broken  # sanity: the block was dropped
+    skill_dir = make_skill_dir(tmp_path, config_text=broken)
+    result = run_validator(skill_dir)
+    assert result.returncode == 1
+    assert "idle_default_s" in result.stderr
