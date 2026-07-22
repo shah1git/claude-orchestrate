@@ -1979,3 +1979,46 @@ cross_provider:
 
     assert env["model_observed"] is None
     assert env["ok"] is True
+
+
+# =============================================================================
+# 16. Command-verb dispatcher — flag form remains the legacy run contract
+# =============================================================================
+
+
+def test_main_run_verb_uses_the_legacy_run_path(tmp_path, monkeypatch):
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    legacy_argv = [
+        "--lane", "fixture", "--config", str(tmp_path / "config.yaml"),
+        "--prompt-file", str(prompt_file), "--workdir", str(workdir),
+        "--out", str(out),
+    ]
+    received = []
+
+    def fake_run(args):
+        received.append(args)
+        return {"ok": True}
+
+    monkeypatch.setattr(run_lane_main, "run", fake_run)
+
+    assert run_lane_main.main(legacy_argv) == 0
+    assert run_lane_main.main(["run", *legacy_argv]) == 0
+    assert len(received) == 2
+    assert vars(received[0]) == vars(received[1])
+
+
+@pytest.mark.parametrize(("verb", "expected"), [
+    ("detect", {"mode": "detect", "status": "stub"}),
+    ("smoke", {"mode": "smoke", "status": "stub"}),
+])
+def test_main_dispatches_stub_verbs(verb, expected, capsys):
+    assert run_lane_main.main([verb, "--future-argument"]) == 0
+    assert json.loads(capsys.readouterr().out) == expected
+
+
+def test_main_rejects_unknown_bare_verb(capsys):
+    assert run_lane_main.main(["frobnicate"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "unknown command 'frobnicate'" in captured.err
+    assert "run, detect, smoke" in captured.err

@@ -212,7 +212,8 @@ def _error_envelope(args: argparse.Namespace, exc: LaneError) -> dict:
     }
 
 
-def main(argv: list) -> int:
+def _main_run(argv: list) -> int:
+    """Run the original flag-only CLI without changing its contract."""
     args = build_parser().parse_args(argv)
     try:
         env = run(args)
@@ -220,6 +221,43 @@ def main(argv: list) -> int:
         env = _error_envelope(args, exc)
     print(json.dumps(env, ensure_ascii=False, indent=2))
     return 0 if env.get("ok") else 1
+
+
+def _main_detect(argv: list) -> int:
+    from . import detect
+    return detect.main(argv)
+
+
+def _main_smoke(argv: list) -> int:
+    from . import smoke
+    return smoke.main(argv)
+
+
+# Keep this table complete and explicit: a bare first token is a command only
+# when it appears here.  Lane names remain flag values, so they cannot collide
+# with command dispatch.
+VERB_HANDLERS = {
+    "run": _main_run,
+    "detect": _main_detect,
+    "smoke": _main_smoke,
+}
+
+
+def main(argv: list) -> int:
+    """Dispatch a command verb, preserving the original flag-only form."""
+    if not argv or argv[0].startswith("-"):
+        return _main_run(argv)
+
+    verb, command_argv = argv[0], argv[1:]
+    handler = VERB_HANDLERS.get(verb)
+    if handler is None:
+        expected = ", ".join(VERB_HANDLERS)
+        print(
+            f"run-lane: unknown command {verb!r}; expected one of: {expected}",
+            file=sys.stderr,
+        )
+        return 2
+    return handler(command_argv)
 
 
 if __name__ == "__main__":
