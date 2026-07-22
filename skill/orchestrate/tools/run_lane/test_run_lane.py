@@ -1328,6 +1328,10 @@ def test_grok_build_invocation_argv_shape(tmp_path):
     assert "--json-schema" in inv.argv
     assert inv.argv[inv.argv.index("--json-schema") + 1] == '{"type": "object"}'
     assert inv.stdin_policy == "devnull"
+    # The scratch prompt file is registered for post-run cleanup so it never
+    # leaks into the user's tree (runner removes inv.cleanup_paths after the run).
+    assert inv.cleanup_paths == (str(prompt_path),)
+    assert prompt_path.is_file()   # present now; run() unlinks it after substrate.run
 
 
 def test_grok_build_invocation_omits_optional_flags_when_absent(tmp_path):

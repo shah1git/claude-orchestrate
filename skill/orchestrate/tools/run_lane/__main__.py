@@ -126,6 +126,16 @@ def run(args: argparse.Namespace) -> dict:
     substrate_impl = SUBSTRATES[args.substrate]()
     res = substrate_impl.run(inv, args.timeout or DEFAULT_TIMEOUT_SECONDS)
 
+    # Best-effort scratch cleanup: an adapter that materialized a temp file in
+    # the workdir (e.g. grok's `--prompt-file`) lists it in `inv.cleanup_paths`;
+    # it is no longer needed once the process has run, and must not leak into the
+    # user's tree. Failure to remove is never fatal to the run.
+    for scratch_path in getattr(inv, "cleanup_paths", ()):
+        try:
+            Path(scratch_path).unlink()
+        except OSError:
+            pass
+
     # Kimi's hardening is environment/config-only: it deliberately has no
     # vendor sandbox journal and therefore no post-run gate.  Grok alone
     # declares the fail-closed ProfileApplied evidence contract.

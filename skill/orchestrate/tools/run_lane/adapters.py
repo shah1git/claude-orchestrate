@@ -94,6 +94,11 @@ class Invocation:
     # non-empty override value would not honestly clear. Empty for every
     # other adapter.
     env_unset: tuple = ()
+    # Scratch files an adapter materialized in the workdir (e.g. grok writes its
+    # prompt to `.run-lane-grok-prompt-*.md` for argv-length/escaping safety).
+    # The runner best-effort removes these after `substrate.run`, so no adapter
+    # scratch leaks into the user's tree. Empty for adapters that make none.
+    cleanup_paths: tuple = ()
 
 
 @dataclass
@@ -724,6 +729,7 @@ class GrokAdapter(LaneAdapter):
         return Invocation(
             argv=argv, env=env, stdin_policy="devnull", cwd=workdir,
             prompt_addendum=addendum, log_file=None, prompt_length=len(full_prompt),
+            cleanup_paths=(str(prompt_file),),   # remove the scratch prompt after the run
         )
 
     def parse_model_witness(self, res, inv: Invocation) -> ModelObservation:
