@@ -200,8 +200,23 @@ class SubprocessSubstrate(Substrate):
         if timed_out:
             exit_code = -1
         else:
-            proc.wait()
-            exit_code = proc.returncode
+            # Both pipes are at EOF. A well-behaved process has exited or is about
+            # to; a pathological one (closed its fds but still running) must STILL
+            # honour the envelope — a bare `proc.wait()` here would block forever
+            # past both idle_s and max_s, defeating the ceiling ADR-0007 promises.
+            # Bound the final wait by the remaining envelope (or an idle-length
+            # grace when there is no ceiling); overrun is a real timeout.
+            now = self._clock()
+            grace = (max(0.0, limits.max_s - (now - start))
+                     if limits.max_s is not None else limits.idle_s)
+            try:
+                proc.wait(timeout=grace)
+                exit_code = proc.returncode
+            except subprocess.TimeoutExpired:
+                self._terminate(proc)
+                timed_out = True
+                timeout_kind = "envelope" if limits.max_s is not None else "idle"
+                exit_code = -1
 
         if writer is not None:
             writer.join(timeout=0.1)

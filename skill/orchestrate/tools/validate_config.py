@@ -291,12 +291,17 @@ def latency_envelope_violations(config_data: dict, config_path: Path) -> list:
     violations = []
     cp = config_data.get("cross_provider") or {}
 
-    execution = cp.get("execution")
-    if not isinstance(execution, dict) or not isinstance(
-            execution.get("idle_default_s"), (int, float)):
+    execution = cp.get("execution") if isinstance(cp.get("execution"), dict) else {}
+    idle_default = execution.get("idle_default_s")
+    # bool is an int subclass — exclude it, and require strictly positive: an
+    # idle floor of 0 (or a YAML `true`) would make classify_wait kill every lane
+    # on the first tick (now - last_output >= 0 always).
+    if isinstance(idle_default, bool) or not isinstance(idle_default, (int, float)) \
+            or idle_default <= 0:
         violations.append(
             f"{config_path}: cross_provider.execution.idle_default_s must be a "
-            f"number — the executor's liveness floor (ADR-0007) has no default.")
+            f"positive number — the executor's liveness floor (ADR-0007) has no "
+            f"valid default.")
 
     lanes = cp.get("lanes") or {}
     if not isinstance(lanes, dict):

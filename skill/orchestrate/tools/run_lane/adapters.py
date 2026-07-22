@@ -303,7 +303,8 @@ class AgyAdapter(LaneAdapter):
             # agy's own flag takes a Go duration string in whole seconds. req.timeout
             # now carries the resolved max envelope (float | None, ADR-0007); when
             # None the flag is omitted and agy's own default print-timeout governs.
-            argv += ["--print-timeout", f"{int(req.timeout)}s"]
+            # max(1, …) guards a sub-second envelope from truncating to "0s".
+            argv += ["--print-timeout", f"{max(1, int(req.timeout))}s"]
         if req.model:
             argv += ["--model", req.model]
         if req.effort:

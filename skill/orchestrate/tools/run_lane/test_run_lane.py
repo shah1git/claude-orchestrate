@@ -15,6 +15,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -820,6 +821,46 @@ def test_subprocess_substrate_kills_a_forever_streamer_at_envelope(tmp_path):
         inv, substrate.RunLimits(idle_s=10, max_s=0.5))  # never idle, but bounded
     assert res.timed_out is True
     assert res.timeout_kind == "envelope"
+
+
+def test_subprocess_substrate_bounds_a_child_that_eofs_but_keeps_running(tmp_path):
+    """Regress guard for the ADR-0007 critic finding: a child that closes both
+    pipes (EOF) but keeps running must STILL be bounded by the envelope — the
+    final wait must not block past idle_s/max_s, which the plain proc.wait() did."""
+    child = tmp_path / "eof_hang.py"
+    child.write_text(
+        "import os, time\n"
+        "os.close(1)\n"          # close stdout
+        "os.close(2)\n"          # close stderr → both pipes EOF, process alive
+        "time.sleep(30)\n")
+    inv = adapters.Invocation(argv=[sys.executable, str(child)], env={},
+                               stdin_policy="devnull", cwd=str(tmp_path),
+                               prompt_addendum=None, log_file=None)
+    started = time.monotonic()
+    res = substrate.SubprocessSubstrate().run(
+        inv, substrate.RunLimits(idle_s=0.5, max_s=1.0))
+    elapsed = time.monotonic() - started
+    assert res.timed_out is True
+    assert elapsed < 5           # bounded, not the child's full 30s sleep
+
+
+def test_subprocess_substrate_handles_stdin_larger_than_pipe_buffer(tmp_path):
+    """The stdin writer-thread must not deadlock when the prompt exceeds the
+    ~64KB pipe buffer while the child also produces stdout (Notable: otherwise
+    covered only 'by construction')."""
+    child = tmp_path / "echoer.py"
+    child.write_text(
+        "import sys\n"
+        "data = sys.stdin.read()\n"
+        "sys.stdout.write(f'GOT {len(data)}\\n')\n")
+    inv = adapters.Invocation(argv=[sys.executable, str(child)], env={},
+                               stdin_policy="pipe", stdin_data="x" * 500_000,
+                               cwd=str(tmp_path), prompt_addendum=None, log_file=None)
+    res = substrate.SubprocessSubstrate().run(
+        inv, substrate.RunLimits(idle_s=10, max_s=None))
+    assert res.timed_out is False
+    assert res.exit_code == 0
+    assert "GOT 500000" in res.stdout
 
 
 # =============================================================================
