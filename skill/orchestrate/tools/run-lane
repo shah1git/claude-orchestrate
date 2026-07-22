@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""run-lane — thin executable shim (ADR-0005, поправка B).
+
+Adds this directory to sys.path and hands off to run_lane.__main__:main —
+the same "shim next to its logic" idiom as preflight-fable.sh sitting next
+to tools/. All behaviour lives in the run_lane/ package (design-runlane.md
+§1); this file stays a one-liner on purpose so the shim itself can never
+drift from the package it wraps.
+"""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from run_lane.__main__ import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
