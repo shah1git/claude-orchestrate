@@ -273,3 +273,64 @@ def test_chain_terminals_are_not_required_in_maps(tmp_path):
     result = run_validator(skill_dir)
     assert result.returncode == 0
     assert "report-blocker" not in result.stderr
+
+
+# Slice 1's third condition (ADR-0005 §4): a routable name must resolve to
+# something real — a cross_provider.lanes entry, an availability.aliases entry,
+# or a known Claude agent — independently of whether the vendor/surface maps
+# happen to still list it. Here 'ghost-lane' is *present* in both maps (so the
+# first two conditions are silent) but is neither a lane nor an alias: a dead
+# or mistyped routing target that the old two-condition check would have missed.
+_CONFIG_GHOST_ROUTE = (
+    VALID_CONFIG
+    .replace(
+        "architect: [fable, opus, report-blocker]",
+        "architect: [fable, opus, ghost-lane, report-blocker]")
+    .replace(
+        "    anthropic: [fable, opus]",
+        "    anthropic: [fable, opus, ghost-lane]")
+    .replace(
+        "    anthropic-subscription: [fable, opus]",
+        "    anthropic-subscription: [fable, opus, ghost-lane]")
+)
+
+
+def test_routable_name_not_a_lane_or_alias_is_flagged(tmp_path):
+    skill_dir = make_skill_dir(tmp_path, config_text=_CONFIG_GHOST_ROUTE)
+    result = run_validator(skill_dir)
+    assert result.returncode == 1
+    assert "ghost-lane" in result.stderr
+    assert "resolves to neither a" in result.stderr
+    # the maps DID list it — this failure must come from the new third
+    # condition, not from the pre-existing provider_map/surface_map checks
+    assert "is absent from" not in result.stderr
+
+
+# Positive counterpart: an alias (sol-xhigh -> codex-critic) must resolve
+# through availability.aliases without needing a second, duplicate entry of
+# its own in provider_map/surface_map — the exact de-duplication slice 1 does
+# to config.yaml's real provider_map/surface_map (sol-xhigh, grok-4.5 removed
+# as separate entries once the alias dictionary exists).
+_CONFIG_ALIAS_RESOLVES_WITHOUT_DUPLICATE_MAP_ENTRY = (
+    VALID_CONFIG
+    .replace(
+        "architect: [fable, opus, report-blocker]",
+        "architect: [fable, opus, sol-xhigh, report-blocker]")
+    .replace(
+        "  provider_map:\n    anthropic: [fable, opus]",
+        "  aliases:\n    sol-xhigh: codex-critic\n"
+        "  provider_map:\n    anthropic: [fable, opus]\n"
+        "    openai: [codex-critic]")
+    .replace(
+        "  surface_map:\n    anthropic-subscription: [fable, opus]",
+        "  surface_map:\n    anthropic-subscription: [fable, opus]\n"
+        "    openai-codex: [codex-critic]")
+)
+
+
+def test_alias_resolves_without_duplicate_map_entry(tmp_path):
+    skill_dir = make_skill_dir(
+        tmp_path, config_text=_CONFIG_ALIAS_RESOLVES_WITHOUT_DUPLICATE_MAP_ENTRY)
+    result = run_validator(skill_dir)
+    assert result.returncode == 0
+    assert result.stderr == ""

@@ -26,7 +26,39 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 26
+version: 27
+# v27 (2026-07-22, ADR-0005 §4-6, срезы 1-2 «одно имя на исполнителя» + «слить
+#      двойников»): КАНОНИЧЕСКИЕ ИМЕНА + СЛОВАРЬ АЛИАСОВ. Судейские цепочки
+#      называли исполнителя алиасом усилия/модели (sol-xhigh, grok-4.5), а
+#      provider_map/surface_map размножали обе формы (14ce9fe, v26) — теперь
+#      единственное место резолва — availability.aliases; карты держат только
+#      канонические имена лейнов (codex-critic, grok-build), дубли убраны.
+#      tools/validate_config.py расширен третьим условием полноты: каждое
+#      routable-имя обязано резолвиться в лейн cross_provider.lanes, в алиас
+#      или в известного Claude-агента — иначе валидатор красный (мёртвая или
+#      опечатанная цель маршрута).
+#      СЛИТЫ GEMINI-ДВОЙНИКИ. gemini-recon/gemini-recon-cheap/gemini-pro-recon/
+#      gemini-critic (одна модель — Gemini 3.6 Flash (High), один транспорт —
+#      agy-print) сведены к единственному лейну gemini-flash; цепочки
+#      (availability.fallbacks, cross_provider.defaults, обе карты) переведены
+#      на новое имя. Свойство ОСИ requires_pregate_output_inline / delivery:
+#      inline-material (было приколочено к лейну gemini-critic) переехало в
+#      gates.lenses — это требование судейской роли (кто судит), а не
+#      транспорта конкретного лейна (ADR-0005, раздел «Шов»).
+#      PROMOTED/PILOTS СЖАТЫ. cross_provider.promoted и историческая часть
+#      cross_provider.pilots (промоции grok-4.5/kimi-k3, пилот composer-2.5)
+#      перенесены в status:/evidence: соответствующих лейнов; pilots держит
+#      только сам механизм (exit_after_records) для лейнов, которых ещё нет.
+#      ОГОВОРКА (см. отчёт исполнителя тикета): cross_provider.defaults
+#      растворён НЕ ПОЛНОСТЬЮ — пять из шести ключей убраны (буквальные дубли
+#      голов цепочек), но ключ `standards_lens` оставлен и cross_provider.
+#      promoted оставлен пустым, а не удалён: SKILL.md:475 и references/
+#      cross-provider.md:167,540 держат дословные бэктик-ссылки на
+#      `cross_provider.defaults.standards_lens` / `cross_provider.promoted`, а
+#      правка этой прозы — вне границ тикета (запрещено трогать SKILL.md/
+#      references/*.md). Удаление сломало бы tools/validate_config.py
+#      (prose_violations) — а зелёный валидатор тикет требует. Решение — за
+#      лидом: отдельный тикет на правку прозы, либо явное снятие запрета.
 # v26 (2026-07-22, решение владельца): ЕДИНАЯ КОНСОЛЬНАЯ МОДЕЛЬ ВЫЗОВА для внешних
 #      лейнов. Мост /opt/tools/agent-bridge и MCP-серверы УБРАНЫ из пути лейнов —
 #      каждый внешний лейн вызывается своей vendor-CLI (transport объявлен у всех:
@@ -440,6 +472,16 @@ gates:
   # дублировать здесь его model/effort — источник истины строго фронтматтер.
   # spec -> прямой пин МОДЕЛИ: у линзы нет собственного agents/*.md, конфиг —
   # законное (и единственное) место, где её исполнитель вообще пинуется.
+  # v27 (срез 2, ADR-0005, раздел «Шов»): non_agentic_lane_delivery / _never /
+  # requires_pregate_output_inline ниже — свойство ОСИ (кто судит), не лейна.
+  # Раньше жили на лейне gemini-critic (delivery: inline-material, never:
+  # [live-tool-run, self-walk-the-tree], requires_pregate_output_inline: true) и
+  # терялись бы при слиянии gemini-* лейнов в gemini-flash. Правило: КОГДА
+  # исполнитель линзы — кросс-провайдерный лейн без собственного обхода дерева
+  # (сейчас единственный такой — gemini-flash), лид кладёт деливерабл (и для
+  # critic — ещё и вывод детерминированного прегейта) в промпт; лейн живые
+  # инструменты не запускает и дерево не обходит. Агентные исполнители (Claude,
+  # codex-cli, grok-cli, kimi-cli — у всех свой обход/shell) этим не связаны.
   lenses:
     standards:
       question: is it well made — repo's documented coding standards + Fowler's twelve smells (ch. 3)
@@ -448,6 +490,8 @@ gates:
       # spec-lens. Исполнитель разрешается через цепочку; второго исполняемого пина
       # здесь СОЗНАТЕЛЬНО нет. Доставка базы запахов в промпт — срез 4, не здесь.
       executor: availability.fallbacks.standards-lens
+      non_agentic_lane_delivery: inline-material
+      non_agentic_lane_never: [live-tool-run, self-walk-the-tree]
     spec:
       question: is it the right thing, and nothing extra — matches the spec/ticket, including its Out of Scope (scope creep); absorbs the former completeness lens
       # v23 (решение владельца 2026-07-21): жёсткий пин `opus` заменён РАВНЫМ ПУЛОМ
@@ -457,11 +501,20 @@ gates:
       # Исполнитель разрешается через availability.fallbacks.spec-lens — второго
       # исполняемого пина здесь СОЗНАТЕЛЬНО нет: разошлись бы.
       executor: availability.fallbacks.spec-lens
+      non_agentic_lane_delivery: inline-material
+      non_agentic_lane_never: [live-tool-run, self-walk-the-tree]
     critic:                      # глоссарий CONTEXT.md называет линзу «критик»; ключ —
                                  # английский, как и везде в этом файле (routing.classes,
                                  # availability.fallbacks.critic) — тот же исполнитель.
       question: can it be trusted — re-runs tests, tries to refute the deliverable, PASS/FAIL verdict
       executor: critic            # агент; модель — во фронтматтере agents/critic.md
+      non_agentic_lane_delivery: inline-material
+      non_agentic_lane_never: [live-tool-run, self-walk-the-tree]
+      # критик несёт вердикт гейта (verdict: true) -> для неагентного лейна на этой
+      # роли (routing.classes.judgment критик-воркер, availability.fallbacks.critic)
+      # вложенный вывод детерминированного прегейта ОБЯЗАТЕЛЕН — без него линза не
+      # исполнена. Было lanes.gemini-critic.requires_pregate_output_inline.
+      requires_pregate_output_inline: for-non-agentic-lanes
       verdict: true              # единственная линза, дающая вердикт гейта
   # v2.11: для UI-деливераблов живой прогон основного сценария — в детерминированном
   # гейте (реальные обработчики событий, не только зелёная сборка).
@@ -570,21 +623,39 @@ cross_provider:
     # provider.md. Неломающийся вызов (единый argv, артефакт с диска, сверка модели)
     # даст run-lane; это цель, а не текущее состояние.
     # transport у КАЖДОГО лейна = имя его консольной утилиты.
+    # v27 (срез 1, ADR-0005 §4): vendor:/surface: объявлены ПОЛЯМИ лейна на всех
+    # шести оставшихся кросс-провайдерных лейнах (agy-opus/gemini-flash это уже
+    # несли) — единственный источник принадлежности. availability.provider_map/
+    # surface_map остаются механически проверяемым сводом (map_completeness_
+    # violations), а не вторым независимым местом, где принадлежность решается
+    # заново — их содержимое обязано совпасть с полями ниже.
     codex-critic:                  # кросс-модельная линза (зеркало Opus-xhigh критика)
       model: gpt-5.6-sol
       effort: xhigh                # `max` — по решению лида для труднейших вердиктов
       sandbox: read-only
       transport: codex-cli         # `codex exec` (не MCP, не мост)
+      vendor: openai
+      surface: openai-codex
+      status: promoted             # v27, было cross_provider.promoted.codex-critic
+      evidence: "critic 8/8 planted defects, 0 FP, read-only clean; preferred cross-model third lens (ahead of gemini-critic)"
     codex-code:                    # кодинг-рука (зеркало builder/Sonnet-high)
       model: gpt-5.6-terra
       effort: high
       escalation: [terra-xhigh, sol-high, sol-xhigh]
       sandbox: workspace-write     # cwd = выделенный worktree; никогда danger-full-access
       transport: codex-cli
+      vendor: openai
+      surface: openai-codex
+      status: promoted             # v27, было cross_provider.promoted.codex-code
+      evidence: "builder t1 11/11 hidden, t2 15/15 char + 30/30 fixture, 0 oob; well_specified_builder_tickets default + builder fallback"
     codex-recon:                   # дешёвая репо-разведка С shell (read-only)
       model: gpt-5.6-luna
       effort: medium
       bulk_effort: low
+      vendor: openai
+      surface: openai-codex
+      status: promoted             # v27, было cross_provider.promoted.codex-recon
+      evidence: "scout t1/t2 1.0/1.0, no sandbox violations; shell recon + scout availability fallback"
       sandbox: read-only
       transport: codex-cli
     grok-build:                    # v18: продвинут из пилота в полноценный лейн (ключ
@@ -608,7 +679,13 @@ cross_provider:
       #      проверках всплыл бы сразу). Пересмотреть при первом сигнале нечестности.
       critic_eligible: honesty-cleared-2026-07-19
       prefer_for: latency-sensitive   # быстрый оборот сборки/разведки без ultra-цены Codex
-    composer-build:                # ПИЛОТ дешёвого исполнителя (v14; см. pilots ниже)
+      vendor: xai
+      surface: xai
+      status: promoted             # v27, было cross_provider.pilots.promoted.grok-4.5
+                                   # (+ pilots.on_pilot.grok-build_superseded, снят как избыточный
+                                   # — «superseded» уже выражено самим status: promoted)
+      evidence: "architect t3/t4/t5 (root-cause; кросс-модуль с приманкой; два гасящих бага со сверкой величины) — FULL наравне с Opus/Fable/Sol; тест честности пройден: как критик по красным тестам вынес FAIL, файлы не тронул, хотя мог писать. Роли: builder/recon/diagnosis/standards-lens/spec-lens/critic. Оговорки: self-preference guard (не судит grok), честность отслеживаем (METR-запись + одна проба), worktree+hardening обязательны, самый быстрый лейн."
+    composer-build:                # ПИЛОТ дешёвого исполнителя (v14)
                                    # ADR-0005 F2: кандидат на УДАЛЕНИЕ (не критик, не
                                    # применялся, дублирует поверхность xAI).
       model: grok-composer-2.5-fast
@@ -621,6 +698,10 @@ cross_provider:
       hardening: grok_hardening    # v17
       # composer НЕ critic_eligible: на честность/суждение не тестировался (дешёвый
       # быстрый кодер, не k3). never_critic остаётся до отдельной проверки.
+      vendor: xai
+      surface: xai
+      status: on-pilot             # v27, было cross_provider.pilots.on_pilot.composer-2.5
+      evidence: "scout все размеры 1.0; builder t1 FAIL (переставил коды DEP-101↔102 — порядок в спеке не задан явно, 4/5 угадали конвенцию), НО builder t2 PASS (47, чисто). Провал — не слабость логики, а промах вывода НЕЯВНЫХ конвенций. Пилот дешёвого исполнителя (scout крупной механики + builder) с ОГОВОРКОЙ: в тикетах Composer явно прописывать конвенции (порядок кодов/полей), не полагаться на угадывание. worktree (песочница Grok-CLI читает диск), never_critic. Порог решения — cross_provider.pilots.exit_after_records."
     kimi-k3:                       # v18: новый лейн — Moonshot Kimi Code CLI, модель k3,
                                    # контекст 1M, подписка Allegretto (OAuth). Решение
                                    # владельца 2026-07-19 на данных: architect t3/t4/t5 FULL
@@ -637,6 +718,10 @@ cross_provider:
       # v19.1 (2026-07-19): ограничение client_data СНЯТО решением владельца
       # (он контролёр данных клиентов). Kimi обучается на контенте без opt-out —
       # это принято осознанно; данные клиентов через Kimi разрешены.
+      vendor: moonshot
+      surface: moonshot
+      status: promoted             # v27, было cross_provider.pilots.promoted.kimi-k3
+      evidence: "architect t3/t4/t5 — FULL наравне с Opus; тест честности пройден (FAIL по красным тестам, файлы не тронул). recon: 1M-контекст полигоном не задействован (греппится), преимущества над haiku нет — брать не ради recon, а как фронтир-судью/билдера. Роли те же. Оговорки: self-preference guard, worktree+OS-изоляция (своей песочницы нет), kimi_hardening."
     # =========================================================================
     # ФОРМА ВЫЗОВА agy — ЕДИНСТВЕННАЯ ПРАВИЛЬНАЯ (v23, 2026-07-21, установлено
     # экспериментом + подтверждено CHANGELOG/issue #76 репозитория antigravity-cli):
@@ -747,41 +832,34 @@ cross_provider:
       # не заметил бы. Данные: recon t3 450/450 (файл ответа побайтово совпал с
       # gemini-flash), диагностика через тот же канал отработала штатно.
       never_standards_lens: true   # ось требует не-Claude по построению
-    gemini-flash:                  # алиас максимальной Flash для судейских пулов
+    gemini-flash:                  # v27 (срез 2, ADR-0005 §5): ЕДИНСТВЕННЫЙ Gemini-лейн —
+                                   # gemini-recon, gemini-recon-cheap, gemini-pro-recon и
+                                   # gemini-critic слиты сюда: буквально одна модель (Gemini
+                                   # 3.6 Flash (High)) и один транспорт (agy-print), четыре
+                                   # ключа выражали одно и то же (v23 уже признавал это в
+                                   # комментариях трёх из четырёх — «при следующей правке
+                                   # слить»). Роли и вход в судейские пулы — availability.
+                                   # fallbacks ниже.
       model: "Gemini 3.6 Flash (High)"
       transport: agy-print
       vendor: google
       surface: google-antigravity
-    gemini-critic:                 # альтернативная кросс-линза
-      # v23, решение владельца 2026-07-21: Pro НЕ используем нигде — вместо него
-      # последний Flash. Лейн заводился ради 2M-контекста Pro для ревью больших
-      # диффов; этого преимущества у Flash нет (у 3.5 был 1M). Следствие принято
-      # сознательно: очень большой дифф придётся резать на части, как уже
-      # предусмотрено в цепочке gemini-pro-recon («2M->1M с нарезкой»).
-      model: "Gemini 3.6 Flash (High)"
-      transport: agy-print         # форма вызова — в рамке выше (флаги ДО -p, stdin закрыт)
+      roles: [recon, scout, critic, spec-lens, standards-lens]
       # v23 (решение владельца 2026-07-21): ДОПУЩЕН ВО ВСЕ ТРИ СУДЕЙСКИЕ РОЛИ —
-      # critic, spec-lens, standards-lens. Прежний запрет (critic_blocked_by:
-      # agy-print-tool-unreliability) СНЯТ, но не «прощён», а ЗАМЕНЁН УСЛОВИЕМ.
-      # Что было: 2026-07-19 Gemini на роли критика «досочинил» результат («5 passed»
-      # при красных тестах). Разбор 2026-07-21: наблюдение снято на форме вызова, в
-      # которой промпт до модели не доезжал вовсе (ловушка 1 в рамке выше); версии CLI
-      # 1.1.1/1.1.3 с тех пор починили ровно эти отказы. Но ЖИВОЙ прогон тестов через
-      # agy -p на правильной форме мы всё равно НЕ проверяли.
-      # Условие вместо запрета — тот же принцип, что уже применён к разведке
-      # («Gemini читает данное, а не ходит сам»): судит по ВЛОЖЕННОМУ материалу.
-      delivery: inline-material    # деливерабл, тикет и ВЫВОД детерминированных
-                                   # проверок кладутся в промпт лидом
-      never: [live-tool-run, self-walk-the-tree]
-      # Почему это безопасно именно здесь: (а) честность Gemini при данных в промпте
-      # ПРОВЕРЕНА — увидев вывод pytest, вынес FAIL и назвал оба упавших теста;
-      # (б) детерминированный прегейт всё равно исполняется НАШИМ кодом ДО линзы, так
-      # что перезапуск тестов самой моделью не единственный источник правды;
-      # (в) ложный PASS требует, чтобы модель соврала о ВИДИМОМ ей выводе, а не о
-      # неполученном — это уже вопрос честности, а не транспорта, и он проверен.
-      # Ограничение остаётся ровно одно: ось critic несёт вердикт гейта, поэтому лид
-      # ОБЯЗАН вложить вывод прегейта. Линза без вложенного вывода = не исполненная ось.
-      requires_pregate_output_inline: true
+      # critic, spec-lens, standards-lens (прежний запрет critic_blocked_by:
+      # agy-print-tool-unreliability СНЯТ, но не «прощён», а ЗАМЕНЁН УСЛОВИЕМ: судит
+      # по ВЛОЖЕННОМУ материалу, живые инструменты запрещены). v27: условие — это
+      # свойство ОСИ (кто судит), не лейна, поэтому оно переехало в gates.lenses
+      # (non_agentic_lane_delivery / non_agentic_lane_never / requires_pregate_
+      # output_inline там) — раньше сидело здесь как lanes.gemini-critic.delivery /
+      # .never / .requires_pregate_output_inline (ADR-0005, раздел «Шов»).
+      # Честность при данных в промпте ПРОВЕРЕНА: увидев вывод pytest, Gemini вынес
+      # FAIL и назвал оба упавших теста (разбор 2026-07-21). Инцидент #6 (обход
+      # `find /`, контаминация соседа) — свойство формы вызова (`--add-dir` не
+      # передавался), не модели; правильная форма — в рамке выше.
+      verify_first_run: model-label-in-agy-log
+      # ПЕРВЫЙ ЖЕ прогон сверить с журналом agy: 'Propagating selected model
+      # override' обязана дать «Gemini 3.6 Flash (High)».
     # =====================================================================
     # NB: v24 СНИМАЛ Gemini со всех ролей и ОТМЕНЁН в v25 (см. шапку файла) —
     # снятие стояло на ошибке ИЗМЕРЕНИЯ (грейдился пересказ в печати, а не файл
@@ -789,54 +867,11 @@ cross_provider:
     # Gemini: диагностика 3/3, разведка 48/48 и 450/450, ни одного провала.
     # Поле `routed: false` из того плана НИКОГДА не вводилось; лейны маршрутизируются.
     # Полный разбор — benchmark/results/2026-07-21-gemini-3.6-flash/RESULTS.md.
+    # v27: четыре прежних ключа (gemini-recon, gemini-recon-cheap, gemini-pro-recon,
+    # gemini-critic) слиты в gemini-flash выше; их отдельная история решений (v19/v23,
+    # включая not_on_pilot.gemini-recon-cheap — снятое тем же v23) осталась в git-
+    # истории файла, здесь не дублируется, чтобы не плодить лишние ключи.
     # =====================================================================
-    gemini-recon:                  # большой контекст / веб-разведка
-      model: "Gemini 3.6 Flash (High)"   # v23: 3.5 -> 3.6 (вышла 2026-07-21)
-      transport: agy-print
-    gemini-recon-cheap:            # высокообъёмная механика — ДЕФОЛТ роли scout (v23)
-      # v23, решение владельца 2026-07-21: усилие LOW -> HIGH. Low экономил ресурс,
-      # который у владельца не дефицитен (Google-квота практически не исчерпывается);
-      # платить качеством разведки за экономию того, чего не жалко, незачем.
-      # ИМЯ ЛЕЙНА («cheap») теперь описывает не усилие, а роль: высокообъёмная
-      # механика. Модель и усилие у него совпали с gemini-recon — лейны различаются
-      # только назначением; при следующей правке их стоит либо слить, либо
-      # переименовать, чтобы имя не обещало дешевизны, которой нет.
-      model: "Gemini 3.6 Flash (High)"   # v23: 3.5->3.6 (правило «последний Flash»),
-                                   # Low->High (решение владельца).
-                                   # ОГОВОРКА: полигонные данные этого лейна (scout
-                                   # t3=38 — единственный дешёвый, кто прошёл; t1/t2)
-                                   # сняты на 3.5 Low. Обе смены — в сторону более
-                                   # сильной конфигурации, так что риск качеству не
-                                   # растёт; но данными новая связка не подтверждена.
-      # ТРАНСПОРТ ВОЗВРАЩЁН на прямой agy (был ask-gemini MCP несколькими часами
-      # ранее в этой же ревизии). Причина смены решения: обёртка ask-gemini выбор
-      # модели ИГНОРИРУЕТ (Flash-lock в print-режиме) — на ней указание «High» не
-      # исполнилось бы вовсе, лейн молча работал бы чем дают. Прямой канал модель
-      # держит, и это ПРОВЕРЯЕМО по журналу (см. рамку выше). Прежнее возражение
-      # против прямого канала («все удачные прогоны полигона — на MCP») снято:
-      # неудачи прямого канала объясняются ловушкой (1) — промпт до модели не
-      # доезжал. Инцидент #6 (обход `find /` с заходом в соседний воркспейс) к форме
-      # вызова отношения не имеет — от него защищают два условия ниже, они остаются.
-      transport: agy-print
-      # ПЕРВЫЙ ЖЕ прогон этого лейна сверить с журналом agy: строка
-      # 'Propagating selected model override' обязана дать «Gemini 3.6 Flash (High)».
-      verify_first_run: model-label-in-agy-log
-      delivery: inline-material    # материал даёт ЛИД (результаты поиска, файлы);
-                                   # модель читает данное, а не ищет сама
-      never: self-walk-the-tree    # самостоятельный обход дерева/ФС этим лейном
-                                   # ЗАПРЕЩЁН (инцидент #6) — не деградация качества,
-                                   # а контаминация соседних рабочих деревьев
-    gemini-pro-recon:              # v19: заводился как глубокая разведка в 2M-контексте
-      # v23, решение владельца 2026-07-21: Pro не используем — последний Flash вместо
-      # него. ЭТО СНИМАЕТ ЕДИНСТВЕННОЕ отличие лейна: он заводился ровно ради 2M, и
-      # теперь совпадает с gemini-recon по модели, усилию и транспорту. Ключ ОСТАВЛЕН
-      # (на него ссылается проза и своя цепочка замен), но как самостоятельный лейн он
-      # больше ничего не выражает — при следующей правке слить с gemini-recon.
-      # Практическое следствие: потолок одного чтения падает с 2M до контекста Flash,
-      # поэтому очень большие корпуса режутся на части — ровно то, что уже записано в
-      # его цепочке замен («2M->1M с нарезкой»).
-      model: "Gemini 3.6 Flash (High)"
-      transport: agy-print
     # v23: лейн gemini-spec-lens (Gemini 3.1 Pro в spec-линзе) заведён и СНЯТ тем же
     # днём решением владельца 2026-07-21. Ось судейская, и вход на неё Gemini держался
     # на связке «Pro достижим только прямым agy» + «прямой канал безопасен, пока не
@@ -883,15 +918,24 @@ cross_provider:
   # при 3–4 параллельных проектах недельное окно Claude стабильно исчерпывается
   # за 1–2 дня до сброса; ждать исчерпания значит опоздать ровно на эти дни.
   defaults:
-    # v26: три ключа возвращены к реальности после отмены снятия Gemini (v25).
-    # Они дублируют головы соответствующих цепочек и потому дрейфуют при каждой
-    # правке — ADR-slice 2 предлагает РАСТВОРИТЬ этот блок в пользу цепочек; до
-    # решения владельца держим согласованным вручную.
-    web_recon: gemini-recon                         # веб-разведка (Gemini восстановлен)
-    big_context_recon: gemini-recon                 # 1M-контекст Flash; альт. kimi-k3
-    inline_mechanical_sweeps: gemini-recon-cheap    # = голова цепочки scout
-    shell_mechanical_sweeps: codex-recon            # нужен shell (у scout его нет)
-    well_specified_builder_tickets: codex-code
+    # v27 (срез 2, ADR-0005 §5 «растворить defaults в цепочки»): пять ключей,
+    # буквально дублировавшие головы своих цепочек (web_recon/big_context_recon/
+    # inline_mechanical_sweeps/shell_mechanical_sweeps/well_specified_builder_
+    # tickets — было v26, см. git-история), УБРАНЫ: голова цепочки уже читается
+    # из availability.fallbacks.<роль>[0], второй записи для того же значения не
+    # требуется. web_recon/big_context_recon читаются из fallbacks.gemini-flash /
+    # роли scout/builder; inline_mechanical_sweeps — из fallbacks.scout (голова —
+    # gemini-flash); shell_mechanical_sweeps — из fallbacks.codex-recon; well_
+    # specified_builder_tickets — из fallbacks.builder.
+    #
+    # ОГОВОРКА (не полное растворение — см. отчёт исполнителя тикета и запись
+    # v27 в шапке файла). Ключ `standards_lens` НИЖЕ ОСТАВЛЕН нетронутым: он и
+    # так не дублировал значение (его значение — сама строка "availability.
+    # fallbacks.standards-lens", ссылка, а не лейн), но САМ ПУТЬ `cross_provider.
+    # defaults.standards_lens` дословно цитируется в references/cross-provider.
+    # md:167,540 обратными кавычками — правка/удаление этой прозы вне границ
+    # тикета (BOUNDARIES запрещает трогать references/*.md), а удаление ключа
+    # без правки прозы уронило бы tools/validate_config.py (prose_violations).
     # v12 (срез 4, issue #8): постоянный маршрут Standards-оси фиксированного гейта —
     # не opt-in и не чередование (заменяет third_lens.alternate v3–v10: то чередование
     # обслуживало опциональную третью линзу, которой с v11 не существует). Fallback-
@@ -907,32 +951,25 @@ cross_provider:
   # ролей 2026-07-11 (benchmark/RESULTS.md); мотив — квота (см. комментарий к
   # defaults выше). Качество не сдвинуто: never_shift ниже действует без
   # изменений, judgment-класс и первичный грейдер каждого гейта остаются Claude.
-  promoted:
-    codex-recon:   {evidence: "scout t1/t2 1.0/1.0, no sandbox violations", as: "shell recon + scout availability fallback"}
-    codex-code:    {evidence: "builder t1 11/11 hidden, t2 15/15 char + 30/30 fixture, 0 oob", as: "well_specified_builder_tickets default + builder fallback"}
-    codex-critic:  {evidence: "critic 8/8 planted defects, 0 FP, read-only clean", as: "preferred cross-model third lens (ahead of gemini-critic)"}
+  # v27 (срез 2, ADR-0005 §5 «сжать promoted/pilots»): три записи (codex-recon,
+  # codex-code, codex-critic) переехали в status:/evidence: соответствующих
+  # лейнов (cross_provider.lanes) — блок оставлен пустым, а не удалён: SKILL.md:
+  # 475 держит дословную бэктик-ссылку `cross_provider.promoted`, вне границ
+  # тикета (references/*.md и SKILL.md трогать нельзя). Пустой блок эту ссылку
+  # резолвит, живых данных здесь больше нет — см. лейны выше.
+  promoted: {}
 
   # Пилоты кросс-лейнов: механизм сохранён для будущих лейнов (новый провайдер
   # проходит тот же путь: проверка по каталогу коннектора -> полигон ролей ->
-  # пилот с реальным трафиком -> решение пользователя). Сейчас на пилоте никого.
+  # пилот с реальным трафиком -> решение пользователя).
+  # v27 (срез 2): исторические записи (grok-4.5/kimi-k3 промоция, composer-2.5
+  # пилот) сжаты в status:/evidence: соответствующих лейнов (grok-build,
+  # kimi-k3, composer-build) — здесь остаётся только сам механизм для лейнов,
+  # которых ещё нет. Записи not_on_pilot.gemini-recon-cheap и примыкающий
+  # комментарий про gemini-critic — сняты: обе относились к лейнам, слитым в
+  # gemini-flash, и уже были отменены v23 (история — git log этого файла).
   pilots:
     exit_after_records: 10           # порог решения по каждому будущему лейну
-    promoted:
-      grok-4.5: "v18 (2026-07-19, решение владельца на данных): ПРОДВИНУТ из пилота в полный лейн. architect t3/t4/t5 (root-cause; кросс-модуль с приманкой; два гасящих бага со сверкой величины) — FULL наравне с Opus/Fable/Sol. Тест честности пройден: как критик по красным тестам вынес FAIL, файлы не тронул, хотя мог писать. Роли: builder/recon/diagnosis/standards-lens/spec-lens/critic. Оговорки: self-preference guard (не судит grok), честность отслеживаем (METR-запись + одна проба), worktree+hardening обязательны, самый быстрый лейн."
-      kimi-k3: "v18 (2026-07-19, решение владельца на данных): новый полный лейн. architect t3/t4/t5 — FULL наравне с Opus. Тест честности пройден (FAIL по красным тестам, файлы не тронул). recon: 1M-контекст полигоном не задействован (греппится), преимущества над haiku нет — брать не ради recon, а как фронтир-судью/билдера. Роли те же. Оговорки: self-preference guard, worktree+OS-изоляция (своей песочницы нет), kimi_hardening."
-    on_pilot:
-      grok-build_superseded: "промоция см. promoted.grok-4.5 (v18); прежний пилотный статус v13 снят."
-      composer-2.5: "v14 (пересмотр v13 по возражению владельца): scout все размеры 1.0; builder t1 FAIL (переставил коды DEP-101↔102 — порядок в спеке не задан явно, 4/5 угадали конвенцию), НО builder t2 PASS (47, чисто). Провал — не слабость логики, а промах вывода НЕЯВНЫХ конвенций. Пилот дешёвого исполнителя (scout крупной механики + builder) с ОГОВОРКОЙ: в тикетах Composer явно прописывать конвенции (порядок кодов/полей), не полагаться на угадывание. worktree (песочница Grok-CLI читает диск), never_critic. ≥10 записей до промоции."
-    not_on_pilot:
-      gemini-recon-cheap: "scout t2 passed only via ask-gemini MCP inlined; bridge path unreliable — keep as fallback, not promoted. v23 (2026-07-21): ОБА суждения пересмотрены — путь моста был сломан формой вызова (промпт '--model'), а MCP-путь тайно отдавал 3.1 Pro вместо Flash. Лейн промотирован в дефолт scout на ПРЯМОМ agy; обёртка лейнам запрещена."
-    # v9 (ре-тест 2026-07-12, benchmark/results/2026-07-12-gemini-retest): gemini-critic
-    # СНЯТ с not_on_pilot — прошлые 2/2 промаха были свойством транспорта, не модели
-    # (Gemini прошла задачи на обоих путях). Тогдашний вывод «рабочий путь линзы —
-    # ask-gemini MCP, он Flash-locked» v23 ОТМЕНЁН: обёртка не передаёт модель вовсе и
-    # отдавала дефолт agy (3.1 Pro), то есть заявлять через неё нельзя НИ Pro, НИ Flash —
-    # она непригодна как транспорт лейна в принципе (pin only what connector exposes). Нативный agy honores модель, но не промотирован: требует ручных
-    # permission-подтверждений (не headless) + --sandbox → find / → контаминация соседа
-    # (живой инцидент #6, incidents.md). Проза — references/cross-provider.md, Use 1.
 
   # Что НЕ сдвигается мандатом никогда (качество — инвариант, квота — нет):
   never_shift:
@@ -1039,10 +1076,12 @@ availability:
     critic:                                      # грейдер не обязан быть Claude (v18);
       # v23: пятым добавлен gemini-critic (Gemini 3.6 Flash High) — решение владельца
       # 2026-07-21. Условие допуска на ЭТУ ось строже прочих: вывод детерминированного
-      # прегейта вкладывается в промпт (lanes.gemini-critic.requires_pregate_output_inline).
+      # прегейта вкладывается в промпт (v27: gates.lenses.critic.requires_pregate_
+      # output_inline — было lanes.gemini-critic.requires_pregate_output_inline).
       # v25: gemini ВОЗВРАЩЁН (снятие v24 отменено — см. шапку), добавлен agy-opus.
-      # Условие для gemini на ЭТОЙ оси остаётся: вывод прегейта вкладывается в промпт.
-      - equal: [opus, sol, grok-4.5, kimi-k3, gemini-critic, agy-opus]   # independence_filter — ДО ротации
+      # v27: gemini-critic слит в gemini-flash (срез 2, ADR-0005 §5); условие на ЭТОЙ
+      # оси остаётся — вывод прегейта вкладывается в промпт.
+      - equal: [opus, sol, grok-4.5, kimi-k3, gemini-flash, agy-opus]   # independence_filter — ДО ротации
       - report-blocker
     # v23: OpenAI-лейн в сборке назван явно, чтобы модель не пряталась за алиасом.
     # codex-code = gpt-5.6-terra, effort high (кодовая рука семейства; единственная
@@ -1087,9 +1126,10 @@ availability:
     #           задачу ему, поиск должен выполнить ЛИД — то есть тот же Claude
     #           сделает работу, а лейн лишь перепишет ответ. Разгрузки ноль.
     #   ЧИТАТЬ  (вот корпус: раздели по признаку, извлеки, сверь, посчитай) ->
-    #           gemini-recon-cheap. Материал уже собран и кладётся в промпт; на
-    #           таком задании (scout t3=38, приманка инлайном) он единственный из
-    #           дешёвых прошёл чисто, а объём чтения ему безразличен.
+    #           gemini-flash (v27: было gemini-recon-cheap, слит сюда). Материал уже
+    #           собран и кладётся в промпт; на таком задании (scout t3=38, приманка
+    #           инлайном) он единственный из дешёвых прошёл чисто, а объём чтения ему
+    #           безразличен.
     # Экономика этого деления: токены жжёт ЧТЕНИЕ материала, не сам поиск (перебрать
     # репозиторий грепом дёшево, прочитать сотни файлов дорого). Поэтому на Google-
     # квоту уходит тяжёлая половина, на Claude остаётся лёгкая — цель мандата
@@ -1102,7 +1142,7 @@ availability:
     # (recon t3, 601 файл: gemini-flash 450/450, agy-opus 450/450 — файлы ответов
     # побайтово идентичны). Внутри головы — ротация, чтобы не выбирать один и тот же.
     scout:
-      - equal: [gemini-recon-cheap, agy-opus]
+      - equal: [gemini-flash, agy-opus]   # v27: было gemini-recon-cheap, слит в gemini-flash
       - haiku
       - codex-recon
       - grok-build
@@ -1116,7 +1156,7 @@ availability:
       # v25 (решение владельца 2026-07-21): БЕСПЛАТНЫЙ ПУЛ ВПЕРЕДИ, как и у scout.
       # Оси не нужны живые инструменты — она сверяет деливерабл со спекой, поэтому
       # ограничений на лейны Google-пула здесь нет вовсе.
-      - equal: [gemini-critic, agy-opus]        # квота не дефицитна -> первыми
+      - equal: [gemini-flash, agy-opus]         # квота не дефицитна -> первыми (v27: было gemini-critic)
       - equal: [opus, sol, grok-4.5, kimi-k3]   # дефицитные/платные — вторым эшелоном
       - report-blocker
     # Кросс-провайдерные лейны:
@@ -1126,9 +1166,19 @@ availability:
     grok-build:        [grok-build, codex-code, sonnet, kimi-k3]
     composer-build:    [composer-build, codex-code, sonnet]
     kimi-k3:           [kimi-k3, sonnet, codex-code, grok-build]
-    gemini-recon:      [gemini-recon, codex-recon, builder]
-    gemini-recon-cheap: [gemini-recon-cheap, codex-recon, scout]
-    gemini-pro-recon:  [gemini-pro-recon, kimi-k3, codex-recon, builder]    # 2M->1M с нарезкой
+    # v27 (срез 2, ADR-0005 §5): три прежних ключа (gemini-recon [gemini-recon,
+    # codex-recon, builder]; gemini-recon-cheap [gemini-recon-cheap, codex-recon,
+    # scout]; gemini-pro-recon [gemini-pro-recon, kimi-k3, codex-recon, builder]) —
+    # один и тот же лейн под тремя именами — слиты в ОДНУ цепочку gemini-flash: союз
+    # прежних кросс-провайдерных продолжений (codex-recon, kimi-k3, builder).
+    # ТОЧНОСТЬ (crit-config Notable #1): прежняя gemini-recon-cheap имела в хвосте ещё
+    # терминал scout — он здесь опущен НАМЕРЕННО, а не «ничего не потеряно»: scout-side
+    # guidance (never/delivery) живёт в комментарии роли scout, а сама роль scout несёт
+    # собственную цепочку с Claude-полами (haiku, lead-inline). Дублировать scout-хвост
+    # в кросс-провайдерной цепочке gemini-flash не требуется.
+    # scout своей роли не лишается — её собственная равная голова (scout: выше)
+    # по-прежнему первой пробует gemini-flash независимо от этой цепочки.
+    gemini-flash:      [gemini-flash, codex-recon, kimi-k3, builder]
     # Ось Standards фиксированного гейта: gemini УБРАН (заблокирован v19), заменён
     # честными критик-eligible. Терминал sonnet-inline-note (гейт-ось пропущена быть
     # не может, в отличие от codex-critic ad hoc, что легитимно кончается skip-third-lens).
@@ -1147,7 +1197,7 @@ availability:
       # v25: gemini ВОЗВРАЩЁН. agy-opus сюда НЕ ставится: ось требует НЕ-Claude
       # читателя по построению, а вендор той модели — Anthropic (квота Google этого
       # не меняет). Ровно тот случай, ради которого вендор и поверхность разведены.
-      - equal: [gemini-critic, codex-critic, grok-4.5, kimi-k3]
+      - equal: [gemini-flash, codex-critic, grok-4.5, kimi-k3]   # v27: было gemini-critic
       - sonnet-inline-note
 
   # v23: КАК выбирать внутри элемента `equal: [...]`. Без этого блока «равные веса»
@@ -1188,38 +1238,50 @@ availability:
   # одной моделью, выбирать было не из чего, и правило нечего было применять.
   independence_filter: skip-producer-vendor
 
+  # v27 (срез 1, ADR-0005 §4 «одно каноническое имя + словарь алиасов»): единственное
+  # место, где алиас усилия/модели резолвится в свой канонический лейн. Судейские
+  # цепочки выше называют исполнителя алиасом (sol-xhigh, grok-4.5), не именем лейна
+  # cross_provider.lanes (codex-critic, grok-build) — раньше это заставляло
+  # provider_map/surface_map хранить ОБЕ формы (14ce9fe, v26: «дыра independence_
+  # filter закрыта ценой легитимизации разнобоя» — см. ADR-0005 §«Что уже сделано»).
+  # Теперь карты ниже держат только канонические имена; tools/validate_config.py
+  # резолвит алиас через этот словарь ПЕРЕД проверкой карт (map_completeness_
+  # violations), так что второй записи для алиаса в картах не требуется.
+  aliases:
+    sol: codex-critic          # Sol на дефолтном эффорте лейна (critic/spec-lens цепочки)
+    sol-xhigh: codex-critic    # Sol на xhigh (architect-цепочка, cross_provider.lanes.codex-critic.effort)
+    grok-4.5: grok-build       # имя модели лейна grok-build в судейских цепочках
+
   # Карта «провайдер -> его лейны/агенты». ЕДИНСТВЕННОЕ место, где принадлежность
   # выражена явно (раньше читалась из комментариев). Валидатор проверяет полноту.
   # v25: карта отвечает на вопрос «ЧЕЙ ЭТО ВЕНДОР» — им пользуется independence_filter
   # (не судить деливерабл своего вендора). Ключевой случай: agy-opus работает на квоте
   # Google, но модель — Anthropic, поэтому он ЗДЕСЬ, а не в google.
+  # v27: sol-xhigh/grok-4.5 (v26) и gemini-recon/gemini-recon-cheap/gemini-pro-recon/
+  # gemini-critic (слиты в gemini-flash, срез 2) убраны как отдельные записи — первые
+  # резолвятся через aliases выше, вторые больше не существуют как отдельные лейны.
+  # Значения ниже обязаны совпасть с полем vendor: на каждом лейне cross_provider.lanes.
   provider_map:
     anthropic: [architect, builder, scout, critic, opus, fable, sonnet, haiku, spec-lens, lead,
                 agy-opus]
-    # v26: добавлены sol-xhigh и grok-4.5 — они стоят в судейских цепочках как
-    # алиасы усилия (sol-xhigh = sol на xhigh; grok-4.5 = модель лейна grok-build),
-    # но в карте их не было -> independence_filter НЕ опознавал их вендора и молча
-    # пропускал (Grok мог судить работу Grok). Дыра существовала с ввода алиасов в
-    # цепочки; закрыта здесь + валидатором ниже (tools/validate_config.py), чтобы
-    # не открылась снова. КОРЕНЬ (за пределами этой правки, задача ADR-слайса 1):
-    # цепочки мешают четыре словаря имён — агенты, алиасы моделей, лейны, терминалы.
-    openai:    [codex-critic, codex-code, codex-recon, sol, sol-xhigh]
-    xai:       [grok-build, composer-build, grok-4.5]
+    openai:    [codex-critic, codex-code, codex-recon]
+    xai:       [grok-build, composer-build]
     moonshot:  [kimi-k3]
-    google:    [gemini-recon, gemini-recon-cheap, gemini-pro-recon, gemini-critic, gemini-flash]
+    google:    [gemini-flash]
 
   # v25: ВТОРАЯ карта, отдельная от provider_map, — «ЧЬЯ ЭТО ПОВЕРХНОСТЬ И КВОТА».
   # Ею пользуется breaker: гаснут вместе те, кто делит подписку и транспорт, а не те,
   # кто делит вендора модели. Без этого разделения agy-opus считался бы то Claude-ом
   # для отказа квоты (неверно: его окно — Google), то не-Claude для независимости
   # (неверно и опасно: он Claude). Один лейн — два разных ответа на два разных вопроса.
+  # v27: та же дедупликация, что у provider_map выше — значения обязаны совпасть с
+  # полем surface: на каждом лейне cross_provider.lanes.
   surface_map:
     anthropic-subscription: [architect, builder, scout, critic, opus, fable, sonnet, haiku,
                              spec-lens, lead]
-    google-antigravity:     [gemini-recon, gemini-recon-cheap, gemini-pro-recon, gemini-critic,
-                             gemini-flash, agy-opus]
-    openai-codex:           [codex-critic, codex-code, codex-recon, sol, sol-xhigh]
-    xai:                    [grok-build, composer-build, grok-4.5]
+    google-antigravity:     [gemini-flash, agy-opus]
+    openai-codex:           [codex-critic, codex-code, codex-recon]
+    xai:                    [grok-build, composer-build]
     moonshot:               [kimi-k3]
 
   # Предохранитель по провайдеру (§1 проекта). Run-scoped, ведёт лид на естественных
