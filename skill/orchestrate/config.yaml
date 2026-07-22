@@ -26,7 +26,14 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 27
+version: 28
+# v28 (2026-07-22, ADR-0005 поправка B — решение двух независимых архитекторов при
+#      делегации владельца «пусть агенты решат»): контракт run-lane расширен
+#      (--substrate/--effort/--model, поле substrate в конверте, capabilities-гибрид).
+#      Следствия в config: codex-code.escalation переписан из голых строк в
+#      структурные {model?, effort}-override (write-песочница лейна сохранена);
+#      алиас sol-xhigh удалён (тождествен sol после выделения --effort), architect-
+#      цепочка sol-xhigh -> sol. ADR-0006 поправка A: Orca — ось подложки, не транспорт.
 # v27 (2026-07-22, ADR-0005 §4-6, срезы 1-2 «одно имя на исполнителя» + «слить
 #      двойников»): КАНОНИЧЕСКИЕ ИМЕНА + СЛОВАРЬ АЛИАСОВ. Судейские цепочки
 #      называли исполнителя алиасом усилия/модели (sol-xhigh, grok-4.5), а
@@ -641,7 +648,16 @@ cross_provider:
     codex-code:                    # кодинг-рука (зеркало builder/Sonnet-high)
       model: gpt-5.6-terra
       effort: high
-      escalation: [terra-xhigh, sol-high, sol-xhigh]
+      # v28 (ADR-0005 поправка B, решение агентов при делегации владельца): лестница
+      # эскалации из голых строк -> структурные {model?, effort}-override НАД этим
+      # лейном. Прежний вид [terra-xhigh, sol-high, sol-xhigh] был неисполним: имена
+      # не резолвились нигде, а sol-xhigh вёл в read-only codex-critic для WRITE-
+      # задачи. Кортеж наследует sandbox/role/transport лейна (write сохраняется),
+      # меняет лишь модель+эффорт. run-lane получает их флагами --model/--effort.
+      escalation:
+        - {effort: xhigh}                      # был terra-xhigh: та же terra, выше эффорт
+        - {model: gpt-5.6-sol, effort: high}   # был sol-high
+        - {model: gpt-5.6-sol, effort: xhigh}  # был sol-xhigh (write-песочница сохранена)
       sandbox: workspace-write     # cwd = выделенный worktree; никогда danger-full-access
       transport: codex-cli
       vendor: openai
@@ -1071,7 +1087,7 @@ availability:
       # первым уйдёт opus, а не agy-opus. Если нужно именно ПРЕДПОЧТЕНИЕ (Google-пул
       # только когда четвёрка недоступна) — это два отдельных `equal`-элемента, как
       # сделано у spec-lens; здесь сознательно один пул.
-      - equal: [opus, sol-xhigh, grok-4.5, kimi-k3, agy-opus, gemini-flash]
+      - equal: [opus, sol, grok-4.5, kimi-k3, agy-opus, gemini-flash]   # v28: sol-xhigh -> sol (эффорт xhigh из лейна)
       - report-blocker
     critic:                                      # грейдер не обязан быть Claude (v18);
       # v23: пятым добавлен gemini-critic (Gemini 3.6 Flash High) — решение владельца
@@ -1248,8 +1264,10 @@ availability:
   # резолвит алиас через этот словарь ПЕРЕД проверкой карт (map_completeness_
   # violations), так что второй записи для алиаса в картах не требуется.
   aliases:
-    sol: codex-critic          # Sol на дефолтном эффорте лейна (critic/spec-lens цепочки)
-    sol-xhigh: codex-critic    # Sol на xhigh (architect-цепочка, cross_provider.lanes.codex-critic.effort)
+    # v28 (ADR-0005 поправка B): sol-xhigh УДАЛЁН. После выделения эффорта в отдельный
+    # флаг --effort он тождествен `sol` (оба -> codex-critic, эффорт задаётся флагом,
+    # дефолт = эффорт лейна xhigh). architect-цепочка переведена sol-xhigh -> sol.
+    sol: codex-critic          # Sol; эффорт из --effort (дефолт = эффорт лейна = xhigh)
     grok-4.5: grok-build       # имя модели лейна grok-build в судейских цепочках
 
   # Карта «провайдер -> его лейны/агенты». ЕДИНСТВЕННОЕ место, где принадлежность
