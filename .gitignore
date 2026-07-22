@@ -17,3 +17,6 @@ __pycache__/
 # исходники — держим локально, из репозитория исключаем (2026-07-22).
 .run-lane-agy-*.log
 .run-lane-grok-prompt-*.md
+
+# Клон доктрины RikaNV (обновляется через scripts/doctrine-sync.sh)
+doctrine/
