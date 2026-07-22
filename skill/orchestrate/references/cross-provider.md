@@ -31,8 +31,9 @@ every non-Claude route carries a named reason into telemetry.
 > **pre-v26 context, not current instruction** — the current path is always the vendor CLI.
 
 Design rationale — including *why external agents are workers/cross-reviewers and never a
-second orchestrator* — lives in an external ADR: **`/opt/tools/agent-bridge/ADR-0001-external-agents-as-workers.md`**
-(the reasoning is canon even though the bridge mechanism is retired from our lane path).
+second orchestrator* — lives in **`docs/adr/0001-external-agents-as-workers.md`** (preserved
+into this repo 2026-07-22 when the bridge project was deleted; the reasoning is canon even
+though its bridge/MCP *mechanism* is retired, superseded by run-lane + vendor-CLI).
 Our own decision record for the invocation model is **`docs/adr/0005-lane-invocation-unification.md`**.
 
 > **We reference, we do not vendor.** orchestrate is pure Markdown for its METHOD, but its own
