@@ -61,6 +61,7 @@ install_one() {
 
 install_one "${REPO_DIR}/skill/orchestrate" "${SKILLS_DIR}/orchestrate"
 install_one "${REPO_DIR}/skill/orchestrate-frontier" "${SKILLS_DIR}/orchestrate-frontier"
+install_one "${REPO_DIR}/skill/orca_orchestrate" "${SKILLS_DIR}/orca_orchestrate"
 
 for agent in architect builder scout critic; do
   install_one "${REPO_DIR}/agents/${agent}.md" "${AGENTS_DIR}/${agent}.md"
@@ -79,6 +80,7 @@ if [ -d "${SHARED_AGENTS_DIR}/skills" ]; then
   mkdir -p "${SHARED_AGENTS_DIR}/agents"
   install_one "${REPO_DIR}/skill/orchestrate" "${SHARED_AGENTS_DIR}/skills/orchestrate"
   install_one "${REPO_DIR}/skill/orchestrate-frontier" "${SHARED_AGENTS_DIR}/skills/orchestrate-frontier"
+  install_one "${REPO_DIR}/skill/orca_orchestrate" "${SHARED_AGENTS_DIR}/skills/orca_orchestrate"
   for agent in architect builder scout critic; do
     install_one "${REPO_DIR}/agents/${agent}.md" "${SHARED_AGENTS_DIR}/agents/${agent}.md"
   done
