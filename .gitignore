@@ -10,3 +10,8 @@ benchmark/results/
 # Python-артефакты инструментов
 __pycache__/
 .pytest_cache/
+
+# Транзитные логи run-lane: agy пишет журнал-свидетель в <workdir>/.run-lane-agy-*.log
+# (путь попадает в конверт как evidence.log_path). Это улика прогона, не исходник —
+# держим локально, из репозитория исключаем (2026-07-22).
+.run-lane-agy-*.log
