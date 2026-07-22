@@ -268,9 +268,20 @@ class OrcaTerminalSubstrate(Substrate):
                 except OSError:
                     rc_text = ""
                 if rc_text.endswith("\n") and rc_text.strip():
-                    exit_code = int(rc_text.strip().splitlines()[-1].strip())
-                    timed_out = False
-                    break
+                    try:
+                        exit_code = int(rc_text.strip().splitlines()[-1].strip())
+                    except ValueError:
+                        # rc is written only by `echo "$?"`, so it is always
+                        # digits — a complete-but-non-numeric line is anomalous
+                        # and unreachable in practice. Keep polling rather than
+                        # crash or invent an exit code: an unresolvable sentinel
+                        # then degrades to a clean timeout (transport-death via
+                        # the envelope), never an uncaught ValueError that would
+                        # bypass the error taxonomy this executor exists to keep.
+                        pass
+                    else:
+                        timed_out = False
+                        break
                 self._sleep(0.5)
             duration_ms = int((self._clock() - wait_started) * 1000)
             stdout = strip_terminal_control(Path(stdout_file.name).read_text())
