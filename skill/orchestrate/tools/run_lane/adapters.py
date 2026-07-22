@@ -366,6 +366,94 @@ class AgyAdapter(LaneAdapter):
             return text[:_MAX_PRINTED_CHARS], True
         return text, False
 
+    def probe_command(self, lane) -> list:
+        # Non-empty model catalog confirms presence AND Google surface auth
+        # (references/cross-provider.md Detection).
+        return ["agy", "models"]
+
+    def parse_probe(self, res) -> dict:
+        if _probe_cli_missing(res):
+            return _probe_missing_result(res)
+        text = _probe_text(res)
+        evidence = _probe_evidence(res)
+        if _LOGIN_INVITE_RE.search(text):
+            return {"present": True, "logged_in": False, "evidence": evidence}
+        # Success token: at least one non-empty catalog line (model slug).
+        models = [ln.strip() for ln in (res.stdout or "").splitlines() if ln.strip()]
+        if getattr(res, "exit_code", None) == 0 and models:
+            return {
+                "present": True,
+                "logged_in": True,
+                "evidence": evidence or f"{len(models)} models",
+            }
+        return {"present": True, "logged_in": False, "evidence": evidence}
+
+
+# --- detect probes (presence + auth; no model quota) -------------------------
+#
+# Each adapter owns its probe argv and success-token parsing, symmetric with
+# `build_invocation`. `detect.py` only orchestrates: one probe per distinct
+# transport via the substrate, then fan the result out to every lane that
+# shares that transport. Success tokens are REQUIRED for `logged_in` — a CLI
+# that prints a login invite but exits 0 must not be marked logged-in.
+
+
+def _probe_text(res) -> str:
+    return f"{getattr(res, 'stdout', None) or ''}{getattr(res, 'stderr', None) or ''}"
+
+
+def _probe_cli_missing(res) -> bool:
+    """True when the substrate could not start the CLI (not on PATH).
+
+    `SubprocessSubstrate` maps `FileNotFoundError` to `exit_code=-1` with the
+    OS error string in `stderr`. A timed-out or otherwise-failed CLI is still
+    *present* — the binary started.
+    """
+    if getattr(res, "timed_out", False):
+        return False
+    if getattr(res, "exit_code", None) != -1:
+        return False
+    low = _probe_text(res).lower()
+    return (
+        "no such file" in low
+        or "not found" in low
+        or "errno 2" in low
+        or "cannot find the file" in low
+    )
+
+
+# Login-invite phrases that some CLIs print even with exit 0. Matched before
+# any affirmative success token so "Not logged in" never counts as logged-in.
+_LOGIN_INVITE_RE = re.compile(
+    r"(?is)(?:"
+    r"not\s+logged\s+in|"
+    r"you\s+are\s+not\s+logged\s+in|"
+    r"please\s+log\s*in|"
+    r"login\s+required|"
+    r"sign\s+in\s+(?:to|required)|"
+    r"authenticate\s+first|"
+    r"authentication\s+required|"
+    r"run\s+[`'\"]?\w+(?:\s+\w+)*\s+login"
+    r")"
+)
+
+_LOGGED_IN_TOKEN_RE = re.compile(r"(?i)\blogged[\s-]?in\b")
+_VERSION_TOKEN_RE = re.compile(r"\d+\.\d+")
+
+
+def _probe_missing_result(res) -> dict:
+    evidence = (_probe_text(res).strip() or "CLI not found on PATH")[:400]
+    return {"present": False, "logged_in": False, "evidence": evidence}
+
+
+def _probe_evidence(res, fallback: str = "") -> str:
+    text = _probe_text(res).strip()
+    if text:
+        return text[:400]
+    if fallback:
+        return fallback[:400]
+    return f"exit={getattr(res, 'exit_code', '?')}"
+
 
 # --- shared parsing helpers (codex/grok/kimi/claude-print, slices 4-5) ------
 
@@ -549,6 +637,23 @@ class CodexAdapter(LaneAdapter):
             return text[:_MAX_PRINTED_CHARS], True
         return text, False
 
+    def probe_command(self, lane) -> list:
+        return ["codex", "login", "status"]
+
+    def parse_probe(self, res) -> dict:
+        if _probe_cli_missing(res):
+            return _probe_missing_result(res)
+        text = _probe_text(res)
+        evidence = _probe_evidence(res)
+        # "Not logged in" must lose before the bare "logged in" token match.
+        if _LOGIN_INVITE_RE.search(text):
+            return {"present": True, "logged_in": False, "evidence": evidence}
+        if getattr(res, "exit_code", None) == 0 and _LOGGED_IN_TOKEN_RE.search(text):
+            return {"present": True, "logged_in": True, "evidence": evidence}
+        # exit 0 without an affirmative success token is not logged-in
+        # (login-invite class of failure).
+        return {"present": True, "logged_in": False, "evidence": evidence}
+
 
 # --- grok (slice 5) ------------------------------------------------------------
 
@@ -660,6 +765,24 @@ class GrokAdapter(LaneAdapter):
             return text[:_MAX_PRINTED_CHARS], True
         return text, False
 
+    def probe_command(self, lane) -> list:
+        # Grok has no dedicated login-status subcommand; --version is the
+        # presence probe (cross-provider.md). Login invite in the output
+        # still forces logged_in=false.
+        return ["grok", "--version"]
+
+    def parse_probe(self, res) -> dict:
+        if _probe_cli_missing(res):
+            return _probe_missing_result(res)
+        text = _probe_text(res)
+        evidence = _probe_evidence(res)
+        if _LOGIN_INVITE_RE.search(text):
+            return {"present": True, "logged_in": False, "evidence": evidence}
+        # Success token: a version string (e.g. "grok 0.2.101"), not bare exit 0.
+        if getattr(res, "exit_code", None) == 0 and _VERSION_TOKEN_RE.search(text):
+            return {"present": True, "logged_in": True, "evidence": evidence}
+        return {"present": True, "logged_in": False, "evidence": evidence}
+
 
 # --- kimi (slice 5) -------------------------------------------------------------
 
@@ -745,6 +868,22 @@ class KimiAdapter(LaneAdapter):
         if len(text) > _MAX_PRINTED_CHARS:
             return text[:_MAX_PRINTED_CHARS], True
         return text, False
+
+    def probe_command(self, lane) -> list:
+        # No dedicated login-status; --version for presence. Login invite in
+        # the output still forces logged_in=false.
+        return ["kimi", "--version"]
+
+    def parse_probe(self, res) -> dict:
+        if _probe_cli_missing(res):
+            return _probe_missing_result(res)
+        text = _probe_text(res)
+        evidence = _probe_evidence(res)
+        if _LOGIN_INVITE_RE.search(text):
+            return {"present": True, "logged_in": False, "evidence": evidence}
+        if getattr(res, "exit_code", None) == 0 and _VERSION_TOKEN_RE.search(text):
+            return {"present": True, "logged_in": True, "evidence": evidence}
+        return {"present": True, "logged_in": False, "evidence": evidence}
 
 
 # --- claude-print (slice 4, запас / not-Claude-host fallback) ------------------
@@ -842,6 +981,30 @@ class ClaudePrintAdapter(LaneAdapter):
         if len(text) > _MAX_PRINTED_CHARS:
             return text[:_MAX_PRINTED_CHARS], True
         return text, False
+
+    def probe_command(self, lane) -> list:
+        # `claude auth status` reports JSON {loggedIn: bool, ...} — covers
+        # both presence and auth without spending model quota.
+        return ["claude", "auth", "status"]
+
+    def parse_probe(self, res) -> dict:
+        if _probe_cli_missing(res):
+            return _probe_missing_result(res)
+        text = _probe_text(res)
+        evidence = _probe_evidence(res)
+        if _LOGIN_INVITE_RE.search(text):
+            return {"present": True, "logged_in": False, "evidence": evidence}
+        envelope = _extract_single_json(res.stdout if res else "")
+        if isinstance(envelope, dict) and "loggedIn" in envelope:
+            # Success token is the explicit boolean, not exit code.
+            logged_in = envelope.get("loggedIn") is True
+            return {
+                "present": True,
+                "logged_in": logged_in,
+                "evidence": (json.dumps(envelope, ensure_ascii=False)[:400]
+                             if envelope else evidence),
+            }
+        return {"present": True, "logged_in": False, "evidence": evidence}
 
 
 ADAPTERS = {
