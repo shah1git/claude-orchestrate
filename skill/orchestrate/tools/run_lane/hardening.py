@@ -7,8 +7,8 @@ fail-closed sandbox gate that has to run AFTER a grok invocation
 honour by hand.
 
 Two independent responsibilities, deliberately kept as separate functions
-so a caller — a future `__main__.run()` wiring, or a test — can exercise
-either without the other:
+so a caller — `__main__.run()` or a test — can exercise either without the
+other:
 
   - `apply(lane, inv, config)` — mixes the declared env switches into
     `inv.env` via `dataclasses.replace`, the same idiom every other
@@ -29,14 +29,9 @@ either without the other:
     therefore a deliberate no-op for any lane whose `hardening:` key is not
     `grok_hardening` — not an oversight.
 
-GAP (flagged loudly, per the ticket's own boundary clause): this module is
-NOT YET WIRED into `run_lane.__main__.run()`. Wiring `apply()` between
-`adapter.build_invocation()` and `substrate.run()` (design-runlane.md §2
-layer 4), and `gate()` right after `substrate.run()` for a grok/kimi lane,
-is a change to the pipeline's own orchestration (`__main__.py`), which sits
-outside this slice's edit boundary (`adapters.py` + this module + tests
-only). This module is complete and independently tested against the
-config.yaml shapes it reads; the two call sites are a follow-up.
+`__main__.run()` wires `apply()` between invocation construction and
+substrate execution, then invokes `gate()` after Grok finishes.  Kimi only
+receives `apply()`: it intentionally has no vendor sandbox evidence file.
 """
 from __future__ import annotations
 

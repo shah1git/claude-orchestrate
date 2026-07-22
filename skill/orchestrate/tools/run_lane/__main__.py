@@ -27,11 +27,16 @@ import json
 import sys
 from pathlib import Path
 
-from . import adapters, artifact, config_resolve, envelope
+from . import adapters, artifact, config_resolve, envelope, hardening
 from .envelope import LaneError
 from .substrate import OrcaTerminalSubstrate, SubprocessSubstrate
 
 DEFAULT_TIMEOUT_SECONDS = 300
+# This is deliberately a concrete, expanded path: grok writes its sandbox
+# journal outside the invocation worktree, and the post-run gate must inspect
+# the same file the CLI does.  Keeping it as a module constant also makes the
+# deterministic pipeline test able to substitute a fixture journal.
+GROK_SANDBOX_EVENTS_PATH = Path("~/.grok/sandbox-events.jsonl").expanduser()
 
 # Substrate registry keyed by the CLI's own vocabulary (--substrate
 # subprocess|orca-terminal) — tests substitute this mapping to inject a
@@ -115,9 +120,23 @@ def run(args: argparse.Namespace) -> dict:
     except NotImplementedError as exc:
         raise LaneError("config", str(exc)) from exc
 
+    if hardening.applies_to(lane):
+        inv = hardening.apply(lane, inv, config)
+
     substrate_impl = SUBSTRATES[args.substrate]()
     res = substrate_impl.run(inv, args.timeout or DEFAULT_TIMEOUT_SECONDS)
 
+    # Kimi's hardening is environment/config-only: it deliberately has no
+    # vendor sandbox journal and therefore no post-run gate.  Grok alone
+    # declares the fail-closed ProfileApplied evidence contract.
+    if hardening.hardening_key(lane) == "grok_hardening":
+        hardening.gate(
+            lane,
+            sandbox_events_path=GROK_SANDBOX_EVENTS_PATH,
+            stderr=res.stderr,
+        )
+
+    adapter.materialize_artifact(res, args.out)
     art = artifact.capture(args.out)
     model_obs = adapter.parse_model_witness(res, inv)
     usage = adapter.parse_usage(res)
@@ -132,13 +151,25 @@ def run(args: argparse.Namespace) -> dict:
         # judgment about the deliverable — same bucket as a nonzero exit.
         error = {"class": "transport-death", "message": model_obs.error}
 
+    # `compute_ok` is intentionally transport-agnostic.  For Grok, the
+    # observation determines whether this particular JSON response supplied
+    # evidence at all; its documented build-name alias is then admitted while
+    # preserving the raw observed key in the envelope.  Every other witness
+    # retains the capability-level strict comparison.
+    witness_verification = caps.model_verification
+    if lane.transport == "grok-cli":
+        witness_verification = model_obs.verification
+    if lane.transport == "grok-cli" and adapters.model_witness_matches(
+            lane.transport, resolved_model, model_obs.observed):
+        witness_verification = "none"
+
     return envelope.build(
         lane=lane.name,
         transport=lane.transport,
         substrate=args.substrate,
         model_declared=resolved_model,
         model_observed=model_obs.observed,
-        model_verification=caps.model_verification,
+        model_verification=witness_verification,
         effort=resolved_effort,
         artifact=art,
         printed_text=printed_text,
