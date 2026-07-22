@@ -9,17 +9,21 @@ env, stdin policy, cwd, the artifact-channel prompt addendum, and the
 witness log path, if any. `substrate.py` executes that recipe without
 importing this module's concrete classes or knowing the CLI's name.
 
-Slice 3 (ADR-0005 §"План миграции срезами") ships exactly one working
-adapter, `AgyAdapter` — it has the strongest model witness (a pinned,
-per-invocation log file) and covers the two busiest lanes (`gemini-flash`,
-`agy-opus`). `CodexAdapter`/`GrokAdapter`/`KimiAdapter`/`ClaudePrintAdapter`
-are declared stubs for slices 4-5: the ABC is closed now so future slices
-only fill bodies in, but their build_invocation etc. raise NotImplementedError
-until then — never a silent no-op.
+Slice 3 (ADR-0005 §"План миграции срезами") shipped `AgyAdapter` first — it
+has the strongest model witness (a pinned, per-invocation log file) and
+covers the two busiest lanes (`gemini-flash`, `agy-opus`). Slices 4-5 (this
+module's current state) fill in the four remaining adapters —
+`CodexAdapter`, `ClaudePrintAdapter`, `GrokAdapter`, `KimiAdapter` — against
+the SAME `LaneAdapter` ABC and the same rule: never a silent no-op, never a
+guessed witness (design-runlane.md §9's open questions on grok/kimi model
+verification and kimi's effort surface are closed here with the honest
+default the design names — `model_verification: none` / `supports_effort:
+no` — not an invented 'stream'/'flag').
 """
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
@@ -76,6 +80,20 @@ class Invocation:
     prompt_addendum: str | None
     log_file: str | None
     prompt_length: int | None = None
+    # Slice 4 (CodexAdapter): the CLI's prompt travels over stdin, not as an
+    # argv element — `substrate.py` needs the actual bytes to hand its
+    # process-runner's own "feed this to stdin" parameter. `None` (every
+    # slice-3 adapter, and every agent-writes-file/output-flag adapter
+    # here) preserves the original devnull/pipe-with-no-data behaviour
+    # exactly — `adapters.py` never runs a process itself either way.
+    stdin_data: str | None = None
+    # Slice 4 (ClaudePrintAdapter): env keys the substrate must ERASE from
+    # the inherited `os.environ`, not merely override — `inv.env` can only
+    # ever ADD/OVERRIDE keys (`{**os.environ, **inv.env}`), which cannot
+    # express "delete" for a nested-spawn signal like CLAUDECODE that a
+    # non-empty override value would not honestly clear. Empty for every
+    # other adapter.
+    env_unset: tuple = ()
 
 
 @dataclass
@@ -318,66 +336,475 @@ class AgyAdapter(LaneAdapter):
         return text, False
 
 
-# --- future-slice adapters: declared, not implemented ------------------------
+# --- shared parsing helpers (codex/grok/kimi/claude-print, slices 4-5) ------
 
 
-def _not_implemented(self, *_args, **_kwargs):
-    raise NotImplementedError(
-        f"{type(self).__name__} — {self._slice_note} (adapter stub, not "
-        f"implemented in slice 3; ADR-0005 §\"План миграции срезами\")")
+def _extract_single_json(text: str):
+    """Best-effort parse of a CLI's single-shot JSON envelope (grok/claude
+    `--output-format json`): try the whole text first, then the substring
+    between the first `{` and the last `}` — a straight port of the
+    bridge's `extractJson` (`run-external-agent.mjs:125-131`), which exists
+    because a CLI's stdout occasionally carries a stray banner/warning line
+    around the actual JSON object. Returns `None`, never raises, on
+    anything that still doesn't parse — a malformed envelope is a missing
+    witness, not a crash."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return json.loads(text[start:end + 1])
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _iter_json_events(text: str):
+    """Parse a JSONL/stream-json body (codex `--json`, kimi `--output-format
+    stream-json`) — one JSON object per non-blank line, in order. A
+    malformed line is skipped, never fatal (mirrors the bridge's
+    `parseCodexEvents`/`parseCodexFinalAgentMessage`,
+    `run-external-agent.mjs:141-173`, which tolerate the same)."""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
+def strictify_for_codex(node):
+    """Port of the bridge's `strictifyForCodex`
+    (`run-external-agent.mjs:178-190`, itself a direct requirement of
+    `codex exec --output-schema`'s strict-mode contract, ADR-0005
+    `0005-...:104`): every object-node gets `additionalProperties: false`
+    and `required` set to ALL of its own `properties` keys, recursively.
+    Optionality in strict mode is expressed by the schema author via a type
+    union with `"null"`, never by omission from `required` — this function
+    does not invent that union, it only enforces the two structural
+    invariants strict mode demands."""
+    if isinstance(node, list):
+        return [strictify_for_codex(item) for item in node]
+    if isinstance(node, dict):
+        out = {key: strictify_for_codex(value) for key, value in node.items()}
+        if out.get("type") == "object" and isinstance(out.get("properties"), dict):
+            out["additionalProperties"] = False
+            out["required"] = list(out["properties"].keys())
+        return out
+    return node
+
+
+# --- codex (slice 4) ----------------------------------------------------------
 
 
 class CodexAdapter(LaneAdapter):
-    """Слайс 4 (ADR-0005): codex-cli. НЕ РЕАЛИЗОВАН — вне границ этого среза."""
+    """`codex-cli` transport (ADR-0005 slice 4). Form verified live via
+    `codex exec --help`: `-m/--output-schema/--json/-o/-s/-C/--add-dir` all
+    present, `--effort` absent (design-runlane.md §12 "Notable" — the
+    proza/cross-provider.md forms citing `codex exec --effort` do not match
+    the installed CLI; reasoning effort is `-c model_reasoning_effort=`, a
+    TOML-typed config-key override, not a flag). The prompt travels over
+    stdin (never as an argv element — `--json`'s JSONL stream is the
+    ENTIRE witness surface: session id from `thread.started`, usage from
+    `turn.completed`, the final response text from the `agent_message`
+    `item.completed` event — a direct port of the bridge's own parser,
+    `run-external-agent.mjs:141-173`)."""
 
     transport = "codex-cli"
-    CAPS = None
-    _slice_note = "срез 4 (strict-схема/usage/sessionId/--resume)"
-    build_invocation = _not_implemented
-    parse_model_witness = _not_implemented
-    parse_usage = _not_implemented
-    parse_session_id = _not_implemented
-    parse_printed_text = _not_implemented
+    CAPS = Capabilities(
+        supports_effort="config-key",
+        supports_schema="strict",
+        has_own_sandbox="strong",
+        artifact_channel="output-flag",
+        model_verification="pin-validated",
+    )
+
+    def build_invocation(self, lane, req: InvocationRequest) -> Invocation:
+        try:
+            prompt_text = Path(req.prompt_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise LaneError("config", f"cannot read --prompt-file: {exc}") from exc
+
+        workdir = str(Path(req.workdir))
+        argv = ["codex", "exec"]
+        if req.model:
+            argv += ["-m", req.model]
+        if req.effort:
+            # NOT --effort — live `codex exec --help` carries no such flag;
+            # reasoning effort is a dotted config-key override (see class
+            # docstring).
+            argv += ["-c", f"model_reasoning_effort={req.effort}"]
+        sandbox = getattr(lane, "sandbox", None) if lane is not None else None
+        if sandbox:
+            argv += ["-s", sandbox]
+        argv += ["-C", workdir]
+        argv += ["--json"]
+        argv += ["-o", str(req.out)]
+
+        if req.schema:
+            try:
+                schema_text = Path(req.schema).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise LaneError("config", f"cannot read --schema: {exc}") from exc
+            try:
+                schema_data = json.loads(schema_text)
+            except json.JSONDecodeError as exc:
+                raise LaneError("config", f"--schema is not valid JSON: {exc}") from exc
+            strict_schema = strictify_for_codex(schema_data)
+            schema_out = Path(req.workdir) / f".run-lane-codex-schema-{Path(req.out).name}.json"
+            schema_out.write_text(json.dumps(strict_schema), encoding="utf-8")
+            argv += ["--output-schema", str(schema_out)]
+
+        return Invocation(
+            argv=argv,
+            env={},
+            stdin_policy="pipe",
+            cwd=workdir,
+            prompt_addendum=None,
+            log_file=None,
+            prompt_length=len(prompt_text),
+            stdin_data=prompt_text,
+        )
+
+    def parse_model_witness(self, res, inv: Invocation) -> ModelObservation:
+        for event in _iter_json_events(res.stdout if res else ""):
+            model = event.get("model")
+            if isinstance(model, str) and model:
+                return ModelObservation(model, "stream", json.dumps(event), error=None)
+        # No `--json` event has carried a bare "model" field in any capture
+        # taken so far (design-runlane.md §9 open question 3 — the bridge
+        # never read one either, run-external-agent.mjs:141-158). codex's
+        # `-m` is still a strong pin: an unknown/stale slug is a loud CLI
+        # failure (nonzero exit), never a silent substitution — report the
+        # pinned slug itself as the observed model rather than `None`.
+        pinned = None
+        if "-m" in inv.argv:
+            idx = inv.argv.index("-m")
+            if idx + 1 < len(inv.argv):
+                pinned = inv.argv[idx + 1]
+        return ModelObservation(pinned, "pin-validated", None, error=None)
+
+    def parse_usage(self, res):
+        usage = None
+        for event in _iter_json_events(res.stdout if res else ""):
+            if event.get("type") == "turn.completed" and isinstance(event.get("usage"), dict):
+                usage = event["usage"]
+        return usage
+
+    def parse_session_id(self, res):
+        session_id = None
+        for event in _iter_json_events(res.stdout if res else ""):
+            if event.get("type") == "thread.started" and isinstance(event.get("thread_id"), str):
+                session_id = event["thread_id"]
+        return session_id
+
+    def parse_printed_text(self, res) -> tuple:
+        text = ""
+        for event in _iter_json_events(res.stdout if res else ""):
+            item = event.get("item")
+            if (event.get("type") == "item.completed" and isinstance(item, dict)
+                    and item.get("type") == "agent_message" and isinstance(item.get("text"), str)):
+                text = item["text"].strip()
+        if len(text) > _MAX_PRINTED_CHARS:
+            return text[:_MAX_PRINTED_CHARS], True
+        return text, False
+
+
+# --- grok (slice 5) ------------------------------------------------------------
 
 
 class GrokAdapter(LaneAdapter):
-    """Слайс 5 (ADR-0005): grok-cli. НЕ РЕАЛИЗОВАН — вне границ этого среза."""
+    """`grok-cli` transport (ADR-0005 slice 5). Form verified live via
+    `grok --help`: `--prompt-file/-m/--reasoning-effort/--sandbox
+    (env GROK_SANDBOX)/--cwd/--output-format/-r/--json-schema` all present.
+    Artifact channel is `agent-writes-file` (same prompt-instruction trick
+    as agy/kimi — grok has no native `--out`-equivalent flag either);
+    `--output-format json`'s envelope is a SECONDARY, best-effort surface
+    for `model`/`usage`/`session_id`, honestly declared `none` at the
+    capability level (design-runlane.md §9 open question 1 — no live
+    snapshot has confirmed the envelope actually carries a model field, and
+    a guessed 'stream' would be exactly the invented witness ADR-0005 §5
+    forbids)."""
 
     transport = "grok-cli"
-    CAPS = None
-    _slice_note = "срез 5 (grok_hardening + fail-closed gate)"
-    build_invocation = _not_implemented
-    parse_model_witness = _not_implemented
-    parse_usage = _not_implemented
-    parse_session_id = _not_implemented
-    parse_printed_text = _not_implemented
+    CAPS = Capabilities(
+        supports_effort="flag",
+        supports_schema="strict",
+        has_own_sandbox="strong",
+        artifact_channel="agent-writes-file",
+        model_verification="none",
+    )
+
+    def build_invocation(self, lane, req: InvocationRequest) -> Invocation:
+        try:
+            prompt_text = Path(req.prompt_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise LaneError("config", f"cannot read --prompt-file: {exc}") from exc
+
+        workdir = str(Path(req.workdir))
+        addendum = _ARTIFACT_ADDENDUM_TEMPLATE.format(out=req.out)
+        full_prompt = f"{prompt_text}{addendum}"
+        # `--prompt-file`, not inline `-p`/`--single`, sidesteps both
+        # OS argv-length limits and any shell-adjacent escaping concern for
+        # an arbitrarily large addendum-carrying prompt (grok's `--help`
+        # offers both; agy's own inline form is the one CLI here that has
+        # no file-based alternative at all).
+        prompt_file = Path(req.workdir) / f".run-lane-grok-prompt-{Path(req.out).name}.md"
+        prompt_file.write_text(full_prompt, encoding="utf-8")
+
+        env = {}
+        argv = ["grok", "--prompt-file", str(prompt_file), "--output-format", "json",
+                "--cwd", workdir]
+        if req.model:
+            argv += ["-m", req.model]
+        if req.effort:
+            argv += ["--reasoning-effort", req.effort]
+        sandbox = getattr(lane, "sandbox", None) if lane is not None else None
+        if sandbox:
+            argv += ["--sandbox", sandbox]
+            # config.yaml grok_hardening.env sets the same key — a
+            # deliberate duplicate that "survives a swapped config file"
+            # (config.yaml:907-908); setting it here too means a lane's own
+            # declared sandbox profile is honoured even before hardening.py
+            # is wired into the pipeline (see this package's GAPS report).
+            env["GROK_SANDBOX"] = sandbox
+        if req.resume:
+            argv += ["--resume", req.resume]
+        if req.schema:
+            try:
+                schema_text = Path(req.schema).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise LaneError("config", f"cannot read --schema: {exc}") from exc
+            # `--json-schema` takes the schema INLINE (live `grok --help`'s
+            # own example: `--json-schema '{"type":"object",...}'`), not a
+            # file path — unlike codex's `--output-schema <FILE>`.
+            argv += ["--json-schema", schema_text]
+
+        return Invocation(
+            argv=argv, env=env, stdin_policy="devnull", cwd=workdir,
+            prompt_addendum=addendum, log_file=None, prompt_length=len(full_prompt),
+        )
+
+    def parse_model_witness(self, res, inv: Invocation) -> ModelObservation:
+        envelope = _extract_single_json(res.stdout if res else "")
+        if isinstance(envelope, dict) and isinstance(envelope.get("model"), str):
+            return ModelObservation(envelope["model"], "stream", json.dumps(envelope), error=None)
+        # Honest 'none' (CAPS.model_verification), not 'unavailable' — the
+        # capability itself declares no witness is expected here, so a
+        # missing model field is not an error, just the documented ceiling
+        # (design-runlane.md §9 open question 1).
+        return ModelObservation(None, "none", None, error=None)
+
+    def parse_usage(self, res):
+        envelope = _extract_single_json(res.stdout if res else "")
+        usage = envelope.get("usage") if isinstance(envelope, dict) else None
+        return usage if isinstance(usage, dict) else None
+
+    def parse_session_id(self, res):
+        envelope = _extract_single_json(res.stdout if res else "")
+        if isinstance(envelope, dict):
+            for key in ("session_id", "sessionId"):
+                if isinstance(envelope.get(key), str):
+                    return envelope[key]
+        return None
+
+    def parse_printed_text(self, res) -> tuple:
+        envelope = _extract_single_json(res.stdout if res else "")
+        text = None
+        if isinstance(envelope, dict):
+            for key in ("result", "response", "text", "output"):
+                value = envelope.get(key)
+                if isinstance(value, str):
+                    text = value
+                    break
+        if text is None:
+            text = (res.stdout or "") if res else ""
+        if len(text) > _MAX_PRINTED_CHARS:
+            return text[:_MAX_PRINTED_CHARS], True
+        return text, False
+
+
+# --- kimi (slice 5) -------------------------------------------------------------
 
 
 class KimiAdapter(LaneAdapter):
-    """Слайс 5 (ADR-0005): kimi-cli-headless. НЕ РЕАЛИЗОВАН — вне границ этого среза."""
+    """`kimi-cli-headless` transport (ADR-0005 slice 5). Form verified live
+    via `kimi --help`: `-m/-p/--output-format text|stream-json/--add-dir`
+    present, no effort flag anywhere on the surface (design-runlane.md §9
+    open question 2 — `supports_effort: no`, not a guess at where a
+    `low|high|max` effort config.yaml documents might otherwise live).
+    Kimi has no `--prompt-file`, only inline `-p <prompt>`, so the
+    artifact-instruction addendum travels as the `-p` value itself, same as
+    agy's inline form. No filesystem sandbox of its own — isolation is
+    worktree + OS/container (config.yaml kimi_hardening.isolation)."""
 
     transport = "kimi-cli-headless"
-    CAPS = None
-    _slice_note = "срез 5 (kimi_hardening + fail-closed gate)"
-    build_invocation = _not_implemented
-    parse_model_witness = _not_implemented
-    parse_usage = _not_implemented
-    parse_session_id = _not_implemented
-    parse_printed_text = _not_implemented
+    CAPS = Capabilities(
+        supports_effort="no",
+        supports_schema="prompt",
+        has_own_sandbox="none",
+        artifact_channel="agent-writes-file",
+        model_verification="none",
+    )
+
+    def build_invocation(self, lane, req: InvocationRequest) -> Invocation:
+        try:
+            prompt_text = Path(req.prompt_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise LaneError("config", f"cannot read --prompt-file: {exc}") from exc
+
+        workdir = str(Path(req.workdir))
+        addendum = _ARTIFACT_ADDENDUM_TEMPLATE.format(out=req.out)
+        full_prompt = f"{prompt_text}{addendum}"
+
+        argv = ["kimi", "--add-dir", workdir, "--output-format", "stream-json"]
+        if req.model:
+            argv += ["-m", req.model]
+        argv += ["-p", full_prompt]
+
+        return Invocation(
+            argv=argv, env={}, stdin_policy="devnull", cwd=workdir,
+            prompt_addendum=addendum, log_file=None, prompt_length=len(full_prompt),
+        )
+
+    def parse_model_witness(self, res, inv: Invocation) -> ModelObservation:
+        observed, evidence = None, None
+        for event in _iter_json_events(res.stdout if res else ""):
+            model = event.get("model")
+            if isinstance(model, str) and model:
+                observed, evidence = model, json.dumps(event)
+        if observed is not None:
+            return ModelObservation(observed, "stream", evidence, error=None)
+        # Honest 'none' — CAPS.model_verification declares no witness is
+        # expected (design-runlane.md §9 open question 2's sibling: the
+        # stream-json schema itself is unverified live).
+        return ModelObservation(None, "none", None, error=None)
+
+    def parse_usage(self, res):
+        usage = None
+        for event in _iter_json_events(res.stdout if res else ""):
+            candidate = event.get("usage")
+            if isinstance(candidate, dict):
+                usage = candidate
+        return usage
+
+    def parse_session_id(self, res):
+        session_id = None
+        for event in _iter_json_events(res.stdout if res else ""):
+            for key in ("session_id", "sessionId"):
+                value = event.get(key)
+                if isinstance(value, str):
+                    session_id = value
+        return session_id
+
+    def parse_printed_text(self, res) -> tuple:
+        parts = []
+        for event in _iter_json_events(res.stdout if res else ""):
+            for key in ("text", "delta", "content"):
+                value = event.get(key)
+                if isinstance(value, str):
+                    parts.append(value)
+        text = "".join(parts) if parts else ((res.stdout or "") if res else "")
+        if len(text) > _MAX_PRINTED_CHARS:
+            return text[:_MAX_PRINTED_CHARS], True
+        return text, False
+
+
+# --- claude-print (slice 4, запас / not-Claude-host fallback) ------------------
+
+# ADR-0005 §"Claude-работники": nested-spawn signal that must be ERASED, not
+# merely overridden, so a spawned `claude -p` never believes it is running
+# inside an existing Claude Code session (`0005-...:184`).
+_CLAUDE_NESTED_SPAWN_ENV_KEYS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")
 
 
 class ClaudePrintAdapter(LaneAdapter):
-    """Слайс 4 (ADR-0005): claude-print, запасной не-Claude-хост транспорт.
-    НЕ РЕАЛИЗОВАН — вне границ этого среза."""
+    """`claude-print` transport (ADR-0005 slice 4) — the not-Claude-host
+    fallback. Form verified live via `claude --help`:
+    `-p/--model/--agent/--effort/--add-dir/--output-format` all present;
+    `-p` is a boolean print-mode flag here (unlike agy's consuming `-p`),
+    the prompt is a plain positional argument. A declared DEGRADATION, not
+    parity (`0005-...:149-157`): Agent tool remains the default for Claude
+    workers, worktree/telemetry/context inheritance are all lost on this
+    path. Nested-spawn env keys are erased via `Invocation.env_unset`
+    (`0005-...:184`) — `substrate.py`'s the only place that can actually
+    pop a key out of the inherited environment."""
 
     transport = "claude-print"
-    CAPS = None
-    _slice_note = "срез 4 (запасной транспорт для не-Claude хоста)"
-    build_invocation = _not_implemented
-    parse_model_witness = _not_implemented
-    parse_usage = _not_implemented
-    parse_session_id = _not_implemented
-    parse_printed_text = _not_implemented
+    CAPS = Capabilities(
+        supports_effort="flag",
+        supports_schema="prompt",
+        has_own_sandbox="none",
+        artifact_channel="stdout-capture",
+        model_verification="stream",
+    )
+
+    def build_invocation(self, lane, req: InvocationRequest) -> Invocation:
+        try:
+            prompt_text = Path(req.prompt_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise LaneError("config", f"cannot read --prompt-file: {exc}") from exc
+
+        workdir = str(Path(req.workdir))
+        argv = ["claude", "-p"]
+        if req.model:
+            argv += ["--model", req.model]
+        if req.role:
+            argv += ["--agent", req.role]
+        if req.effort:
+            argv += ["--effort", req.effort]
+        argv += ["--add-dir", workdir]
+        argv += ["--output-format", "json"]
+        argv += [prompt_text]
+
+        return Invocation(
+            argv=argv,
+            env={},
+            stdin_policy="devnull",
+            cwd=workdir,
+            prompt_addendum=None,
+            log_file=None,
+            prompt_length=len(prompt_text),
+            env_unset=_CLAUDE_NESTED_SPAWN_ENV_KEYS,
+        )
+
+    def parse_model_witness(self, res, inv: Invocation) -> ModelObservation:
+        envelope = _extract_single_json(res.stdout if res else "")
+        if isinstance(envelope, dict) and isinstance(envelope.get("model"), str):
+            return ModelObservation(envelope["model"], "stream", json.dumps(envelope), error=None)
+        return ModelObservation(
+            None, "stream", None,
+            error="claude --output-format json carried no 'model' field — "
+                  "cannot verify the model that actually ran")
+
+    def parse_usage(self, res):
+        envelope = _extract_single_json(res.stdout if res else "")
+        usage = envelope.get("usage") if isinstance(envelope, dict) else None
+        return usage if isinstance(usage, dict) else None
+
+    def parse_session_id(self, res):
+        envelope = _extract_single_json(res.stdout if res else "")
+        if isinstance(envelope, dict) and isinstance(envelope.get("session_id"), str):
+            return envelope["session_id"]
+        return None
+
+    def parse_printed_text(self, res) -> tuple:
+        envelope = _extract_single_json(res.stdout if res else "")
+        text = envelope.get("result") if isinstance(envelope, dict) else None
+        if not isinstance(text, str):
+            text = (res.stdout or "") if res else ""
+        if len(text) > _MAX_PRINTED_CHARS:
+            return text[:_MAX_PRINTED_CHARS], True
+        return text, False
 
 
 ADAPTERS = {
