@@ -16,6 +16,13 @@ import yaml
 
 from .envelope import LaneError
 
+# Last-resort liveness floor (ADR-0007): the maximum SILENCE tolerated when
+# neither the lane's `latency_envelope` nor `cross_provider.execution` names an
+# idle default. A conservative dead-transport detector, not a per-lane arbitrary
+# wall clock — `validate_config` still requires the execution block so this floor
+# is a safety net, not the configured value.
+_IDLE_FLOOR_S = 300.0
+
 
 def load_config(config_path: Path) -> dict:
     config_path = Path(config_path)
@@ -44,6 +51,14 @@ class LaneRecord:
     status: str | None
     capabilities_override: dict
     raw: dict
+    # Liveness bounds (ADR-0007), resolved from the lane's `latency_envelope`
+    # over `cross_provider.execution` defaults. `idle_timeout_s` — max silence
+    # tolerated; `max_envelope_s` — the lane's recorded latency ceiling (`None`
+    # = no ceiling, idle alone governs). A CLI `--idle-timeout`/`--timeout`
+    # overrides these downstream (__main__). Defaulted so test constructors and
+    # any non-resolve builder need not restate them; resolve_lane always sets them.
+    idle_timeout_s: float = _IDLE_FLOOR_S
+    max_envelope_s: float | None = None
 
 
 def resolve_lane(config: dict, lane_name: str) -> LaneRecord:
@@ -74,6 +89,18 @@ def resolve_lane(config: dict, lane_name: str) -> LaneRecord:
             "config", f"lane '{resolved_name}'.capabilities must be a mapping, "
             f"got {type(capabilities_override).__name__}")
 
+    # Liveness bounds: lane `latency_envelope` over `cross_provider.execution`
+    # defaults over the last-resort idle floor (ADR-0007).
+    execution = (config.get("cross_provider") or {}).get("execution") or {}
+    envelope = raw.get("latency_envelope") or {}
+    if not isinstance(envelope, dict):
+        raise LaneError(
+            "config", f"lane '{resolved_name}'.latency_envelope must be a mapping, "
+            f"got {type(envelope).__name__}")
+    idle_timeout_s = envelope.get(
+        "idle_s", execution.get("idle_default_s", _IDLE_FLOOR_S))
+    max_envelope_s = envelope.get("max_s", execution.get("max_default_s"))
+
     return LaneRecord(
         name=resolved_name,
         transport=transport,
@@ -85,5 +112,7 @@ def resolve_lane(config: dict, lane_name: str) -> LaneRecord:
         roles=tuple(raw.get("roles") or ()),
         status=raw.get("status"),
         capabilities_override=capabilities_override,
+        idle_timeout_s=float(idle_timeout_s),
+        max_envelope_s=None if max_envelope_s is None else float(max_envelope_s),
         raw=raw,
     )

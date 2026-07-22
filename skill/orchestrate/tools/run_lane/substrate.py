@@ -33,9 +33,11 @@ from __future__ import annotations
 import os
 import json
 import re
+import select
 import shlex
 import subprocess
 import tempfile
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -52,63 +54,194 @@ class RunResult:
     stderr: str
     duration_ms: int
     timed_out: bool
+    # Which limit fired, when timed_out is True (ADR-0007): 'idle' — the process
+    # went silent past the liveness threshold (dead/hung transport); 'envelope' —
+    # it kept producing output but exceeded the lane's recorded latency ceiling
+    # (streaming-but-looping). None when the run did not time out. `__main__`
+    # maps these onto the midflight death-evidence dictionary.
+    timeout_kind: str | None = None
+
+
+@dataclass(frozen=True)
+class RunLimits:
+    """The two orthogonal bounds on how long the executor waits for a lane
+    (ADR-0007, doctrine §2.9). They separate two things a single wall-clock
+    timeout conflated:
+
+    - `idle_s`  — the liveness bound: the maximum SILENCE tolerated (no output
+      byte / no output-file growth). A process still producing output is alive
+      and is never killed for taking long, no matter the total duration. This is
+      an infrastructure default — a detector of a dead/hung transport.
+    - `max_s`   — the lane's latency envelope: an absolute ceiling on total
+      duration, recorded per lane FROM THE MODEL'S REAL LATENCY as a deliberate
+      requirement (not an arbitrary default). `None` means no ceiling — idle
+      alone governs. It catches a transport that streams forever without ever
+      going idle.
+
+    Immutable value-object so the pair travels as one domain quantity and can
+    grow (grace period, per-stream thresholds) without a new run() signature."""
+
+    idle_s: float
+    max_s: float | None = None
+
+
+def classify_wait(now: float, last_output_at: float, started_at: float,
+                  limits: RunLimits) -> str:
+    """Pure liveness policy (ADR-0007): decide whether a still-running process
+    should keep waiting or be killed. Returns 'continue', 'idle', or 'envelope'.
+
+    Premise this closes (доктрина §2.10): a wall-clock timeout killed a lane for
+    being slow, conflating "hung" with "thinking". Here a process whose output is
+    still advancing (`last_output_at` recent) is alive and is NEVER killed on
+    total duration alone — only the envelope ceiling can stop a live stream, and
+    only silence past `idle_s` marks a genuine hang. `now`/`last_output_at`/
+    `started_at` are injected (monotonic seconds) so the decision is deterministic
+    and testable without a real process."""
+    if limits.max_s is not None and (now - started_at) >= limits.max_s:
+        return "envelope"
+    if (now - last_output_at) >= limits.idle_s:
+        return "idle"
+    return "continue"
 
 
 class Substrate(ABC):
     @abstractmethod
-    def run(self, inv: Invocation, timeout: int | None) -> RunResult:
+    def run(self, inv: Invocation, limits: RunLimits) -> RunResult:
         ...
 
 
 class SubprocessSubstrate(Substrate):
-    """Runs `inv.argv` directly via `subprocess.run` — the default substrate
-    for `orchestrate`/`orchestrate-frontier` (ADR-0006 поправка A)."""
+    """Runs `inv.argv` via `Popen`, waiting on LIVENESS rather than wall-clock
+    (ADR-0007): a process still producing output is never killed for taking
+    long; only silence past `limits.idle_s`, or total duration past
+    `limits.max_s`, ends it. The default substrate for
+    orchestrate/orchestrate-frontier (ADR-0006 поправка A)."""
 
-    def run(self, inv: Invocation, timeout: int | None) -> RunResult:
+    _POLL_INTERVAL_S = 0.25
+    _KILL_GRACE_S = 5.0
+
+    def __init__(self, clock=None):
+        # Injectable monotonic clock for the liveness bookkeeping. `select()`'s
+        # own timeout still uses real time, so tests exercise real (short)
+        # durations rather than a simulated wall clock.
+        self._clock = clock or time.monotonic
+
+    def run(self, inv: Invocation, limits: RunLimits) -> RunResult:
         env = {**os.environ, **inv.env} if inv.env else dict(os.environ)
         for key in getattr(inv, "env_unset", ()) or ():
             env.pop(key, None)
 
-        start = time.monotonic()
+        stdin_data = getattr(inv, "stdin_data", None)
+        stdin_arg = subprocess.DEVNULL if inv.stdin_policy == "devnull" else subprocess.PIPE
+
+        start = self._clock()
         try:
-            stdin_data = getattr(inv, "stdin_data", None)
-            if inv.stdin_policy == "pipe" and stdin_data is not None:
-                # `input=` and `stdin=` are mutually exclusive on
-                # subprocess.run (ValueError if both given) — this branch
-                # is the only one that ever supplies real piped bytes.
-                proc = subprocess.run(
-                    inv.argv,
-                    cwd=inv.cwd,
-                    env=env,
-                    input=stdin_data,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
-            else:
-                stdin_arg = subprocess.DEVNULL if inv.stdin_policy == "devnull" else subprocess.PIPE
-                proc = subprocess.run(
-                    inv.argv,
-                    cwd=inv.cwd,
-                    env=env,
-                    stdin=stdin_arg,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
-            duration_ms = int((time.monotonic() - start) * 1000)
-            return RunResult(proc.returncode, proc.stdout, proc.stderr, duration_ms, False)
-        except subprocess.TimeoutExpired as exc:
-            # text=True above means subprocess already decoded these for us.
-            duration_ms = int((time.monotonic() - start) * 1000)
-            return RunResult(-1, exc.stdout or "", exc.stderr or "", duration_ms, True)
+            # bufsize=0: raw unbuffered pipes so os.read on the fd sees every
+            # byte (no BufferedReader layer holding some back from select).
+            proc = subprocess.Popen(
+                inv.argv, cwd=inv.cwd, env=env, bufsize=0,
+                stdin=stdin_arg, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError as exc:
-            # The binary/cwd itself could not be started (missing CLI, bad
-            # workdir, …) — this IS a transport-death signal, not a Python
-            # crash; __main__ classifies a nonzero/-1 exit the same way
-            # regardless of which of the two branches produced it.
-            duration_ms = int((time.monotonic() - start) * 1000)
+            # The binary/cwd could not be started (missing CLI, bad workdir) —
+            # a transport-death signal, not a Python crash. __main__ classifies
+            # a -1 exit the same way regardless.
+            duration_ms = int((self._clock() - start) * 1000)
             return RunResult(-1, "", str(exc), duration_ms, False)
+
+        # Feed piped stdin from a WRITER THREAD so the read loop never blocks on
+        # a large prompt exceeding the pipe buffer — the classic single-threaded
+        # write-all-then-read deadlock (a transport whose prompt rides stdin).
+        writer = None
+        if stdin_arg is subprocess.PIPE:
+            payload = (stdin_data or "").encode("utf-8")
+
+            def _feed():
+                try:
+                    proc.stdin.write(payload)
+                    proc.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    pass
+                finally:
+                    try:
+                        proc.stdin.close()
+                    except OSError:
+                        pass
+
+            writer = threading.Thread(target=_feed, daemon=True)
+            writer.start()
+
+        out_fd, err_fd = proc.stdout.fileno(), proc.stderr.fileno()
+        buffers = {out_fd: b"", err_fd: b""}
+        streams = [proc.stdout, proc.stderr]
+        last_output = start
+        timed_out = False
+        timeout_kind = None
+
+        while streams:
+            readable, _, _ = select.select(streams, [], [], self._POLL_INTERVAL_S)
+            now = self._clock()
+            for stream in readable:
+                chunk = os.read(stream.fileno(), 65536)
+                if chunk:
+                    buffers[stream.fileno()] += chunk
+                    last_output = now
+                else:
+                    streams.remove(stream)   # EOF on this pipe
+            if streams:
+                # Liveness check every tick — even when data arrived — so a
+                # transport that streams forever still hits the envelope ceiling.
+                verdict = classify_wait(now, last_output, start, limits)
+                if verdict != "continue":
+                    timed_out = True
+                    timeout_kind = verdict
+                    self._terminate(proc)
+                    break
+
+        if timed_out:
+            exit_code = -1
+        else:
+            # Both pipes are at EOF. A well-behaved process has exited or is about
+            # to; a pathological one (closed its fds but still running) must STILL
+            # honour the envelope — a bare `proc.wait()` here would block forever
+            # past both idle_s and max_s, defeating the ceiling ADR-0007 promises.
+            # Bound the final wait by the remaining envelope (or an idle-length
+            # grace when there is no ceiling); overrun is a real timeout.
+            now = self._clock()
+            grace = (max(0.0, limits.max_s - (now - start))
+                     if limits.max_s is not None else limits.idle_s)
+            try:
+                proc.wait(timeout=grace)
+                exit_code = proc.returncode
+            except subprocess.TimeoutExpired:
+                self._terminate(proc)
+                timed_out = True
+                timeout_kind = "envelope" if limits.max_s is not None else "idle"
+                exit_code = -1
+
+        if writer is not None:
+            writer.join(timeout=0.1)
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+        duration_ms = int((self._clock() - start) * 1000)
+        stdout = buffers[out_fd].decode("utf-8", errors="replace")
+        stderr = buffers[err_fd].decode("utf-8", errors="replace")
+        return RunResult(exit_code, stdout, stderr, duration_ms, timed_out, timeout_kind)
+
+    def _terminate(self, proc):
+        """SIGTERM → grace → SIGKILL → reap: a killed lane leaves no zombie, and
+        whatever it already flushed stays in the captured buffers."""
+        try:
+            proc.terminate()
+            proc.wait(timeout=self._KILL_GRACE_S)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        except OSError:
+            pass
 
 
 _OSC_SEQUENCE_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)", re.DOTALL)
@@ -203,7 +336,7 @@ class OrcaTerminalSubstrate(Substrate):
             raise OSError(f"orca request failed: {response}")
         return response.get("result") or {}
 
-    def run(self, inv: Invocation, timeout: int | None) -> RunResult:
+    def run(self, inv: Invocation, limits: RunLimits) -> RunResult:
         if not inv.cwd:
             raise LaneError("config", "orca-terminal requires Invocation.cwd for its worktree")
 
@@ -250,19 +383,28 @@ class OrcaTerminalSubstrate(Substrate):
             if not handle:
                 raise OSError("orca terminal create response has no terminal handle")
 
-            # Poll the on-disk exit-code sentinel — NOT `orca terminal wait`,
-            # which (verified live) times out even when the command has already
-            # exited. The sentinel is written last by the shell command, so a
-            # complete rc file means "finished"; absence within the timeout is a
-            # real timeout. Bound the poll by the ticket timeout (default 5 min).
-            # The trailing newline `echo "$?"` appends is the completion marker:
-            # only once it is present is the write whole, so a read racing the
-            # write can never parse a torn partial integer.
+            # Wait on LIVENESS, not a wall clock (ADR-0007). Two disk signals:
+            #   * the exit-code sentinel (rc file) — written LAST by the shell
+            #     command, so a complete (newline-terminated) rc means "finished";
+            #     the trailing `echo "$?"` newline is the completion marker, so a
+            #     read racing the write can never parse a torn partial integer.
+            #   * growth of the stdout/stderr files — the "still working" signal
+            #     while no rc is present. Silence (no growth) past `idle_s` = a
+            #     hung terminal; total duration past `max_s` = the lane's envelope
+            #     exceeded. `orca terminal wait` is NOT used (verified live: it
+            #     times out even for a command that has already exited).
+            # For a burst-only transport (one that writes the output file only on
+            # final flush) the file does not grow mid-work, so liveness there is
+            # governed by the lane's recorded `idle_s` envelope — the same
+            # deliberate requirement the subprocess pipe needs, not a defect.
             wait_started = self._clock()
-            budget_s = float(timeout) if timeout else 300.0
+            last_growth = wait_started
+            last_size = 0
             exit_code = -1
-            timed_out = True
-            while self._clock() - wait_started < budget_s:
+            timed_out = False
+            timeout_kind = None
+            while True:
+                now = self._clock()
                 try:
                     rc_text = Path(rc_file.name).read_text()
                 except OSError:
@@ -271,22 +413,31 @@ class OrcaTerminalSubstrate(Substrate):
                     try:
                         exit_code = int(rc_text.strip().splitlines()[-1].strip())
                     except ValueError:
-                        # rc is written only by `echo "$?"`, so it is always
-                        # digits — a complete-but-non-numeric line is anomalous
-                        # and unreachable in practice. Keep polling rather than
-                        # crash or invent an exit code: an unresolvable sentinel
-                        # then degrades to a clean timeout (transport-death via
-                        # the envelope), never an uncaught ValueError that would
-                        # bypass the error taxonomy this executor exists to keep.
+                        # rc is written only by `echo "$?"` → always digits; a
+                        # complete-but-non-numeric line is anomalous. Keep waiting
+                        # (degrades to a clean idle/envelope timeout) rather than
+                        # crash or invent an exit code.
                         pass
                     else:
-                        timed_out = False
                         break
+                try:
+                    size = (Path(stdout_file.name).stat().st_size
+                            + Path(stderr_file.name).stat().st_size)
+                except OSError:
+                    size = last_size
+                if size > last_size:
+                    last_size = size
+                    last_growth = now
+                verdict = classify_wait(now, last_growth, wait_started, limits)
+                if verdict != "continue":
+                    timed_out = True
+                    timeout_kind = verdict
+                    break
                 self._sleep(0.5)
             duration_ms = int((self._clock() - wait_started) * 1000)
             stdout = strip_terminal_control(Path(stdout_file.name).read_text())
             stderr = strip_terminal_control(Path(stderr_file.name).read_text())
-            return RunResult(exit_code, stdout, stderr, duration_ms, timed_out)
+            return RunResult(exit_code, stdout, stderr, duration_ms, timed_out, timeout_kind)
         except (OSError, UnicodeError) as exc:
             duration_ms = (
                 int((self._clock() - wait_started) * 1000)

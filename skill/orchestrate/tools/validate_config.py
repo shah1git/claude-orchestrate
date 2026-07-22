@@ -272,6 +272,64 @@ def map_completeness_violations(config_data: dict, config_path: Path) -> list:
     return violations
 
 
+# Transports whose CLI is BURST-ONLY: it stays silent during the model's work
+# (reasoning happens server-side) and writes output only on final flush —
+# measured 2026-07-23 (kimi 32s→>900s, grok ~16s of silence). For these the
+# executor's idle-liveness floor cannot see the work, so an explicit
+# `latency_envelope` covering the silent window is MANDATORY, not optional
+# (ADR-0007 regress guard, §2.10). Streaming/semi transports (agy, codex) are
+# governed safely by the idle floor and need no per-lane envelope.
+_BURST_ONLY_TRANSPORTS = {"kimi-cli-headless", "grok-cli"}
+
+
+def latency_envelope_violations(config_data: dict, config_path: Path) -> list:
+    """Regress guard for ADR-0007: (1) the executor must have a liveness floor —
+    `cross_provider.execution.idle_default_s` a positive number; (2) every lane
+    on a BURST-ONLY transport must declare a `latency_envelope` with a numeric
+    `idle_s`, so a silent-thinking lane is never killed by the idle floor. Any
+    declared envelope must be well-formed."""
+    violations = []
+    cp = config_data.get("cross_provider") or {}
+
+    execution = cp.get("execution") if isinstance(cp.get("execution"), dict) else {}
+    idle_default = execution.get("idle_default_s")
+    # bool is an int subclass — exclude it, and require strictly positive: an
+    # idle floor of 0 (or a YAML `true`) would make classify_wait kill every lane
+    # on the first tick (now - last_output >= 0 always).
+    if isinstance(idle_default, bool) or not isinstance(idle_default, (int, float)) \
+            or idle_default <= 0:
+        violations.append(
+            f"{config_path}: cross_provider.execution.idle_default_s must be a "
+            f"positive number — the executor's liveness floor (ADR-0007) has no "
+            f"valid default.")
+
+    lanes = cp.get("lanes") or {}
+    if not isinstance(lanes, dict):
+        return violations
+    for name, lane in lanes.items():
+        if not isinstance(lane, dict):
+            continue
+        env = lane.get("latency_envelope")
+        if env is not None:
+            if not isinstance(env, dict) or not isinstance(
+                    env.get("idle_s"), (int, float)):
+                violations.append(
+                    f"{config_path}: cross_provider.lanes.{name}.latency_envelope "
+                    f"must be a mapping with a numeric idle_s (ADR-0007).")
+            elif env.get("max_s") is not None and not isinstance(
+                    env.get("max_s"), (int, float)):
+                violations.append(
+                    f"{config_path}: cross_provider.lanes.{name}.latency_envelope."
+                    f"max_s must be a number or null (ADR-0007).")
+        elif lane.get("transport") in _BURST_ONLY_TRANSPORTS:
+            violations.append(
+                f"{config_path}: cross_provider.lanes.{name} is a burst-only "
+                f"transport ({lane.get('transport')}) and MUST declare a "
+                f"latency_envelope with idle_s covering its silent window — else "
+                f"the idle floor would kill correct-but-slow work (ADR-0007, §2.10).")
+    return violations
+
+
 DOTTED_REF_RE = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)`")
 
 # A backtick span shaped like a dotted path but ending in one of these is a
@@ -365,6 +423,8 @@ def main(argv=None) -> int:
     if config_data is not None:
         violations += schema_violations(config_data, skill_dir / "config.yaml")
         violations += map_completeness_violations(
+            config_data, skill_dir / "config.yaml")
+        violations += latency_envelope_violations(
             config_data, skill_dir / "config.yaml")
         exceptions = load_exceptions(exceptions_path)
         violations += prose_violations(skill_dir, config_data, exceptions)

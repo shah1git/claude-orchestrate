@@ -30,6 +30,13 @@ every non-Claude route carries a named reason into telemetry.
 > (its per-transport adapters) — kept here as the source of each lane's recipe, no longer a
 > hand-invocation instruction.
 >
+> **Waiting is bounded by LIVENESS, not wall-clock (ADR-0007).** run-lane never kills a lane for
+> being slow: a process still producing output runs to completion. Two bounds replace the old
+> timeout — `--idle-timeout` (max silence: a hung/dead transport) and `--timeout` (the lane's
+> `latency_envelope` max: a total-duration ceiling). Burst-only transports that reason
+> server-side and print only at the end (measured: kimi, grok) MUST declare a `latency_envelope`
+> in config so the idle floor never kills correct-but-slow work — `validate_config` enforces it.
+>
 > Historical notes further down that mention "the bridge" or "MCP as a Gemini path" are
 > **pre-v26 context, not current instruction** — the current path is always the vendor CLI.
 
