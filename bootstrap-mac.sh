@@ -5,21 +5,25 @@
 # установлены и авторизованы (как на исходном ВПС). Всё остальное собирает
 # этот скрипт:
 #
-#   1. Преф-лайт: git/node/rsync/claude обязательны; codex/agy/grok — желательны
+#   1. Преф-лайт: git/rsync/claude обязательны; node/codex/agy/grok — желательны
 #      (их отсутствие — штатная деградация лейнов, не ошибка установки).
-#   2. /opt/claude-orchestrate  — этот репозиторий (скилл + 4 агента), clone/pull.
-#   3. /opt/tools/agent-bridge  — мост к внешним агентам (codex-лейны, линза
-#      Standards), clone/pull. Путь фиксирован: его ждёт config.yaml.
-#   4. Набор скиллов Мэтта Покока — канон в ~/.agents/skills (реальные каталоги,
+#   2. /opt/claude-orchestrate  — этот репозиторий (три головы orchestrate/
+#      orchestrate-frontier/orca_orchestrate + 4 агента + движок run-lane),
+#      clone/pull.
+#   3. Набор скиллов Мэтта Покока — канон в ~/.agents/skills (реальные каталоги,
 #      rsync из свежего клона апстрима), ~/.claude/skills/* — симлинки на канон,
 #      ~/.codex/skills — девять симлинков хребта (тикет #11). Раскладка
 #      байт-в-байт повторяет ВПС.
-#   5. ./install.sh — штатная установка скилла оркестрации и агентов.
-#   6. Самопроверка: bridge --detect, семь канонических файлов хребта,
-#      предостережение об ultra-эффорте в ~/.codex/config.toml.
+#   4. ./install.sh — штатная установка трёх голов оркестрации и четырёх агентов.
+#   5. Самопроверка: семь канонических файлов хребта, предостережение об
+#      ultra-эффорте в ~/.codex/config.toml.
 #
-# Идемпотентен: повторный запуск = обновление всех трёх репозиториев и
-# перекладка симлинков. Это и есть механизм «подтянуть свежие скиллы Покока».
+# Мост /opt/tools/agent-bridge из этого контура УБРАН (2026-07-22): транспорт
+# унифицирован на официальные консольные утилиты вендоров через движок run-lane,
+# отдельный мост и его `--detect` больше не нужны (ADR-0005/0006).
+#
+# Идемпотентен: повторный запуск = обновление обоих репозиториев (наш + апстрим
+# Покока) и перекладка симлинков. Это и есть механизм «подтянуть свежие скиллы».
 # Если pull обновил сам bootstrap-mac.sh — скрипт перезапускает себя свежей
 # версией (bash нельзя доверять дочитывание файла, изменившегося под ногами).
 #
@@ -28,8 +32,8 @@
 # скрипт из чекаута:
 #   git clone https://github.com/shah1git/claude-orchestrate.git ~/projects/claude-orchestrate
 #   bash ~/projects/claude-orchestrate/bootstrap-mac.sh
-# sudo потребуется только для /opt/tools (путь моста фиксирован — его ждут
-# вызовы лейнов в references/cross-provider.md).
+# sudo может потребоваться только для создания /opt/tools — там кэш апстрима
+# скиллов Покока (раскладка байт-в-байт повторяет ВПС).
 # =============================================================================
 set -euo pipefail
 
@@ -41,11 +45,9 @@ if [ ! -d "${ORCH_DIR}/skill/orchestrate" ]; then
   echo "✗ рядом со скриптом нет skill/orchestrate — запускайте bootstrap-mac.sh из чекаута claude-orchestrate" >&2
   exit 1
 fi
-BRIDGE_DIR="/opt/tools/agent-bridge"
 POCOCK_CACHE="/opt/tools/mattpocock-skills"   # клон апстрима; канон живёт не здесь,
                                               # а в ~/.agents/skills (копии, как на ВПС)
 ORCH_REPO="https://github.com/shah1git/claude-orchestrate.git"
-BRIDGE_REPO="https://github.com/shah1git/agent-bridge.git"
 POCOCK_REPO="https://github.com/mattpocock/skills.git"
 
 AGENTS_STORE="${HOME}/.agents/skills"         # канон скиллов (читают Orca-порождённые харнессы)
@@ -71,10 +73,16 @@ die()  { printf '  \033[31m✗\033[0m %s\n' "$1" >&2; exit 1; }
 echo "== Преф-лайт =="
 command -v git   >/dev/null || die "git не найден"
 command -v rsync >/dev/null || die "rsync не найден"
-command -v node  >/dev/null || die "node не найден (мосту нужен Node >= 18)"
-node_major="$(node -p 'process.versions.node.split(".")[0]')"
-[ "${node_major}" -ge 18 ] || die "Node ${node_major} < 18 — обновите Node"
-ok "git, rsync, node ${node_major}"
+ok "git, rsync"
+# node этому скрипту больше не обязателен: его единственный потребитель — мост —
+# ретирован. Оставляем мягкую проверку, поскольку часть вендорских CLI (напр.
+# agy-proxy) поставляется как Node-пакеты; отсутствие node их и деградирует.
+if command -v node >/dev/null; then
+  node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  if [ "${node_major}" -ge 18 ]; then ok "node ${node_major}"; else warn "Node ${node_major} < 18 — обновите, если вендорский CLI на Node этого требует"; fi
+else
+  warn "node не найден — не критично (мост ретирован); нужен лишь части вендорских CLI"
+fi
 
 command -v claude >/dev/null || die "claude CLI не найден — без него контур не работает"
 ok "claude: $(command -v claude)"
@@ -110,7 +118,6 @@ if [ -z "${ORCH_BOOTSTRAP_REEXEC:-}" ] && [ -n "${orch_head_before}" ] \
   echo "  ↻ репозиторий обновился — перезапускаю свежий bootstrap"
   ORCH_BOOTSTRAP_REEXEC=1 exec bash "${ORCH_DIR}/bootstrap-mac.sh"
 fi
-clone_or_pull "${BRIDGE_DIR}" "${BRIDGE_REPO}"
 clone_or_pull "${POCOCK_CACHE}" "${POCOCK_REPO}"
 
 # --- 4. Скиллы Покока: канон + симлинки -------------------------------------
@@ -308,8 +315,6 @@ fi
 
 # --- 6. Самопроверка ---------------------------------------------------------
 echo "== Самопроверка =="
-node "${BRIDGE_DIR}/run-external-agent.mjs" --detect || warn "bridge --detect завершился с ошибкой — проверьте Node и логины"
-
 spine_missing=0
 for name in grilling domain-modeling to-spec to-tickets implement tdd code-review; do
   [ -f "${CLAUDE_SKILLS}/${name}/SKILL.md" ] || { warn "хребет: нет ${name}/SKILL.md"; spine_missing=1; }
