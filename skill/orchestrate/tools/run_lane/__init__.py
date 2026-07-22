@@ -20,12 +20,16 @@ together in order.
 Slices 3–6 (ADR-0005 §"План миграции срезами") are landed: all five adapters
 (`AgyAdapter`, `CodexAdapter`, `GrokAdapter`, `KimiAdapter`,
 `ClaudePrintAdapter`) and `SubprocessSubstrate` are concrete, plus the
-telemetry-from-envelope path. `OrcaTerminalSubstrate` remains a declared stub
-until the `orca_orchestrate` head lands (ADR-0006, вынос-по-сигналу).
+telemetry-from-envelope path. `OrcaTerminalSubstrate` is now fully implemented (2026-07-22): it runs the
+Invocation inside an Orca terminal and returns the same RunResult.
 
-Live-integration tail (design §6/§9 — one live snapshot per adapter, not
-deterministic): grok/kimi model witness (currently honest `'none'`), the
-`hardening.gate` sandbox-evidence path for grok/kimi, and claude-print's
-artifact materialize hook still need a real CLI run to promote/wire — see the
-adapters' docstrings and the run-lane design doc.
+Live snapshots taken 2026-07-22 closed the witness/wiring tail deterministically:
+grok model witness promoted to `'stream'` (from the `modelUsage` key), kimi
+confirmed `'none'` (no model in stream-json), codex `'pin-validated'` (no model
+in `--json`); `hardening.gate` wired with grok's evidence path
+(`~/.grok/sandbox-events.jsonl`); claude-print materialize hook landed. What
+remains is **live end-to-end only** (not deterministic): one real lane run
+through run-lane against a live model per adapter, and `OrcaTerminalSubstrate`
+against a live Orca runtime — the parsing/argv/strip logic is unit-tested against
+fixtures, but the real CLI/Orca round-trip is an integration check.
 """

@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -588,19 +589,115 @@ def test_get_adapter_returns_the_right_class_for_every_registered_transport(tran
 
 
 # =============================================================================
-# 7. OrcaTerminalSubstrate — declared stub, not a real implementation
+# 7. OrcaTerminalSubstrate — deterministic control-plane fake
 # =============================================================================
 
 
-def test_orca_terminal_substrate_raises_config_error(tmp_path):
-    inv = adapters.Invocation(argv=["agy"], env={}, stdin_policy="devnull",
-                               cwd=str(tmp_path), prompt_addendum=None,
-                               log_file=None)
-    with pytest.raises(LaneError) as excinfo:
-        substrate.OrcaTerminalSubstrate().run(inv, timeout=10)
-    assert excinfo.value.error_class == "config"
-    assert "orca-terminal" in excinfo.value.message
-    assert "не реализован" in excinfo.value.message
+def test_strip_terminal_control_restores_jsonl_from_osc_and_ansi_fixture():
+    json_line = json.dumps({"type": "thread.started", "thread_id": "fixture"})
+    noisy = "\x1b]133;C\x07\x1b[32m" + json_line + "\x1b[0m\n"
+
+    cleaned = substrate.strip_terminal_control(noisy)
+
+    assert cleaned == json_line + "\n"
+    assert json.loads(cleaned) == {"type": "thread.started", "thread_id": "fixture"}
+
+
+def test_orca_terminal_shell_and_control_commands_preserve_invocation_recipe(tmp_path):
+    inv = adapters.Invocation(
+        argv=["opaque-command", "argument with spaces"],
+        env={"ADDED": "value with spaces"}, env_unset=("REMOVED",),
+        stdin_policy="pipe", cwd=str(tmp_path), prompt_addendum=None, log_file=None)
+    shell_command = substrate.build_orca_shell_command(
+        inv, tmp_path / "stdout", tmp_path / "stderr", tmp_path / "stdin")
+    words = shlex.split(shell_command)
+
+    assert words[:5] == ["env", "-u", "REMOVED", "ADDED=value with spaces", "opaque-command"]
+    assert words[5] == "argument with spaces"
+    assert words[words.index(">") + 1] == str(tmp_path / "stdout")
+    assert words[words.index("2>") + 1] == str(tmp_path / "stderr")
+    assert words[words.index("<") + 1] == str(tmp_path / "stdin")
+    assert substrate.build_orca_create_command("path:/work", "run-lane", shell_command) == [
+        "orca", "terminal", "create", "--worktree", "path:/work", "--title",
+        "run-lane", "--command", shell_command, "--json"]
+    assert substrate.build_orca_wait_command("term_fixture", 7) == [
+        "orca", "terminal", "wait", "--terminal", "term_fixture", "--for",
+        "exit", "--timeout-ms", "7000", "--json"]
+    assert substrate.build_orca_close_command("term_fixture") == [
+        "orca", "terminal", "close", "--terminal", "term_fixture", "--json"]
+
+
+def test_orca_terminal_substrate_reads_clean_disk_output_and_closes(tmp_path):
+    calls = []
+    created_paths = {}
+
+    def fake_orca_runner(command, **kwargs):
+        calls.append(command)
+        assert kwargs == {"capture_output": True, "text": True}
+        action = command[1:3]
+        if action == ["terminal", "create"]:
+            assert command[command.index("--worktree") + 1] == f"path:{tmp_path}"
+            shell_words = shlex.split(command[command.index("--command") + 1])
+            stdout_path = Path(shell_words[shell_words.index(">") + 1])
+            stderr_path = Path(shell_words[shell_words.index("2>") + 1])
+            stdin_path = Path(shell_words[shell_words.index("<") + 1])
+            created_paths.update(stdout=stdout_path, stderr=stderr_path, stdin=stdin_path)
+            assert stdin_path.read_text() == "prompt via stdin"
+            stdout_path.write_text("\x1b]133;C\x07\x1b[36m{\"type\": \"event\"}\x1b[0m\n")
+            stderr_path.write_text("\x1b]133;D\x1b\\warning\x1b[31m!\x1b[0m\n")
+            payload = {"ok": True, "result": {"terminal": {"handle": "term_fixture"}}}
+        elif action == ["terminal", "wait"]:
+            assert command[-3:] == ["--timeout-ms", "2500", "--json"]
+            payload = {"ok": True, "result": {"wait": {
+                "condition": "exit", "satisfied": True, "status": "exited", "exitCode": 17}}}
+        elif action == ["terminal", "close"]:
+            payload = {"ok": True, "result": {}}
+        else:
+            raise AssertionError(command)
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    ticks = iter((100.0, 100.123))
+    inv = adapters.Invocation(
+        argv=["opaque-command", "--json"], env={"EXTRA": "yes"},
+        env_unset=("INHERITED",), stdin_policy="pipe", stdin_data="prompt via stdin",
+        cwd=str(tmp_path), prompt_addendum=None, log_file=None)
+
+    result = substrate.OrcaTerminalSubstrate(
+        runner=fake_orca_runner, clock=lambda: next(ticks)).run(inv, timeout=2.5)
+
+    assert result == substrate.RunResult(
+        exit_code=17, stdout='{"type": "event"}\n', stderr="warning!\n",
+        duration_ms=123, timed_out=False)
+    assert [command[1:3] for command in calls] == [
+        ["terminal", "create"], ["terminal", "wait"], ["terminal", "close"]]
+    assert all(not path.exists() for path in created_paths.values())
+
+
+def test_orca_terminal_substrate_marks_unsatisfied_wait_as_timeout(tmp_path):
+    calls = []
+
+    def fake_orca_runner(command, **kwargs):
+        calls.append(command)
+        if command[1:3] == ["terminal", "create"]:
+            shell_words = shlex.split(command[command.index("--command") + 1])
+            Path(shell_words[shell_words.index(">") + 1]).write_text("partial\n")
+            payload = {"ok": True, "result": {"terminal": {"handle": "term_timeout"}}}
+        elif command[1:3] == ["terminal", "wait"]:
+            payload = {"ok": True, "result": {"wait": {
+                "condition": "exit", "satisfied": False, "status": "running", "exitCode": 143}}}
+        else:
+            payload = {"ok": True, "result": {}}
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    inv = adapters.Invocation(argv=["opaque-command"], env={}, stdin_policy="devnull",
+                               cwd=str(tmp_path), prompt_addendum=None, log_file=None)
+    result = substrate.OrcaTerminalSubstrate(
+        runner=fake_orca_runner, clock=iter((1.0, 1.01)).__next__).run(inv, timeout=1)
+
+    assert result.exit_code == 143
+    assert result.stdout == "partial\n"
+    assert result.timed_out is True
+    assert [command[1:3] for command in calls][-1] == ["terminal", "close"]
 
 
 # =============================================================================
@@ -681,6 +778,7 @@ def test_substrate_module_never_hardcodes_a_cli_name():
     assert "codex" not in src
     assert "grok" not in src
     assert "kimi" not in src
+    assert "claude" not in src
 
 
 # =============================================================================
@@ -911,21 +1009,14 @@ def test_cli_unquoted_yaml_no_capability_override_is_loud_config_error(tmp_path)
     assert "supports_schema" in envelope_out["error"]["message"]
 
 
-def test_cli_substrate_orca_terminal_is_config_error_stub(tmp_path):
+def test_cli_parser_accepts_orca_terminal_substrate_without_running_orca(tmp_path):
     workdir, prompt_file, out = _make_workdir(tmp_path)
-    config = tmp_path / "config.yaml"
-    config.write_text(MINIMAL_CONFIG)
-    env = _cli_env(tmp_path)
-
-    result = _run_cli([
-        "--lane", "agy-test-lane", "--config", str(config),
+    args = run_lane_main.build_parser().parse_args([
+        "--lane", "fixture", "--config", str(tmp_path / "config.yaml"),
         "--prompt-file", str(prompt_file), "--workdir", str(workdir),
         "--out", str(out), "--substrate", "orca-terminal",
-    ], env=env)
-    envelope_out = json.loads(result.stdout)
-    assert envelope_out["ok"] is False
-    assert envelope_out["error"]["class"] == "config"
-    assert "orca-terminal" in envelope_out["error"]["message"]
+    ])
+    assert args.substrate == "orca-terminal"
 
 
 def test_cli_substrate_defaults_to_subprocess(tmp_path):
