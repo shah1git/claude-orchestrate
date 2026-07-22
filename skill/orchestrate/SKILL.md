@@ -495,10 +495,21 @@ agent and per cross-provider lane; edited there): the first *available* element 
 **Equal-weight pools (v23).** A chain element written as `equal: [...]` is not a preference
 order but a set of *peers*: on reaching it, pick **within** it by
 `availability.equal_weight_selection` — the peer dispatched least often so far this run,
-ties broken by written order (deterministic, so a run replays). Two chains carry one today:
-`architect` (Fable stays the default *above* the pool) and `critic`. Filters run first,
+ties broken by written order (deterministic, so a run replays). Several chains carry one
+today: `architect` (Fable stays the default *above* the pool), `critic`, `builder`, and the
+two gate lenses (`spec-lens`, `standards-lens`). Filters run first,
 rotation second — the breaker drops unhealthy providers and `independence_filter` drops the
-deliverable's own vendor, and only what survives both is rotated over. An explicitly
+deliverable's own vendor, and only what survives both is rotated over.
+This rotation is **mechanical, not eyeballed** (the reason it kept drifting to one model
+was that it lived only in prose): after computing the surviving peers, call
+`python3 tools/dispatch_ledger.py claim --run-id <run_id> --among <survivor,survivor,…>
+[--role <role>]` — it atomically returns the least-dispatched survivor **and** records that
+dispatch in one call. That atomic claim is what makes a fan-out correct: N builders claimed
+in one wave get N *distinct* peers, whereas a counter merely *read* from the routing-log
+would see all-zeros (routing-log rows are written on worker *completion*, after the whole
+wave is already dispatched) and hand every builder the same "least-dispatched" peer. The
+lead **claims, never guesses**; a forced route (latency override) is booked with
+`dispatch_ledger.py record` so the counter still sees it. An explicitly
 latency-sensitive ticket (`cross_provider.latency_sensitive.applies_when`) overrides the rotation and takes
 the fastest peer. A pool pick is a **route, not a reroute**: it stamps
 `xprovider_reason: quota-spread` and never `fallback_from` — otherwise routine rotation
@@ -528,7 +539,7 @@ that is the whole win. Probe to revive only at a wave boundary, at most twice a 
 send the first live ticket back on a non-gate lane (a half-alive transport that loses tool
 output produces exactly the false PASS we must not let into the gate). A second open writes
 the provider off for the run. Across runs the counter is **not** carried (runs are hours
-apart); instead, at Step 2 — right where `--detect` already runs — read the last 24h of
+apart); instead, at Step 2 — right where `run-lane detect` already runs — read the last 24h of
 `provider_health` events, and if a provider ended a prior run open, require a canary before
 the first live dispatch to it. When reading the `critic` and `standards-lens` chains, apply
 `independence_filter: skip-producer-vendor` — never let a critic grade its own vendor's work.

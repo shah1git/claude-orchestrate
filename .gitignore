@@ -11,7 +11,9 @@ benchmark/results/
 __pycache__/
 .pytest_cache/
 
-# Транзитные логи run-lane: agy пишет журнал-свидетель в <workdir>/.run-lane-agy-*.log
-# (путь попадает в конверт как evidence.log_path). Это улика прогона, не исходник —
-# держим локально, из репозитория исключаем (2026-07-22).
+# Транзитные артефакты run-lane в <workdir>: agy пишет журнал-свидетель
+# .run-lane-agy-*.log (путь попадает в конверт как evidence.log_path), grok-адаптер
+# материализует промпт в .run-lane-grok-prompt-*.md. Это улики/скрэтч прогона, не
+# исходники — держим локально, из репозитория исключаем (2026-07-22).
 .run-lane-agy-*.log
+.run-lane-grok-prompt-*.md

@@ -117,8 +117,8 @@ def test_quota_guardrail_without_lanes_or_all_does_not_call_runner(tmp_path, cap
     assert "--lanes" in err and "--all" in err
 
 
-def test_quota_guardrail_bare_argv_prints_stub_no_runner(capsys):
-    """S2a dispatch probe: smoke --future-argument → stub JSON, no work."""
+def test_quota_guardrail_bare_argv_shows_guardrail_no_runner(capsys):
+    """Bare `run-lane smoke` (no --config, no selector) → guardrail, no work."""
     runner = RecordingRunner()
     code = smoke.main(
         ["--future-argument"],
@@ -127,7 +127,9 @@ def test_quota_guardrail_bare_argv_prints_stub_no_runner(capsys):
     )
     assert code == 0
     assert runner.calls == []
-    assert json.loads(capsys.readouterr().out) == {"mode": "smoke", "status": "stub"}
+    captured = capsys.readouterr()
+    assert captured.out == ""                       # no stub blob on stdout
+    assert "refusing to burn model quota" in captured.err
 
 
 # --- acceptance 1 + 4: available lane runs and is reported ------------------

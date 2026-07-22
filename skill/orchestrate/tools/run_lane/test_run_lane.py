@@ -2007,13 +2007,34 @@ def test_main_run_verb_uses_the_legacy_run_path(tmp_path, monkeypatch):
     assert vars(received[0]) == vars(received[1])
 
 
-@pytest.mark.parametrize(("verb", "expected"), [
-    # detect is no longer a stub (S2b fills it in; coverage lives in test_detect.py).
-    ("smoke", {"mode": "smoke", "status": "stub"}),
-])
-def test_main_dispatches_stub_verbs(verb, expected, capsys):
-    assert run_lane_main.main([verb, "--future-argument"]) == 0
-    assert json.loads(capsys.readouterr().out) == expected
+def test_main_dispatches_smoke_verb_to_guardrail(capsys):
+    """`run-lane smoke` with no selector reaches smoke.main → quota guardrail,
+    not a stub blob (both detect and smoke are shipped now)."""
+    assert run_lane_main.main(["smoke", "--future-argument"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "refusing to burn model quota" in captured.err
+
+
+def test_lane_named_like_a_verb_reaches_run_not_the_verb(tmp_path, monkeypatch):
+    """Collision guarantee (S2a critic note): a lane whose name equals a verb
+    keyword is still reachable via the flag form `--lane <verb>` — the verb
+    dispatcher fires only on a bare (non-flag) first token, so `--lane detect`
+    goes to the run pipeline, never to detect.main."""
+    received = []
+
+    def fake_run(args):
+        received.append(args)
+        return {"ok": True, "lane": args.lane}   # _main_run reads env.get("ok")
+
+    monkeypatch.setattr(run_lane_main, "run", fake_run)
+    rc = run_lane_main.main([
+        "--lane", "detect", "--config", "c.yaml",
+        "--prompt-file", "p", "--workdir", ".", "--out", "o",
+    ])
+    assert rc == 0
+    assert len(received) == 1
+    assert received[0].lane == "detect"   # reached run() with the lane, not the verb
 
 
 def test_main_dispatches_detect_verb_returns_map(capsys, monkeypatch, tmp_path):

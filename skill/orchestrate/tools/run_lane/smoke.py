@@ -357,13 +357,9 @@ def main(
 
     # --- quota guardrail: no selector → never call detect or run ------------
     if not args.all and args.lanes is None:
-        # Bare / junk argv (S2a dispatch probe: `run-lane smoke --future-argument`)
-        # must not burn quota. Keep the historical stub JSON so
-        # test_main_dispatches_stub_verbs[smoke] stays green without editing
-        # test_run_lane.py; real operators always pass --config + a selector.
-        if args.config is None:
-            print(json.dumps({"mode": "smoke", "status": "stub"}))
-            return 0
+        # No lane selector → refuse to burn quota, with or without --config.
+        # Both detect and smoke are shipped (not stubs); a bare `run-lane smoke`
+        # is a misuse, answered with the guardrail hint rather than a stub blob.
         print(_quota_guardrail_message(), file=sys.stderr)
         return 0
 
