@@ -185,9 +185,9 @@ vendor CLI (v26). No bridge column, no MCP column.
 
 | Lane | Use | Console utility (CLI) call — shape | Degrades to |
 |---|---|---|---|
-| `codex-critic` | cross-model lens — a Standards-axis route (fixed gate member, not opt-in) | `codex exec --model gpt-5.6-sol --effort xhigh --output-schema <verdict> --sandbox read-only --cwd <repo>` | `standards-lens` chain → `sonnet-inline-note` |
-| `codex-code` | coding hand | `codex exec --model gpt-5.6-terra --effort high --sandbox workspace-write --cwd <worktree>` | `builder` (Sonnet) |
-| `codex-recon` | cheap repo-grounded recon with shell | `codex exec --model gpt-5.6-luna --effort medium --sandbox read-only --cwd <repo>` | `scout` (file-only) / `builder` (needs shell) |
+| `codex-critic` | cross-model lens — a Standards-axis route (fixed gate member, not opt-in) | `codex exec --model gpt-5.6-sol -c model_reasoning_effort=xhigh --output-schema <verdict> --sandbox read-only --cwd <repo>` | `standards-lens` chain → `sonnet-inline-note` |
+| `codex-code` | coding hand | `codex exec --model gpt-5.6-terra -c model_reasoning_effort=high --sandbox workspace-write --cwd <worktree>` | `builder` (Sonnet) |
+| `codex-recon` | cheap repo-grounded recon with shell | `codex exec --model gpt-5.6-luna -c model_reasoning_effort=medium --sandbox read-only --cwd <repo>` | `scout` (file-only) / `builder` (needs shell) |
 | `gemini-critic` | cross-model lens (alt) — Standards-axis fallback; judges by inlined material only (`requires_pregate_output_inline`) | `agy --model "Gemini 3.6 Flash (High)" --add-dir <abs> --print-timeout 5m -p "<prompt>" < /dev/null` | `standards-lens` chain → `sonnet-inline-note` |
 | `gemini-recon` / `gemini-flash` | big-context recon | `agy --model "Gemini 3.6 Flash (High)" --add-dir <abs> -p "<prompt>" < /dev/null` | `scout` (Haiku) |
 | `agy-opus` | frontier-Claude on Google quota | `agy --model claude-opus-4-6-thinking --add-dir <abs> -p "<prompt>" < /dev/null` | `opus` (Anthropic quota) |
@@ -233,7 +233,8 @@ here, so they are not pinnable; `Gemini 3.5 Pro` is not yet public at all.)
 >   (checked 2026-07-10)**, so there is nothing to pin for our lanes. The 372k context figure is the CLI catalog's
 >   value; OpenAI has published no official 5.6 context window (product-side ChatGPT caps
 >   differ) — treat circulating web figures as unconfirmed. Effort is pinned per call via
->   `codex exec --effort <level>` or `-c model_reasoning_effort=…` on the codex CLI.
+>   `codex exec … -c model_reasoning_effort=<level>` on the codex CLI (there is **no** `--effort`
+>   flag on `codex exec` — verified on the live CLI 2026-07-22; the drift this doc exists to prevent).
 >   **Config-inheritance hazard:** `~/.codex/config.toml` pins the owner's interactive
 >   default to `terra` + effort **`ultra`** — a routed call that omits `--effort` silently
 >   inherits ultra and its multi-agent cost, so **every routed Codex call must pin both
@@ -499,7 +500,7 @@ workspace root where other agents' work lives. Config: `cross_provider.staging_i
 
 A peer coding lane, chosen at routing time by lead judgment — the Use 4 baseline makes it
 the default for well-specified builder tickets when detected. **Call**:
-`codex exec --model gpt-5.6-terra --effort high --sandbox workspace-write --cwd <worktree>`
+`codex exec --model gpt-5.6-terra -c model_reasoning_effort=high --sandbox workspace-write --cwd <worktree>`
 (`--json` gives `durationMs` + structured `usage` token counts). Params: prompt = a
 **builder-contract**
 ticket (full spec, explicit scope, "run scoped checks yourself"); `cwd` = a dedicated
