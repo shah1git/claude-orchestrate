@@ -62,6 +62,27 @@ def log_rows(skill_dir):
     return [json.loads(l) for l in text.splitlines() if l.strip()]
 
 
+def envelope(**over):
+    base = {
+        "lane": "codex-builder", "transport": "codex-cli",
+        "substrate": "subprocess", "ok": True,
+        "model_declared": "gpt-5.6-sol", "model_observed": "gpt-5.6-terra",
+        "artifact": {"path": "/tmp/result.md", "present": True,
+                     "bytes": 42, "sha256": "a" * 64},
+        "durationMs": 3210,
+        "usage": {"input_tokens": 100, "cached_input_tokens": 20,
+                  "output_tokens": 30, "reasoning_output_tokens": 40},
+    }
+    base.update(over)
+    return base
+
+
+def write_envelope(tmp_path, **over):
+    path = tmp_path / "lane.json"
+    path.write_text(json.dumps(envelope(**over)), encoding="utf-8")
+    return path
+
+
 def test_valid_record_appends_and_reports_budget(tmp_path):
     d = make_skill_dir(tmp_path)
     p = run(d, json.dumps(row()))
@@ -76,6 +97,49 @@ def test_record_via_stdin(tmp_path):
                        input=json.dumps(row()), capture_output=True, text=True)
     assert p.returncode == 0, p.stderr
     assert len(log_rows(d)) == 1
+
+
+def test_envelope_populates_observed_measurements_and_provenance(tmp_path):
+    d = make_skill_dir(tmp_path)
+    source = write_envelope(tmp_path)
+    p = run(d, "--from-envelope", str(source), json.dumps(row(
+        model="hand-entered", tokens=999, duration_ms=1, note="gate accepted")))
+    assert p.returncode == 0, p.stderr
+    record = log_rows(d)[0]
+    assert record["model"] == "gpt-5.6-terra"  # witness, never declared alias
+    assert record["duration_ms"] == 3210
+    assert record["tokens"] == 190
+    assert record["note"] == (
+        "gate accepted; run-lane: transport=codex-cli, substrate=subprocess, "
+        "artifact_sha256=" + "a" * 64)
+
+
+def test_envelope_null_usage_becomes_na_tokens(tmp_path):
+    d = make_skill_dir(tmp_path)
+    source = write_envelope(tmp_path, usage=None)
+    p = run(d, "--from-envelope", str(source), json.dumps(row()))
+    assert p.returncode == 0, p.stderr
+    assert log_rows(d)[0]["tokens"] == "n/a"
+
+
+def test_failed_envelope_is_still_logged(tmp_path):
+    d = make_skill_dir(tmp_path)
+    source = write_envelope(tmp_path, ok=False, usage={"total_tokens": 12})
+    p = run(d, "--from-envelope", str(source), json.dumps(row(verdict="FAIL")))
+    assert p.returncode == 0, p.stderr
+    record = log_rows(d)[0]
+    assert record["verdict"] == "FAIL"
+    assert record["tokens"] == 12
+
+
+def test_envelope_path_still_rejects_drift_aliases(tmp_path):
+    d = make_skill_dir(tmp_path)
+    source = write_envelope(tmp_path)
+    bad = {k if k != "date" else "ts": v for k, v in row().items()}
+    p = run(d, "--from-envelope", str(source), json.dumps(bad))
+    assert p.returncode == 1
+    assert "'ts'" in p.stderr and "'date'" in p.stderr
+    assert log_rows(d) == []
 
 
 def test_drift_alias_rejected_nothing_appended(tmp_path):

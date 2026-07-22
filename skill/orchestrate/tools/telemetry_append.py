@@ -19,11 +19,16 @@ the exact moment data is born — not reconstructed post-factum.
 Usage:
     telemetry_append.py '<json-object>'          # append one record
     echo '<json-object>' | telemetry_append.py   # same, via stdin
+    telemetry_append.py --from-envelope lane.json '<json-object>'
+                                                # populate observed facts
     telemetry_append.py --check-only --task T    # budget verdict, no append
     telemetry_append.py --check-only --run-id R
 
 Options:
     --skill-dir DIR        skill root (default: tools/..)
+    --from-envelope PATH   run-lane JSON envelope; its observed model,
+                           duration, token usage, and execution provenance
+                           populate the supplied §7 record
     --tokens-max N         run-declared ceiling overriding config
                            session_budget.tokens_max (a ticket/plan-declared
                            decision, made up front — mirrors max_diff_lines'
@@ -172,6 +177,76 @@ def validate_record(row: dict, config: dict) -> dict:
     return row
 
 
+# --- run-lane envelope intake -------------------------------------------------
+
+def envelope_tokens(usage) -> int | str:
+    """Return the truthful §7 token total exposed by a run-lane envelope.
+
+    The bridge's structured usage has no separate §7 home for its component
+    counters. Prefer an explicitly supplied total; otherwise sum the counters
+    that the bridge documents. `cached_input_tokens` is deliberately included:
+    it is a separately reported observed counter, never a guessed adjustment.
+    A missing or unrecognised usage witness is `n/a`, matching §7's data-
+    honesty rule rather than manufacturing a zero.
+    """
+    if not isinstance(usage, dict):
+        return "n/a"
+
+    for key in ("total_tokens", "total", "tokens"):
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+
+    counters = ("input_tokens", "cached_input_tokens", "output_tokens",
+                "reasoning_output_tokens")
+    values = [usage[key] for key in counters
+              if isinstance(usage.get(key), int)
+              and not isinstance(usage[key], bool)]
+    return sum(values) if values else "n/a"
+
+
+def apply_envelope(row: dict, envelope: dict) -> dict:
+    """Overlay run-lane's observed facts onto a lead-classified §7 record.
+
+    The lead retains the classification and verdict in ``row``. The envelope
+    is the witness for runtime facts, so it intentionally wins over any
+    hand-entered model, duration, or token values.
+    """
+    row = dict(row)
+    row["model"] = envelope.get("model_observed")
+    row["duration_ms"] = envelope.get("durationMs")
+    row["tokens"] = envelope_tokens(envelope.get("usage"))
+
+    artifact = envelope.get("artifact")
+    provenance = []
+    if envelope.get("transport") is not None:
+        provenance.append(f"transport={envelope['transport']}")
+    if envelope.get("substrate") is not None:
+        provenance.append(f"substrate={envelope['substrate']}")
+    if isinstance(artifact, dict) and artifact.get("sha256") is not None:
+        provenance.append(f"artifact_sha256={artifact['sha256']}")
+    if provenance:
+        note = row.get("note")
+        row["note"] = "; ".join(
+            part for part in (note, "run-lane: " + ", ".join(provenance))
+            if part)
+    return row
+
+
+def load_envelope(path: Path) -> dict:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        fail(f"cannot read --from-envelope {path}: {exc}")
+    try:
+        envelope = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        fail(f"--from-envelope is not valid JSON: {exc}")
+    if not isinstance(envelope, dict):
+        fail("--from-envelope must contain a single JSON object")
+    return envelope
+
+
 # --- budget (config session_budget, quality.md §3) ---------------------------
 
 def read_log(log_path: Path) -> list:
@@ -230,6 +305,7 @@ def main(argv: list) -> int:
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("record", nargs="?")
     ap.add_argument("--skill-dir", type=Path, default=DEFAULT_SKILL_DIR)
+    ap.add_argument("--from-envelope", type=Path)
     ap.add_argument("--check-only", action="store_true")
     ap.add_argument("--task")
     ap.add_argument("--run-id")
@@ -264,6 +340,9 @@ def main(argv: list) -> int:
         fail(f"record is not valid JSON: {exc}")
     if not isinstance(row, dict):
         fail("record must be a single JSON object")
+
+    if args.from_envelope is not None:
+        row = apply_envelope(row, load_envelope(args.from_envelope))
 
     row = validate_record(row, config)
 
