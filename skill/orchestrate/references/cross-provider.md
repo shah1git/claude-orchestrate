@@ -163,9 +163,12 @@ for recon, wrong for a Pro-tier critic.
 >   thereby answered a *neighbour* workspace's ticket and wrote+committed into its directory (a live
 >   incident #6 "poisoned neighbour"; telemetry/incidents.md). Do not promote native agy as a lane
 >   until each staged workspace is structurally isolated and the agent is pre-trusted.
-> So `gemini-critic` is a usable Standards-axis fallback again **via `ask-gemini` MCP, at Flash
-> tier** (`availability.fallbacks.standards-lens`); `codex-critic` (Sol) stays the *preferred*
-> route on quality (8/8, 0 FP, honours its Pro pin) — it is `cross_provider.defaults.standards_lens`.
+> **v27/v28 update:** the Standards axis is now an **equal pool**, not a single preferred lane —
+> `availability.fallbacks.standards-lens: equal:[gemini-flash, codex-critic, grok-4.5, kimi-k3]`,
+> rotated by least-dispatched-this-run, all non-Claude by construction, terminal `sonnet-inline-note`.
+> There is no single-default standards lane anymore — the former cross-provider defaults
+> standards key is dissolved into the chain;
+> `codex-critic`'s 8/8-0FP record is provenance for its pool membership, not a preference over peers.
 
 > **File access — per CLI, directly (v26; the bridge's staging-copy scheme is retired).**
 > `codex exec` is an *agent* that reads files in its `--cwd` sandbox itself — point it at a
@@ -353,9 +356,9 @@ Every gated deliverable runs the fixed three-lens gate (`gates.lenses`, ADR-0002
 Spec, критик (SKILL.md Step 4). The Standards lens's whole point is a **non-Claude executor**
 closing the self-preference-bias gap (CONTEXT.md, term "Self-preference bias") — since
 config v11–v12 this is a **permanent member of the gate**, not an opt-in extra bolted onto a
-dual-lens gate (that mechanism, v3–v10, no longer exists). `cross_provider.defaults.
-standards_lens: codex-critic` is the default route; `availability.fallbacks.standards-lens:
-[codex-critic, gemini-critic, sonnet-inline-note]` is its dedicated fallback chain
+dual-lens gate (that mechanism, v3–v10, no longer exists). the axis is an **equal pool** `availability.fallbacks.standards-lens:
+equal:[gemini-flash, codex-critic, grok-4.5, kimi-k3]` (rotated least-dispatched, terminal
+`sonnet-inline-note`) — no single default lane
 (config.yaml). Prefer `codex-critic` (polygon: 8/8 planted defects, 0 FP, honours its
 Sol-xhigh pin) as the primary; `gemini-critic` is a usable stand-in after the 2026-07-12
 two-transport re-test (the 2026-07-11 2/2 misfires were transport-, not model-caused), but
@@ -539,7 +542,7 @@ present, these lanes route cross-provider **by default** — no per-run user pro
 | high-volume mechanical sweeps whose material can be **inlined** in the prompt | `gemini-recon-cheap` (Flash Low) | `scout` (Haiku) |
 | mechanical repo sweeps that need **shell execution** (run a linter/script, count via command — never scout's lane, it has no shell) | `codex-recon` (Luna, medium) | `builder` (Sonnet) |
 | well-specified implementation tickets (builder-class) | `codex-code` (Terra high, worktree, gates unchanged) | `builder` (Sonnet) |
-| Standards axis of the fixed gate — **runs on every gated deliverable, not opt-in** (ADR-0002, config v11–v12) | `codex-critic` (Sol xhigh) preferred (`cross_provider.defaults.standards_lens`); `gemini-critic` usable fallback via `ask-gemini` MCP at Flash tier only (re-test 2026-07-12; not the Pro tier, surface Flash-locks it) | `availability.fallbacks.standards-lens` → `sonnet-inline-note` (never a silent gate-shrink) |
+| Standards axis of the fixed gate — **runs on every gated deliverable, not opt-in** (ADR-0002) | **equal pool** `equal:[gemini-flash, codex-critic, grok-4.5, kimi-k3]`, all non-Claude, rotated least-dispatched — no single default | `availability.fallbacks.standards-lens` → `sonnet-inline-note` (never a silent gate-shrink) |
 
 What NEVER shifts under the mandate — quality is the routing invariant, quota is not:
 

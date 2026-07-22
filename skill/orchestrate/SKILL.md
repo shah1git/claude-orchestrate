@@ -472,7 +472,8 @@ than invoked opt-in — and *quota-spread* across the user's subscriptions (base
 cross-provider.md Use 4). Since 2026-07-12
 the spread is a necessity, not a bonus — the owner's weekly Claude window runs out 1–2 days
 before reset across 3–4 parallel projects — and the three codex lanes are promoted from
-pilot to fixed defaults (config `cross_provider.promoted`). Judgment routes
+pilot to fixed lanes (their promotion provenance now lives in each lane's
+`status:`/`evidence:` fields, `cross_provider.lanes`). Judgment routes
 providers, never quality: the lead itself stays the session model, and every gated
 deliverable is graded by a critic that neither built it nor shares its vendor
 (self-preference guard). Since v18 the grader need not be Claude — honesty-cleared
@@ -531,6 +532,11 @@ apart); instead, at Step 2 — right where `--detect` already runs — read the 
 `provider_health` events, and if a provider ended a prior run open, require a canary before
 the first live dispatch to it. When reading the `critic` and `standards-lens` chains, apply
 `independence_filter: skip-producer-vendor` — never let a critic grade its own vendor's work.
+Resolving a chain name to its vendor goes through the **alias hop**: a judging-chain entry may
+be an effort/model alias (`sol`, `grok-4.5`), resolved via `availability.aliases` → a lane →
+`availability.provider_map` → the vendor; the validator's `map_completeness_violations` fails
+the build if any routable name cannot make that hop (so a critic can never end up graded by an
+unresolvable — hence vendor-blind — lane).
 
 ## Step 3 — Delegate with task tickets
 

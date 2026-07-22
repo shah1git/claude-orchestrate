@@ -88,8 +88,6 @@ SCHEMA = {
         "staging_inputs_only": {"type": str},
         "auth": {"type": str},
         "lanes": {"type": dict},
-        "defaults": {"type": dict},
-        "promoted": {"type": dict},
         "pilots": {"type": dict},
         "never_shift": {"type": list},
         "ultra_policy": {"type": dict},

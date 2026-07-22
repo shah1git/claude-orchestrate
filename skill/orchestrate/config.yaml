@@ -929,51 +929,16 @@ cross_provider:
     never_feedback: "/feedback не использовать — даже «Logs only» выгружает полный диалог"
     # client_data_gate снят 2026-07-19 (решение владельца-контролёра данных)
 
-  # Базовое распределение под quota-spread (Use 4): лейн -> дефолтный маршрут.
-  # v3: спред — постоянная политика, а не режим «когда окно уже кончилось»:
-  # при 3–4 параллельных проектах недельное окно Claude стабильно исчерпывается
-  # за 1–2 дня до сброса; ждать исчерпания значит опоздать ровно на эти дни.
-  defaults:
-    # v27 (срез 2, ADR-0005 §5 «растворить defaults в цепочки»): пять ключей,
-    # буквально дублировавшие головы своих цепочек (web_recon/big_context_recon/
-    # inline_mechanical_sweeps/shell_mechanical_sweeps/well_specified_builder_
-    # tickets — было v26, см. git-история), УБРАНЫ: голова цепочки уже читается
-    # из availability.fallbacks.<роль>[0], второй записи для того же значения не
-    # требуется. web_recon/big_context_recon читаются из fallbacks.gemini-flash /
-    # роли scout/builder; inline_mechanical_sweeps — из fallbacks.scout (голова —
-    # gemini-flash); shell_mechanical_sweeps — из fallbacks.codex-recon; well_
-    # specified_builder_tickets — из fallbacks.builder.
-    #
-    # ОГОВОРКА (не полное растворение — см. отчёт исполнителя тикета и запись
-    # v27 в шапке файла). Ключ `standards_lens` НИЖЕ ОСТАВЛЕН нетронутым: он и
-    # так не дублировал значение (его значение — сама строка "availability.
-    # fallbacks.standards-lens", ссылка, а не лейн), но САМ ПУТЬ `cross_provider.
-    # defaults.standards_lens` дословно цитируется в references/cross-provider.
-    # md:167,540 обратными кавычками — правка/удаление этой прозы вне границ
-    # тикета (BOUNDARIES запрещает трогать references/*.md), а удаление ключа
-    # без правки прозы уронило бы tools/validate_config.py (prose_violations).
-    # v12 (срез 4, issue #8): постоянный маршрут Standards-оси фиксированного гейта —
-    # не opt-in и не чередование (заменяет third_lens.alternate v3–v10: то чередование
-    # обслуживало опциональную третью линзу, которой с v11 не существует). Fallback-
-    # цепочка — availability.fallbacks.standards-lens, ниже в этом файле.
-    # v23 (решение владельца 2026-07-21): не одиночный лейн, а равный пул Sol/Grok/Kimi.
-    # Единственное место, где он перечислен, — цепочка; здесь только ссылка на неё,
-    # чтобы два исполняемых значения не разошлись.
-    standards_lens: availability.fallbacks.standards-lens
-
-  # Закреплённые лейны (v3, решение владельца 2026-07-12) — то самое «отдельное
-  # решение пользователя», которым пилот v2 и должен был закрываться: три
-  # codex-лейна переведены из пилота в закреплённые дефолты. Эмпирика — полигон
-  # ролей 2026-07-11 (benchmark/RESULTS.md); мотив — квота (см. комментарий к
-  # defaults выше). Качество не сдвинуто: never_shift ниже действует без
-  # изменений, judgment-класс и первичный грейдер каждого гейта остаются Claude.
-  # v27 (срез 2, ADR-0005 §5 «сжать promoted/pilots»): три записи (codex-recon,
-  # codex-code, codex-critic) переехали в status:/evidence: соответствующих
-  # лейнов (cross_provider.lanes) — блок оставлен пустым, а не удалён: SKILL.md:
-  # 475 держит дословную бэктик-ссылку `cross_provider.promoted`, вне границ
-  # тикета (references/*.md и SKILL.md трогать нельзя). Пустой блок эту ссылку
-  # резолвит, живых данных здесь больше нет — см. лейны выше.
-  promoted: {}
+  # v28 (2026-07-22): блоки `defaults` и `promoted` РАСТВОРЕНЫ ПОЛНОСТЬЮ (ADR-0005 §5).
+  # Прежде defaults дублировал головы цепочек availability.fallbacks (голова уже
+  # читается из fallbacks.<роль>[0], второй записи не нужно), а promoted держал
+  # историю промоций. Оба стали дрейф-риском. Последний ключ defaults.standards_lens
+  # (Standards-ось — равный пул, не одиночный дефолт: fallbacks.standards-lens) и
+  # пустой promoted:{} держались v27 лишь потому, что проза цитировала их пути
+  # бэктиком; проза переведена на равно-пуловую модель (references/cross-provider.md,
+  # SKILL.md), пути больше не цитируются — блоки убраны. Промоции codex-лейнов и
+  # мотив квота-спреда живут в status:/evidence: самих лейнов (cross_provider.lanes)
+  # и в цепочках availability.fallbacks.
 
   # Пилоты кросс-лейнов: механизм сохранён для будущих лейнов (новый провайдер
   # проходит тот же путь: проверка по каталогу коннектора -> полигон ролей ->
