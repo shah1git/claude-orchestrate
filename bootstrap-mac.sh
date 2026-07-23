@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
 # bootstrap-mac.sh — полный контур /orchestrate на новой машине (macOS; работает
-# и на Linux). Предпосылка: четыре CLI — claude, codex, agy, grok — уже
+# и на Linux). Предпосылка: пять CLI — claude, codex, agy, grok, kimi — уже
 # установлены и авторизованы (как на исходном ВПС). Всё остальное собирает
 # этот скрипт:
 #
-#   1. Преф-лайт: git/rsync/claude обязательны; node/codex/agy/grok — желательны
-#      (их отсутствие — штатная деградация лейнов, не ошибка установки).
+#   1. Преф-лайт: git/rsync/claude/python3 обязательны (плюс PyYAML для
+#      инструментов — warn); node/codex/agy/grok/kimi/gh — желательны (их
+#      отсутствие — штатная деградация лейнов/удобств, не ошибка установки).
 #   2. /opt/claude-orchestrate  — этот репозиторий (три головы orchestrate/
 #      orchestrate-frontier/orca_orchestrate + 4 агента + движок run-lane),
 #      clone/pull.
@@ -40,6 +41,10 @@ set -euo pipefail
 # Каталог оркестрации = репозиторий, в котором лежит сам скрипт (тот же приём,
 # что в install.sh) — уважаем место, куда владелец положил чекаут. Жёсткий
 # /opt/claude-orchestrate был бы вторым экземпляром, копии бы разъехались.
+if ! readlink -f / >/dev/null 2>&1; then
+  echo "✗ требуется readlink -f: macOS ≥ 12.3, либо GNU coreutils c gnubin в PATH — brew install coreutils && export PATH=\"\$(brew --prefix coreutils)/libexec/gnubin:\$PATH\"" >&2
+  exit 1
+fi
 ORCH_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 if [ ! -d "${ORCH_DIR}/skill/orchestrate" ]; then
   echo "✗ рядом со скриптом нет skill/orchestrate — запускайте bootstrap-mac.sh из чекаута claude-orchestrate" >&2
@@ -74,6 +79,7 @@ echo "== Преф-лайт =="
 command -v git   >/dev/null || die "git не найден"
 command -v rsync >/dev/null || die "rsync не найден"
 ok "git, rsync"
+if command -v gh >/dev/null; then ok "gh: $(command -v gh)"; else warn "gh нет — автоклон приватной телеметрии и работа с трекером недоступны (brew install gh)"; fi
 # node этому скрипту больше не обязателен: его единственный потребитель — мост —
 # ретирован. Оставляем мягкую проверку, поскольку часть вендорских CLI (напр.
 # agy-proxy) поставляется как Node-пакеты; отсутствие node их и деградирует.
@@ -86,14 +92,18 @@ fi
 
 command -v claude >/dev/null || die "claude CLI не найден — без него контур не работает"
 ok "claude: $(command -v claude)"
+command -v python3 >/dev/null || die "python3 не найден — без него run-lane, валидатор конфига и телеметрия не работают"
+ok "python3: $(command -v python3)"
+if python3 -c 'import yaml' 2>/dev/null; then ok "PyYAML"; else warn "PyYAML не найден — выполните: pip3 install pyyaml (без него run-lane/validate_config/telemetry_append не стартуют)"; fi
 
 # Внешние исполнители: отсутствие любого — предупреждение, не ошибка (config
 # cross_provider.enabled: auto-detect штатно деградирует лейны в Claude-дефолты).
 if command -v codex >/dev/null; then
   if codex login status >/dev/null 2>&1; then ok "codex: залогинен"; else warn "codex есть, но не залогинен — выполните: codex login"; fi
 else warn "codex CLI нет — codex-лейны и линза Standards уйдут в Claude-фолбэк"; fi
-if command -v agy >/dev/null; then ok "agy: $(command -v agy)"; else warn "agy нет — gemini-фолбэк линзы будет недоступен (не критично)"; fi
-if command -v grok >/dev/null; then ok "grok: $(command -v grok)"; else warn "grok нет — grok-build пилот будет недоступен"; fi
+if command -v agy >/dev/null; then ok "agy: $(command -v agy)"; else warn "agy нет — весь Google-пул недоступен: gemini-flash (разведка, судейские роли, builder-пилот v30) и agy-opus (фронтир-Claude на квоте Google)"; fi
+if command -v grok >/dev/null; then ok "grok: $(command -v grok)"; else warn "grok нет — лейн grok-build (полный: builder/разведка/судейские роли) недоступен"; fi
+if command -v kimi >/dev/null || [ -x "${HOME}/.kimi-code/bin/kimi" ]; then ok "kimi: $(command -v kimi || printf '%s' "${HOME}/.kimi-code/bin/kimi")"; else warn "kimi CLI нет — лейн kimi-k3 (builder/разведка/судейские роли) недоступен"; fi
 
 # --- 2-3. Репозитории -------------------------------------------------------
 # clone_or_pull DIR REPO: свежий клон либо ff-only pull; чужие правки не трёт.
