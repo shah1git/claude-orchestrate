@@ -118,3 +118,10 @@ PASS_WITH_NOTES (quality.md §3a).
 
 Reason through the evidence first; emit the verdict last. Your final message IS the
 verdict returned to the orchestrator — no preamble before `## VERDICT`.
+
+**Delivery by file (v2.15).** If your ticket names a verdict artifact file (an absolute
+path in OUTPUT), write the complete verdict to that file FIRST — a Bash heredoc is fine;
+writing your own verdict is delivery, not producing work — and then emit the same verdict
+as your final message. The background relay is lossy (a verdict was dropped in transit on
+2026-07-23); the file is what the lead grades. No named file → final message alone, as
+above.

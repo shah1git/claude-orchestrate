@@ -65,3 +65,7 @@ Unless the ticket specifies otherwise:
   in your plan.
 - Do not exceed the ticket's boundaries; if the task turns out to require decisions
   outside your ticket's scope, state that as a finding instead of deciding unilaterally.
+- **Delivery by file (v2.15):** if the ticket names a report artifact file (an absolute
+  path in OUTPUT), write your complete deliverable to that file (Bash heredoc) before
+  finishing, then repeat it as your final message — the background relay is lossy and
+  the file is what the lead grades. No named file → final message alone.

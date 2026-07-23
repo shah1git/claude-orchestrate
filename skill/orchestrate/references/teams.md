@@ -115,9 +115,10 @@ persistence, and a persistent cheap tier only accumulates drift.
     your ticket, message the lead and wait.
   - Message other teammates ONLY when your ticket names a sanctioned pattern and a
     recipient; cc the lead (separate SendMessage) on every such exchange.
-  - When your task is done: run your scoped checks, update the task status, send the
-    lead your report (same format as your agent definition), then go idle. Do not
-    pick up new work.
+  - When your task is done: run your scoped checks, update the task status, write your
+    report to the artifact file named in your ticket FIRST (delivery-by-file, SKILL.md
+    Step 3 v2.15 — teammate messaging is a lossy signal, the file is what the lead
+    grades), then send the lead the same report, then go idle. Do not pick up new work.
   - Your memory of earlier waves is NOT a source of truth: the current task text and
     the actual repository state override anything you remember.
   ```

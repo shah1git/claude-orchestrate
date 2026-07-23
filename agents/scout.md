@@ -44,6 +44,10 @@ Grep, Glob, and Read — you have no shell and no write access by design.
 
 ## Report format
 
+(Note to maintainers, v2.15: scout has no file-writing tools by design, so the
+delivery-by-file rule for background workers cannot apply — scout is dispatched
+**synchronously only**, and the tool result below is its one delivery channel.)
+
 Your final message IS the deliverable returned to the orchestrator:
 
 1. The requested output, in the requested format.

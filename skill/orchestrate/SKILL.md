@@ -572,6 +572,21 @@ ACCEPTANCE  — gradeable criteria the deliverable will be verified against (Ste
 
 Rules:
 
+- **Background dispatch delivers by file, never by relay (v2.15).** A worker dispatched
+  with `run_in_background: true` — or addressed as a named teammate — MUST receive an
+  absolute artifact path in its OUTPUT field, and writes its complete deliverable/report
+  to that file before finishing. The path lives **outside the working tree** — the
+  session scratchpad is the default — so report files never leak into the diff that
+  Step 4's whole-diff review and the working-tree discipline audit. This is the same
+  discipline `run-lane` already enforces on every external lane
+  (`RUN-LANE-ARTIFACT-PATH`, injected by `tools/run_lane/adapters.py`; the rule itself
+  is config v25): the printed reply is a work report, not the work. The lead grades the file from disk; relayed final messages
+  and idle notifications are only *signals*. Grounds: the final-text relay of
+  background/teammate agents is lossy — observed three times on 2026-07-23 (scout twice,
+  critic once; the report existed, the channel dropped it). Corollary, generalizing the
+  scout rule above: **an agent with no means to write a file is never dispatched in
+  background** — synchronous only, where its report is the tool result. Synchronous
+  dispatches need no artifact file.
 - **Parallel by default.** Spawn all independent workers in a single message (multiple
   Agent calls in one block). Typical healthy fan-out: 3–5 concurrent workers.
 - **Tag every spawn's `description` with `[<tier>·<effort>]`** so the agent panel shows
@@ -836,6 +851,11 @@ Agent result's `usage` block for Claude sub-agents; a **cross-provider MCP worke
 free — the worker's report already carries it — and surfacing it per-return keeps the user
 abreast of cost and findings as they happen, instead of only in the final scorecard. The
 end-of-run scorecard (quality.md §5) still aggregates; the cards are the running commentary.
+For a background/teammate worker the card's source of truth is its **artifact file**
+(Step 3, delivery-by-file rule), never the relayed message — a lost relay with a written
+artifact is a delivered result, not a failed worker. A dropped relay takes the `usage`
+block down with it: that third case joins the two above — tokens/tool-uses `n/a`, the
+outcome read from the artifact file, never a guessed number.
 
 By this point every delegated ticket should already have its row in the routing
 telemetry log — `telemetry/routing-log.jsonl` next to this file — because each row is
