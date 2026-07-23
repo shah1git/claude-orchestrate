@@ -30,8 +30,12 @@ accept any result until three independent reviewers have checked it.
 контекстном окне и без прозы подготовительной фазы; без опубликованной спеки и
 восходящих к ней тикетов этот вход отказывается работать. Третий, тоже тонкий — `orca_orchestrate`:
 сиблинг `/orchestrate-frontier` с тем же протоколом входа (ожидает готовый фронтир тикетов: спека + тикеты),
-маршрутизацией, гейтом трёх линз и синтезом, но с подложкой терминалов Orca (каждый worker-лейн запускается как
-терминал в managed worktree Orca вместо подпроцесса/Agent tool харнесса, давая нативную авторизацию вендоров и изоляцию).
+маршрутизацией, гейтом трёх линз и синтезом, но с подложкой терминалов Orca — супервизора терминалов
+(настольное приложение) для агентных консольных утилит (stablyai/orca), который управляет рабочими деревьями
+git (worktree) и терминалами, где третий вход запускает консольные утилиты вендоров с их родной авторизацией.
+Каждый worker-лейн (именованный маршрут к конкретной модели конкретного вендора
+с закреплённой формой вызова) запускается как терминал в managed worktree Orca вместо подпроцесса/Agent tool
+харнесса (среды исполнения агента, здесь — Claude Code), давая нативную авторизацию вендоров и изоляцию.
 Используется, когда есть готовые тикеты и прогон должен идти из Orca; при отсутствии Orca делегирует
 выполнение `/orchestrate-frontier` (транспорт выбирается по наличию, а не по предпочтению).
 
@@ -39,7 +43,7 @@ accept any result until three independent reviewers have checked it.
 
 | Агент | Модель | Роль |
 |---|---|---|
-| `architect` | Fable | Проектирование, архитектурные решения, поиск первопричины, оценка риска |
+| `architect` | Fable (Claude Fable 5, старшая модель Anthropic) | Проектирование, архитектурные решения, поиск первопричины, оценка риска |
 | `builder` | Sonnet | Реализация по чёткой спецификации: код, тесты, рефакторинг, документация |
 | `scout` | Haiku, read-only | Механическая разведка: поиск файлов, инвентаризация, классификация |
 | `critic` | Opus | Состязательная проверка любого результата, в свежем контексте |
@@ -80,8 +84,8 @@ accept any result until three independent reviewers have checked it.
 ### Кросс-провайдерный слой
 
 По умолчанию скилл самодостаточен и работает только на Claude. Если у пользователя
-подключены другие модели — OpenAI Codex, Google Gemini, xAI Grok — ведущий может
-маршрутизировать и к ним: как чужую линзу Standards (постоянного не-Claude участника
+подключены другие модели — Codex (OpenAI), Gemini через `agy` (Google), Grok (xAI),
+Kimi (Moonshot) — ведущий может маршрутизировать и к ним: как чужую линзу Standards (постоянного не-Claude участника
 гейта против самопредпочтения) и как кодовую руку для хорошо специфицированных тикетов.
 Это определяется автоматически: нет коннектора — любой маршрут сводится к Claude, и линза
 Standards никогда не пропускается молча.
@@ -94,7 +98,7 @@ Standards никогда не пропускается молча.
 
 Все три входа опираются на единое исполнительное ядро — тонкий исполнитель `run-lane` (`skill/orchestrate/tools/run_lane/`, см. [ADR-0005](docs/adr/0005-lane-invocation-unification.md)):
 
-- Две независимые оси: **транспорт** — какой CLI вендора запускается (`agy`/`codex`/`grok`/`kimi`/`claude-print`); **подложка** (substrate) — как он запускается (обычный subprocess или терминал Orca). N транспортов и M подложек комбинируются сложением, а не умножением.
+- Две независимые оси: **транспорт** — какой CLI вендора запускается (`agy` — консольный клиент Google Antigravity, транспорт Google-пула, форма вызова задокументирована в [`skill/orchestrate/references/cross-provider.md`](skill/orchestrate/references/cross-provider.md) / `codex` / `grok` / `kimi` / `claude-print`); **подложка** (substrate) — как он запускается (обычный subprocess или терминал Orca). N транспортов и M подложек комбинируются сложением, а не умножением.
 - Результат работы всегда снимается **с файла на диске по `--out`**, а не из печати модели в консоли (печать усекается и пересказывается по памяти); фактически запустившаяся модель сверяется с запрошенной (проверка свидетеля / witness check).
 - Единый JSON-конверт возвращает итог (`ok`, `model_declared` против `model_observed`, свойства артефакта, класс ошибки).
 - Два вспомогательных режима: `run-lane detect` (проверка входа и доступности лейнов) и `run-lane smoke` (выполнение одного тривиального вызова на каждый лейн для проверки сквозного пути).
@@ -111,8 +115,9 @@ Standards никогда не пропускается молча.
 
 Рабочее, в активной разработке. Конфигурация маршрутизации живёт в
 `skill/orchestrate/config.yaml` (единственный источник истины, версионируется;
-детерминированный валидатор ловит рассогласование настроек и прозы). Телеметрия прогонов
-и результаты полигона намеренно held локально и в публичный репозиторий не входят.
+детерминированный валидатор ловит рассогласование настроек и прозы). Сырые результаты
+полигона (`runs/`, `scores.jsonl`) и телеметрия прогонов хранятся локально и в публичный
+репозиторий не входят; синтез опубликован в [`benchmark/RESULTS.md`](benchmark/RESULTS.md).
 
 ---
 
@@ -219,16 +224,20 @@ session and ready tickets sit in the tracker, execution starts straight at routi
 with a fresh context window and without the preparatory prose; with no published spec
 and tickets tracing to it, this entry refuses to run. The third, also thin entry is `orca_orchestrate`:
 a sibling of `/orchestrate-frontier` with the same entry protocol (expects a prepared ticket frontier: spec + tickets already done),
-routing, three-lens gate, and synthesis, but with worker lanes dispatched over Orca terminals (every worker lane is dispatched
-as a terminal inside an Orca-managed worktree instead of the harness's subprocess/Agent tool, supplying native per-vendor authorization
-and worktree/process isolation). Use it when ready tickets exist AND the run should be driven from Orca; when Orca is unavailable, it defers to
+routing, three-lens gate, and synthesis, but with worker lanes — a lane is a named route to a specific vendor's
+model with a pinned invocation form — dispatched over Orca terminals. Orca is a desktop supervisor for agentic
+CLIs (stablyai/orca) that drives worktrees and terminals in which this third entry launches vendor CLIs under
+their native authorization. Every worker lane is dispatched as a terminal inside an Orca-managed worktree instead
+of running as a subprocess or via the Agent tool inside the harness (the agent's execution environment, here
+Claude Code), supplying native per-vendor authorization and worktree/process isolation. Use it when ready tickets
+exist AND the run should be driven from Orca; when Orca is unavailable, it defers to
 `/orchestrate-frontier` (transport is chosen by presence, never preference).
 
 Four standing executors, each pinned to its tier:
 
 | Agent | Model | Role |
 |---|---|---|
-| `architect` | Fable | System design, architecture decisions, root-cause debugging, risk assessment |
+| `architect` | Fable (Claude Fable 5, Anthropic's lead tier) | System design, architecture decisions, root-cause debugging, risk assessment |
 | `builder` | Sonnet | Implementation to a clear spec: code, tests, refactors, docs |
 | `scout` | Haiku, read-only | Mechanical recon: find files/usages, inventories, classification |
 | `critic` | Opus | Adversarial verification of any deliverable, in a fresh context |
@@ -270,7 +279,7 @@ the skill):
 ### Cross-provider layer
 
 By default the skill is self-contained and Claude-only. When the user has other models
-wired — OpenAI Codex, Google Gemini, xAI Grok — the lead can route to them too: as the
+wired — Codex (OpenAI), Gemini via `agy` (Google), Grok (xAI), Kimi (Moonshot) — the lead can route to them too: as the
 cross-model Standards lens (a permanent non-Claude member of the gate, closing
 self-preference bias) and as a coding hand for well-specified tickets. It is
 capability-detected: with no connector, every route falls back to Claude, and the
@@ -284,7 +293,7 @@ judgment-class of tasks and the primary grader of every gate always stay on Clau
 
 All three heads sit on one execution core — the thin executor `run-lane` (`skill/orchestrate/tools/run_lane/`, see [ADR-0005](docs/adr/0005-lane-invocation-unification.md)):
 
-- Two independent axes: **transport** — which vendor CLI runs (`agy`/`codex`/`grok`/`kimi`/`claude-print`); **substrate** — how it is launched (a plain subprocess, or an Orca terminal). N transports and M substrates compose by addition, not multiplication.
+- Two independent axes: **transport** — which vendor CLI runs (`agy` — Google Antigravity's console client, the Google-pool transport, its calling form documented in [`skill/orchestrate/references/cross-provider.md`](skill/orchestrate/references/cross-provider.md) / `codex` / `grok` / `kimi` / `claude-print`); **substrate** — how it is launched (a plain subprocess, or an Orca terminal). N transports and M substrates compose by addition, not multiplication.
 - The deliverable is always taken **from the `--out` file on disk**, never from the model's printed reply in the console (printed output truncates and gets paraphrased); and the model that actually ran is verified against the one requested (a "witness" check).
 - One JSON envelope carries the outcome (`ok`, `model_declared` vs `model_observed`, artifact properties, error class).
 - Two auxiliary modes exist: `run-lane detect` (probe which lanes are logged in and available) and `run-lane smoke` (fire one trivial real call per lane to confirm the path end-to-end).
@@ -301,19 +310,34 @@ vendor's marketing benchmarks.
 
 Working, under active development. Routing configuration lives in
 `skill/orchestrate/config.yaml` (the single source of truth, versioned; a deterministic
-validator catches drift between config and prose). Run telemetry and polygon results are
-deliberately kept local and are not part of the public repo.
+validator catches drift between config and prose). Raw polygon results (`runs/`,
+`scores.jsonl`) and run telemetry are kept local and are not part of the public repo;
+the synthesis is published in [`benchmark/RESULTS.md`](benchmark/RESULTS.md).
 
 ---
+
+## Requirements
+
+- [Claude Code](https://claude.com/claude-code) CLI
+- Python ≥ 3.12 with the `PyYAML` package (`pip install pyyaml`)
+- `git`
+- `gh` (GitHub CLI, for the issue-tracker workflow)
+- macOS only: version ≥ 12.3, or GNU coreutils — the installers use `readlink -f`
+
+Vendor CLIs (`codex`, `grok`, `kimi`, `agy`) are optional — without them, orchestration
+degrades to Claude-only workers (transport is chosen by presence, never preference).
 
 ## Install
 
 ```bash
-git clone <this-repo-url> /opt/claude-orchestrate
+git clone https://github.com/shah1git/claude-orchestrate /opt/claude-orchestrate
 cd /opt/claude-orchestrate
 ./install.sh          # symlink mode: edits here are live in Claude Code immediately
 ./install.sh --copy   # copy mode: independent copies under ~/.claude
 ```
+
+`/opt/` is only the author's own convention — any directory works; point the clone
+above wherever you keep checkouts.
 
 ## Repo layout
 
@@ -325,7 +349,17 @@ skill/orchestrate/tools/    config validator (deterministic seam over config + p
 skill/orchestrate/tools/run_lane/ the lane-invocation executor (transport × substrate; artifact from disk; model witness) (ADR-0005)
 agents/                     the four agent definitions
 benchmark/                  the role-comparison polygon (fixtures, tasks, grader tools)
-install.sh                  wires ~/.claude/skills and ~/.claude/agents to this repo
+benchmark/DESIGN.md         the polygon's protocol and anti-cheat design
+benchmark/RESULTS.md        published synthesis of polygon runs
+docs/                       architecture decision records (docs/adr/) and agent docs (docs/agents/)
+CONTEXT.md                  the project's domain glossary
+scripts/                    maintenance scripts (e.g. doctrine sync)
+bootstrap-mac.sh            one-shot machine setup (macOS)
+telemetry-sync.sh           run-telemetry sync to the owner's private store
+LICENSE                     MIT
+.doctrine-version           doctrine sync marker (see AGENTS.md)
+install.sh                  wires ~/.claude/skills and ~/.claude/agents to this repo,
+                             and mirrors both into ~/.agents if that shared store exists
 ```
 
 ## Usage
@@ -341,3 +375,7 @@ without going through the skill.
 
 See [skill/orchestrate/README.md](skill/orchestrate/README.md) for the detailed docs
 (in Russian) and the changelog.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
