@@ -88,6 +88,20 @@ defect: the isolated worker cannot tell your uncertainty from a requirement.
 
 ### `scout` — Haiku
 
+Two band rules established by experiment #1 (issue #1, 2026-07-23) before anything about
+ticket style:
+
+- **Synchronous dispatch only** (`run_in_background: false`). Scout's toolset is
+  Read/Grep/Glob — no SendMessage, no Write. In background/teammate mode its final
+  report is structurally undeliverable: the run completes, the text is lost (observed
+  twice on the same ticket). Its report exists only as the synchronous tool result.
+- **Narrow scope only.** One subsystem, explicit patterns, a checkable key. On a broad
+  multi-subsystem inventory scout returned a confident false negative ("directory not
+  found" for a directory that exists) while reporting zero gaps — route wide sweeps to
+  `codex-recon` (or to built-in `Explore` only with an explicit `model:` override, per the
+  off-matrix rule in SKILL.md Step 2), and keep scout where its answer can be
+  spot-checked cheaply.
+
 Haiku is fast and cheap but does not fill gaps in your instructions. Write the ticket as
 if for a capable executor with zero tolerance for ambiguity:
 

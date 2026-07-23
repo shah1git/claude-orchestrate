@@ -1,5 +1,8 @@
 # Agent teams: experimental third delegation channel
 
+**STATUS: DORMANT — pilot rejected without a run (owner decision 2026-07-23; skill
+README Changelog v2.14, issue #2). Retained for the recorded revisit case only.**
+
 Source of truth for the OPTIONAL team channel. The orchestrate skill is complete without
 it: with the surface absent — or the pilot below failed — every delegation resolves to the
 one-shot or Workflow channel and the run completes normally. This channel exists for a

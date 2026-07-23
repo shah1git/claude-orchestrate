@@ -64,7 +64,7 @@ with `config: "<fingerprint>"` (quality.md §7).
 | Tier | Signals | Setup |
 |---|---|---|
 | **Trivial** | one file, one question, quick fix | **Do not orchestrate.** Do it yourself, now. |
-| **Simple recon** | fact-finding, "where is X used", inventory | 1 × `scout`, expect ~3–10 tool calls |
+| **Simple recon** | fact-finding, "where is X used", a narrow single-subsystem inventory | 1 × `scout`, expect ~3–10 tool calls. A broad multi-subsystem inventory is NOT Simple recon — route it per the Step 2 scout row (exp #1, 2026-07-23) |
 | **Comparison / survey** | evaluate options, review several areas | 2–4 workers in parallel, ~10–15 tool calls each |
 | **Complex multi-part** | feature across many files, audit, migration | `architect` designs first, then 5–10+ workers with **clearly divided, non-overlapping responsibilities** |
 
@@ -189,7 +189,9 @@ Think through, before the first Agent call:
    Subtasks must not overlap: two workers touching the same file or answering the same
    question is a decomposition bug.
    A graph showing ≥ 3 dependent waves on one subsystem, or a competing-hypothesis
-   investigation, may qualify for the experimental team channel — see "Agent teams" below.
+   investigation, is the team channel's recorded niche — but that channel is DORMANT
+   (pilot rejected without a run, owner decision 2026-07-23, Changelog v2.14): surface
+   the signal to the owner instead of routing to it — see "Agent teams" below.
 2. **Routing.** Classify each subtask with the Step 2 complexity rubric and write the
    routing plan down: subtask → class → agent. Route by the *hardest judgment the
    subtask requires*, not by its size. Any subtask routed below Opus must name the
@@ -380,7 +382,7 @@ whether the gate fires.
 |---|---|---|---|
 | `architect` | Fable, xhigh | system design, architecture & technology decisions, complex debugging / root-cause analysis, risk assessment, plans for risky changes | production code (it returns plans, not diffs); mechanical lookups |
 | `builder` | Sonnet, high | implementation to a clear spec: code, tests, refactorings, docs; near-Opus coding quality at a fraction of the quota cost | underspecified "figure out what to build" work; architecture decisions |
-| `scout` | Haiku | mechanical, precisely specified, read-only work: find files/usages, grep sweeps, inventories, classification, extraction, per-file summaries | anything requiring judgment, multi-step reasoning, or writing code — a silent Haiku error propagates |
+| `scout` | Haiku | mechanical, precisely specified, read-only work with a **narrow, single-subsystem scope**: find files/usages, grep sweeps, inventories, classification, extraction, per-file summaries. **Dispatch synchronously only** (`run_in_background: false`): scout has no SendMessage and no Write, so in background/teammate mode its report is structurally undeliverable (exp #1, 2026-07-23) | anything requiring judgment, multi-step reasoning, or writing code — a silent Haiku error propagates; **broad multi-subsystem inventories** — route to `codex-recon` instead, or to built-in `Explore` only with an explicit `model:` override and a named reason (built-in agents are off-matrix — see the rule below this table; exp #1: scout produced a confident false negative on a wide sweep) |
 | `critic` | Opus, xhigh | adversarial verification of any deliverable against its acceptance criteria (fresh context, tries to refute, runs tests) | producing new work; style reviews |
 | you (lead model) | Fable or Opus | decomposition, integration, cross-cutting judgment, anything all four are wrong for | — |
 
@@ -885,6 +887,13 @@ The same quality gates apply: every pipeline stage's ticket carries acceptance c
 and `critic` verdicts gate what reaches the final report.
 
 ## Agent teams — experimental third channel (narrow niche)
+
+**STATUS: DORMANT — pilot rejected without a run (owner decision 2026-07-23; Changelog
+v2.14, issue #2).** In 19 days the niche never arose, hub-and-spoke carried 10+ workers
+with fix rounds, teammate cost is linear, `/resume` does not restore a team — and the
+teammate mode structurally silences agents with no messaging tools (exp #1). The
+doctrine below is retained solely for the recorded revisit case (the niche genuinely
+arising); do not qualify runs for this channel without a fresh owner decision.
 
 When the agent-teams surface is enabled (detect with one Bash call:
 `printenv CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` non-empty; absent → the degradation

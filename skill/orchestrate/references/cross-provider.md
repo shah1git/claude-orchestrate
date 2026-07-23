@@ -204,8 +204,8 @@ vendor CLI (v26). No bridge column, no MCP column.
 | `codex-code` | coding hand | `codex exec --model gpt-5.6-terra -c model_reasoning_effort=high --sandbox workspace-write --cwd <worktree>` | `builder` (Sonnet) |
 | `codex-recon` | cheap repo-grounded recon with shell | `codex exec --model gpt-5.6-luna -c model_reasoning_effort=medium --sandbox read-only --cwd <repo>` | `scout` (file-only) / `builder` (needs shell) |
 | `gemini-critic` | cross-model lens (alt) — Standards-axis fallback; judges by inlined material only (`requires_pregate_output_inline`) | `agy --model "Gemini 3.6 Flash (High)" --add-dir <abs> --print-timeout 5m -p "<prompt>" < /dev/null` | `standards-lens` chain → `sonnet-inline-note` |
-| `gemini-recon` / `gemini-flash` | big-context recon | `agy --model "Gemini 3.6 Flash (High)" --add-dir <abs> -p "<prompt>" < /dev/null` | `scout` (Haiku) |
-| `agy-opus` | frontier-Claude on Google quota | `agy --model claude-opus-4-6-thinking --add-dir <abs> -p "<prompt>" < /dev/null` | `opus` (Anthropic quota) |
+| `gemini-recon` / `gemini-flash` | big-context recon; builder — on pilot (v30, polygon 2026-07-23) | `agy --model "Gemini 3.6 Flash (High)" --add-dir <abs> -p "<prompt>" < /dev/null` | `scout` (Haiku) |
+| `agy-opus` | frontier-Claude on Google quota | `agy --model "Claude Opus 4.6 (Thinking)" --add-dir <abs> -p "<prompt>" < /dev/null` | `opus` (Anthropic quota) |
 | `grok-build` | fast builder/recon/judge | `grok -p --model grok-4.5 --json-schema <verdict> --sandbox <orchestrate> --cwd <worktree>` | `builder` / `codex-code` |
 | `kimi-k3` | 1M-context builder/judge | `kimi -p -m k3 --add-dir <abs> --output-format stream-json` | `sonnet` / `codex-code` |
 
