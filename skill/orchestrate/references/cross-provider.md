@@ -281,16 +281,20 @@ generation bump (same "family, not version" policy as our Claude aliases).
 | `gemini-recon` | **`Gemini 3.6 Flash (High)`** | High | big-context recon workhorse (cheap, fast) |
 | `gemini-recon-cheap` | **`Gemini 3.6 Flash (High)`** | High (raised from Low, owner 2026-07-21 — Low economised a quota that is not scarce) | high-volume mechanical sweeps — **the scout default since v23**, ahead of Haiku |
 
-**Effort ladder & the `ultra` policy (2026-07-09).** `max` is a plain escalation step —
-deeper reasoning, still one thread; usable anywhere xhigh is, by lead judgment. `ultra` makes
-Codex internally coordinate ~4 parallel sub-agents. It is permitted as a *worker-internal
-accelerator*: the ticket surface does not change (one ticket in, one deliverable out, our
-gates unchanged), so ADR-0001's "workers, never a second orchestrator" holds — the worker
-parallelizes inside itself, it does not direct our pipeline. But it is never a baseline:
-it multiplies quota spend by roughly its agent count. Reserve it, by explicit lead judgment
-with a logged reason (`effort: ultra` in telemetry), for a builder ticket that is genuinely
-hard AND latency-sensitive. On **critic lanes ultra is not used at all**: its sub-agents are
-the same model, so it buys cost, not lens independence — xhigh/`max` is the critic ceiling.
+**Effort ladder & the `ultra` policy (2026-07-09; rewritten v31, 2026-07-25).** `max` is a
+plain escalation step — deeper reasoning, still one thread; usable anywhere xhigh is, by lead
+judgment. It is the top of our ladder. `ultra` makes Codex internally coordinate ~4 parallel
+sub-agents, and **we do not use it at all** — on builder lanes as of v31, on critic lanes
+since 2026-07-09 (config `ultra_policy`: `never` on both). The reasoning is one line: `ultra`
+buys wall-clock and nothing else, at roughly its agent count in quota, and the owner retired
+speed as a routing argument (v31). What it never bought was capability — its sub-agents are
+the same model, so on a critic it purchases cost rather than lens independence, and on a
+builder a genuinely hard ticket is answered by the escalation ladder (terra-xhigh →
+`gpt-5.6-sol` high → xhigh), which raises reasoning strength rather than concurrency.
+Practical consequence — the **inheritance trap**: the owner's interactive
+`~/.codex/config.toml` may sit on terra+`ultra`, so a routed call that omits `--effort`
+silently inherits it along with its bill. Every orchestrated Codex call pins model **and**
+effort explicitly (config `cross_provider.ultra_policy.pin_effort_explicitly`).
 
 **Ticket phrasing for GPT-5.6 lanes (verified for 5.6 — official migration guide, 2026-07).**
 OpenAI's own measurements argue for *leaner* prompts on this family: simplified system
@@ -524,7 +528,8 @@ the default for well-specified builder tickets when detected. **Call**:
 ticket (full spec, explicit scope, "run scoped checks yourself"); `cwd` = a dedicated
 **worktree** path (structural write-scoping); **never `danger-full-access`**; effort **high**
 — for a genuinely hard ticket escalate terra-xhigh, then `gpt-5.6-sol` high/xhigh; `ultra`
-only under the policy above (hard AND latency-sensitive, logged reason).
+is never dispatched (v31 — see the effort-ladder policy above), which is exactly why the
+effort flag is pinned on every call rather than left to the surface default.
 
 - After return: read the diff **from disk** (`git diff`), never Codex's self-report; run the
   deterministic pre-gate; then a **Claude critic** (or a *different* cross-provider critic) —

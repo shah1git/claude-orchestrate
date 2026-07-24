@@ -510,10 +510,12 @@ dispatch in one call. That atomic claim is what makes a fan-out correct: N build
 in one wave get N *distinct* peers, whereas a counter merely *read* from the routing-log
 would see all-zeros (routing-log rows are written on worker *completion*, after the whole
 wave is already dispatched) and hand every builder the same "least-dispatched" peer. The
-lead **claims, never guesses**; a forced route (latency override) is booked with
-`dispatch_ledger.py record` so the counter still sees it. An explicitly
-latency-sensitive ticket (`cross_provider.latency_sensitive.applies_when`) overrides the rotation and takes
-the fastest peer. A pool pick is a **route, not a reroute**: it stamps
+lead **claims, never guesses**; a route forced outside the pool — an explicit lead decision
+with a named reason, never speed (`availability.equal_weight_selection.overrides: none`,
+v31) — is booked with `dispatch_ledger.py record` so the counter still sees it. Nothing
+beats the rotation among the survivors: **speed is not a routing argument** (the urgency
+axis was retired in v31, config `ultra_policy`; a lane's recorded latency is a liveness
+bound, `latency_envelope`, not a preference). A pool pick is a **route, not a reroute**: it stamps
 `xprovider_reason: quota-spread` and never `fallback_from` — otherwise routine rotation
 would flood the very metric that makes quota pressure visible.
 Direction rule the chains must respect (and edits to them too): a fallback never drops

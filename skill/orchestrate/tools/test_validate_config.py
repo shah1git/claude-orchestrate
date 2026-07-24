@@ -79,8 +79,8 @@ VALID_CONFIG = dedent("""\
         - judgment-class tickets
       ultra_policy:
         critic_lanes: never
-        builder_condition: genuinely hard AND latency-sensitive
-        log_reason: required
+        builder_lanes: never
+        pin_effort_explicitly: required
 
     availability:
       fallbacks:
