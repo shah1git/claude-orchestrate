@@ -11,7 +11,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-import shlex
 import stat
 import subprocess
 import sys
@@ -590,154 +589,6 @@ def test_get_adapter_returns_the_right_class_for_every_registered_transport(tran
 
 
 # =============================================================================
-# 7. OrcaTerminalSubstrate — deterministic control-plane fake
-# =============================================================================
-
-
-def test_strip_terminal_control_restores_jsonl_from_osc_and_ansi_fixture():
-    json_line = json.dumps({"type": "thread.started", "thread_id": "fixture"})
-    noisy = "\x1b]133;C\x07\x1b[32m" + json_line + "\x1b[0m\n"
-
-    cleaned = substrate.strip_terminal_control(noisy)
-
-    assert cleaned == json_line + "\n"
-    assert json.loads(cleaned) == {"type": "thread.started", "thread_id": "fixture"}
-
-
-def test_orca_terminal_shell_and_control_commands_preserve_invocation_recipe(tmp_path):
-    inv = adapters.Invocation(
-        argv=["opaque-command", "argument with spaces"],
-        env={"ADDED": "value with spaces"}, env_unset=("REMOVED",),
-        stdin_policy="pipe", cwd=str(tmp_path), prompt_addendum=None, log_file=None)
-    shell_command = substrate.build_orca_shell_command(
-        inv, tmp_path / "stdout", tmp_path / "stderr", tmp_path / "rc",
-        tmp_path / "stdin")
-    words = shlex.split(shell_command)
-
-    assert words[:5] == ["env", "-u", "REMOVED", "ADDED=value with spaces", "opaque-command"]
-    assert words[5] == "argument with spaces"
-    assert words[words.index(">") + 1] == str(tmp_path / "stdout")
-    assert words[words.index("2>") + 1] == str(tmp_path / "stderr")
-    assert words[words.index("<") + 1] == str(tmp_path / "stdin")
-    # exit-code sentinel written last (the "finished" signal the substrate polls)
-    assert shell_command.rstrip().endswith(f'echo "$?" > {shlex.quote(str(tmp_path / "rc"))}')
-    assert substrate.build_orca_create_command("path:/work", "run-lane", shell_command) == [
-        "orca", "terminal", "create", "--worktree", "path:/work", "--title",
-        "run-lane", "--command", shell_command, "--json"]
-    assert substrate.build_orca_close_command("term_fixture") == [
-        "orca", "terminal", "close", "--terminal", "term_fixture", "--json"]
-
-
-def test_orca_terminal_substrate_reads_clean_disk_output_and_closes(tmp_path):
-    calls = []
-    created_paths = {}
-
-    def fake_orca_runner(command, **kwargs):
-        calls.append(command)
-        assert kwargs == {"capture_output": True, "text": True}
-        action = command[1:3]
-        if action == ["terminal", "create"]:
-            assert command[command.index("--worktree") + 1] == f"path:{tmp_path}"
-            shell_words = shlex.split(command[command.index("--command") + 1])
-            stdout_path = Path(shell_words[shell_words.index(">") + 1])
-            stderr_path = Path(shell_words[shell_words.index("2>") + 1])
-            stdin_path = Path(shell_words[shell_words.index("<") + 1])
-            # rc sentinel is the target of the trailing `echo "$?" > <rc>`
-            rc_path = Path(shell_words[-1])
-            created_paths.update(stdout=stdout_path, stderr=stderr_path,
-                                 stdin=stdin_path, rc=rc_path)
-            assert stdin_path.read_text() == "prompt via stdin"
-            stdout_path.write_text("\x1b]133;C\x07\x1b[36m{\"type\": \"event\"}\x1b[0m\n")
-            stderr_path.write_text("\x1b]133;D\x1b\\warning\x1b[31m!\x1b[0m\n")
-            rc_path.write_text("17\n")  # command finished with exit code 17
-            payload = {"ok": True, "result": {"terminal": {"handle": "term_fixture"}}}
-        elif action == ["terminal", "close"]:
-            payload = {"ok": True, "result": {}}
-        else:
-            raise AssertionError(command)
-        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
-
-    ticks = iter((100.0, 100.0, 100.123))
-    inv = adapters.Invocation(
-        argv=["opaque-command", "--json"], env={"EXTRA": "yes"},
-        env_unset=("INHERITED",), stdin_policy="pipe", stdin_data="prompt via stdin",
-        cwd=str(tmp_path), prompt_addendum=None, log_file=None)
-
-    result = substrate.OrcaTerminalSubstrate(
-        runner=fake_orca_runner, clock=lambda: next(ticks),
-        sleep=lambda _s: None).run(inv, substrate.RunLimits(idle_s=10))
-
-    assert result == substrate.RunResult(
-        exit_code=17, stdout='{"type": "event"}\n', stderr="warning!\n",
-        duration_ms=123, timed_out=False)
-    # exit code comes from the on-disk sentinel poll — no `terminal wait` call
-    assert [command[1:3] for command in calls] == [
-        ["terminal", "create"], ["terminal", "close"]]
-    assert all(not path.exists() for path in created_paths.values())
-
-
-def test_orca_terminal_substrate_marks_missing_sentinel_as_timeout(tmp_path):
-    calls = []
-
-    def fake_orca_runner(command, **kwargs):
-        calls.append(command)
-        if command[1:3] == ["terminal", "create"]:
-            shell_words = shlex.split(command[command.index("--command") + 1])
-            # command wrote partial stdout but NEVER the rc sentinel → still running
-            Path(shell_words[shell_words.index(">") + 1]).write_text("partial\n")
-            payload = {"ok": True, "result": {"terminal": {"handle": "term_timeout"}}}
-        else:
-            payload = {"ok": True, "result": {}}
-        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
-
-    # stdout grew once (iter1) then went silent; the second poll finds no growth
-    # and no rc, so silence past idle_s=1 → idle death (ADR-0007 liveness).
-    ticks = iter((1.0, 1.0, 2.5, 2.6))
-    inv = adapters.Invocation(argv=["opaque-command"], env={}, stdin_policy="devnull",
-                               cwd=str(tmp_path), prompt_addendum=None, log_file=None)
-    result = substrate.OrcaTerminalSubstrate(
-        runner=fake_orca_runner, clock=lambda: next(ticks),
-        sleep=lambda _s: None).run(inv, substrate.RunLimits(idle_s=1))
-
-    assert result.exit_code == -1
-    assert result.stdout == "partial\n"       # partial disk output preserved
-    assert result.timed_out is True
-    assert result.timeout_kind == "idle"       # silence, not envelope
-    assert [command[1:3] for command in calls][-1] == ["terminal", "close"]
-
-
-def test_orca_terminal_substrate_degrades_nonnumeric_sentinel_to_timeout(tmp_path):
-    # Defensive: `echo "$?"` can only ever write digits, but if a complete
-    # (newline-terminated) rc file somehow held a non-numeric line, the poll
-    # must NOT crash with an uncaught ValueError — it degrades to a clean
-    # timeout so the failure still flows through the envelope error taxonomy.
-    calls = []
-
-    def fake_orca_runner(command, **kwargs):
-        calls.append(command)
-        if command[1:3] == ["terminal", "create"]:
-            shell_words = shlex.split(command[command.index("--command") + 1])
-            Path(shell_words[-1]).write_text("not-a-number\n")  # whole but garbage
-            payload = {"ok": True, "result": {"terminal": {"handle": "term_junk"}}}
-        else:
-            payload = {"ok": True, "result": {}}
-        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
-
-    # rc is non-numeric (never parses) and nothing grows, so the poll degrades
-    # to a clean idle timeout past idle_s=1 rather than crashing on ValueError.
-    ticks = iter((1.0, 1.0, 2.5, 2.6))
-    inv = adapters.Invocation(argv=["opaque-command"], env={}, stdin_policy="devnull",
-                               cwd=str(tmp_path), prompt_addendum=None, log_file=None)
-    result = substrate.OrcaTerminalSubstrate(
-        runner=fake_orca_runner, clock=lambda: next(ticks),
-        sleep=lambda _s: None).run(inv, substrate.RunLimits(idle_s=1))
-
-    assert result.exit_code == -1        # never parsed a bogus exit code
-    assert result.timed_out is True      # degraded to a clean timeout, not a crash
-    assert [command[1:3] for command in calls][-1] == ["terminal", "close"]
-
-
-# =============================================================================
 # ADR-0007 — liveness bounds. A process still producing output is never killed
 # for taking long; only silence past idle_s, or total duration past max_s.
 # =============================================================================
@@ -844,6 +695,65 @@ def test_subprocess_substrate_bounds_a_child_that_eofs_but_keeps_running(tmp_pat
     assert elapsed < 5           # bounded, not the child's full 30s sleep
 
 
+def test_subprocess_substrate_bounds_the_final_eof_wait_by_idle_not_the_whole_envelope(tmp_path):
+    """Regress guard (E1, ADR-0007 §2.9): once both pipes hit EOF, a child that
+    is silently hung (e.g. a zombie-in-waiting) must be bounded by the SHORTER
+    of idle_s and the remaining envelope — not tolerated all the way out to
+    whatever is left of max_s. The old `grace = remaining-envelope` let a
+    post-EOF hang on a lane like kimi (idle_s=1800, max_s=2400) ride out
+    ~40 minutes, and if the child then happened to exit 0 it was recorded as
+    a SUCCESS despite having produced nothing for that whole stretch."""
+    child = tmp_path / "eof_then_silent_sleep.py"
+    child.write_text(
+        "import os, time\n"
+        "os.close(1)\n"          # close stdout
+        "os.close(2)\n"          # close stderr → both pipes EOF, process alive
+        "time.sleep(3)\n")
+    inv = adapters.Invocation(argv=[sys.executable, str(child)], env={},
+                               stdin_policy="devnull", cwd=str(tmp_path),
+                               prompt_addendum=None, log_file=None)
+    started = time.monotonic()
+    res = substrate.SubprocessSubstrate().run(
+        inv, substrate.RunLimits(idle_s=0.5, max_s=10))  # idle_s << max_s
+    elapsed = time.monotonic() - started
+    assert res.timed_out is True
+    assert res.timeout_kind == "idle"     # silence past idle_s, not the envelope
+    assert elapsed < 2                    # killed at ~idle_s, not ~max_s (10s)
+
+
+@pytest.mark.skipif(not hasattr(os, "killpg"),
+                     reason="process-group kill needs POSIX os.killpg")
+def test_subprocess_substrate_kill_reaps_the_whole_process_group_not_just_the_leader(tmp_path):
+    """Regress guard (E2): on an idle-timeout kill, a leader that itself forked a
+    child (as vendor CLIs commonly do) must not leave that grandchild running —
+    reparented to init, it would keep working (and, for a real vendor CLI,
+    calling out to the API — burning quota) long after run-lane has already
+    reported the lane transport-dead. `start_new_session=True` plus a process-
+    GROUP kill in `_terminate` closes that gap: the grandchild must not survive
+    long enough to write its marker file."""
+    marker = tmp_path / "grandchild-marker"
+    grandchild = tmp_path / "grandchild.py"
+    grandchild.write_text(
+        "import time\n"
+        "time.sleep(1.5)\n"
+        f"open({str(marker)!r}, 'w').write('done')\n")
+    leader = tmp_path / "leader.py"
+    leader.write_text(
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, {str(grandchild)!r}])\n"
+        "time.sleep(30)\n")   # leader itself stays silent → killed on idle
+    inv = adapters.Invocation(argv=[sys.executable, str(leader)], env={},
+                               stdin_policy="devnull", cwd=str(tmp_path),
+                               prompt_addendum=None, log_file=None)
+    res = substrate.SubprocessSubstrate().run(
+        inv, substrate.RunLimits(idle_s=0.3, max_s=None))
+    assert res.timed_out is True
+    # give the grandchild's 1.5s sleep time to elapse — long enough for the
+    # marker to appear if the grandchild survived the leader's death.
+    time.sleep(2.0)
+    assert not marker.exists()
+
+
 def test_subprocess_substrate_handles_stdin_larger_than_pipe_buffer(tmp_path):
     """The stdin writer-thread must not deadlock when the prompt exceeds the
     ~64KB pipe buffer while the child also produces stdout (Notable: otherwise
@@ -864,7 +774,7 @@ def test_subprocess_substrate_handles_stdin_larger_than_pipe_buffer(tmp_path):
 
 
 # =============================================================================
-# 8. axis separation — ONE AgyAdapter, TWO substrates (N+M, not NxM)
+# 7. axis separation — ONE AgyAdapter, TWO substrates (N+M, not NxM)
 # =============================================================================
 
 
@@ -945,7 +855,7 @@ def test_substrate_module_never_hardcodes_a_cli_name():
 
 
 # =============================================================================
-# 9. CLI end-to-end — subprocess.run against the real shim (no live model)
+# 8. CLI end-to-end — subprocess.run against the real shim (no live model)
 # =============================================================================
 
 
@@ -1172,16 +1082,6 @@ def test_cli_unquoted_yaml_no_capability_override_is_loud_config_error(tmp_path)
     assert "supports_schema" in envelope_out["error"]["message"]
 
 
-def test_cli_parser_accepts_orca_terminal_substrate_without_running_orca(tmp_path):
-    workdir, prompt_file, out = _make_workdir(tmp_path)
-    args = run_lane_main.build_parser().parse_args([
-        "--lane", "fixture", "--config", str(tmp_path / "config.yaml"),
-        "--prompt-file", str(prompt_file), "--workdir", str(workdir),
-        "--out", str(out), "--substrate", "orca-terminal",
-    ])
-    assert args.substrate == "orca-terminal"
-
-
 def test_cli_substrate_defaults_to_subprocess(tmp_path):
     workdir, prompt_file, out = _make_workdir(tmp_path)
     config = tmp_path / "config.yaml"
@@ -1219,7 +1119,7 @@ def test_cli_requires_all_mandatory_flags():
 
 
 # =============================================================================
-# 10. CodexAdapter — argv shape, strictify, --json stream parsing (slice 4)
+# 9. CodexAdapter — argv shape, strictify, --json stream parsing (slice 4)
 # =============================================================================
 
 
@@ -1420,7 +1320,7 @@ def test_codex_cli_end_to_end_model_event_yields_stream_verification(tmp_path):
 
 
 # =============================================================================
-# 11. GrokAdapter — argv shape, prompt-file addendum, JSON envelope parsing
+# 10. GrokAdapter — argv shape, prompt-file addendum, JSON envelope parsing
 # =============================================================================
 
 
@@ -1584,7 +1484,7 @@ def test_one_grok_invocation_runs_through_fake_and_subprocess_substrate(tmp_path
 
 
 # =============================================================================
-# 12. KimiAdapter — argv shape (no effort surface), stream-json parsing
+# 11. KimiAdapter — argv shape (no effort surface), stream-json parsing
 # =============================================================================
 
 
@@ -1682,7 +1582,7 @@ def test_cli_kimi_unsupported_effort_request_is_config_error(tmp_path):
 
 
 # =============================================================================
-# 13. ClaudePrintAdapter — argv shape, env erasure, JSON envelope parsing
+# 12. ClaudePrintAdapter — argv shape, env erasure, JSON envelope parsing
 # =============================================================================
 
 
@@ -1839,7 +1739,7 @@ def test_claude_print_caps_are_a_declared_degradation():
 
 
 # =============================================================================
-# 14. hardening.py — F6 env mix-in, config bootstrap, fail-closed gate
+# 13. hardening.py — F6 env mix-in, config bootstrap, fail-closed gate
 # =============================================================================
 
 CONFIG_WITH_HARDENING = {
@@ -1975,7 +1875,7 @@ def test_hardening_gate_is_a_noop_for_a_lane_without_any_hardening_key():
 
 
 # =============================================================================
-# 15. __main__ tail wiring — hardening, materialization, witnessed aliases
+# 14. __main__ tail wiring — hardening, materialization, witnessed aliases
 # =============================================================================
 
 
@@ -2117,7 +2017,7 @@ cross_provider:
 
 
 # =============================================================================
-# 16. Command-verb dispatcher — flag form remains the legacy run contract
+# 15. Command-verb dispatcher — flag form remains the legacy run contract
 # =============================================================================
 
 
