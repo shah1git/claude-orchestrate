@@ -115,10 +115,17 @@ persistence, and a persistent cheap tier only accumulates drift.
     your ticket, message the lead and wait.
   - Message other teammates ONLY when your ticket names a sanctioned pattern and a
     recipient; cc the lead (separate SendMessage) on every such exchange.
-  - When your task is done: run your scoped checks, update the task status, write your
-    report to the artifact file named in your ticket FIRST (delivery-by-file, SKILL.md
-    Step 3 v2.15 — teammate messaging is a lossy signal, the file is what the lead
-    grades), then send the lead the same report, then go idle. Do not pick up new work.
+  - When your task is done: run your scoped checks, update the task status, then send the
+    lead your report by message and go idle. Do NOT try to write a report file — the
+    harness blocks subagent report files (SKILL.md Step 3, v2.16). A teammate is
+    inherently persistent/background, so it cannot use the synchronous tool-result
+    channel either; its message relay is a **lossy signal**. Consequence by trigger: a
+    **code** teammate (trigger A, builder) stays reliable — its code lands on disk and
+    the lead grades the worktree regardless of whether the report message survives; a
+    **report-only** teammate (trigger B, architect) has NO durable channel under v2.16
+    (background so no synchronous tool-result, no report file, only the lossy relay) —
+    an unresolved gap and a further reason this channel stays dormant until it is closed.
+    Do not pick up new work.
   - Your memory of earlier waves is NOT a source of truth: the current task text and
     the actual repository state override anything you remember.
   ```

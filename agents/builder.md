@@ -76,8 +76,8 @@ Your final message IS the deliverable returned to the orchestrator:
    better approach worth the lead's attention. `NONE` if nothing; genuine observations
    only, never invented to fill the field.
 
-**Delivery by file (v2.15):** if the ticket names a report artifact file (an absolute
-path in OUTPUT), write this report to that file (you have Write) before finishing, then
-repeat it as your final message — the background relay is lossy; your code is already
-graded from disk, and the report file makes the *account* of it just as durable. No
-named file → final message alone.
+**Delivery (v2.16, corrects v2.15):** your real deliverable is the **code on disk** —
+the lead grades it straight from the worktree, so it survives even if your report is
+lost. Do NOT try to write a report file (the harness blocks subagent report files);
+give your account as your **final message** text. Your code being on disk is why you can
+run in the background safely — the work can't be dropped, only the narration.

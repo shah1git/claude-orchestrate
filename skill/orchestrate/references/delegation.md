@@ -21,15 +21,17 @@ format control), and the per-model prompting pages for the generations named in 
 Two workers must never share an OBJECTIVE or overlap on INPUTS-they-modify. Vague or
 overlapping delegation is the #1 documented multi-agent failure (duplicated work, gaps).
 
-**OUTPUT for background dispatch — name an artifact file.** When the worker runs in
-background (or as a named teammate), OUTPUT must include an absolute path the worker
-writes its complete deliverable to before finishing — a path **outside the working
-tree** (session scratchpad by default), so the report never pollutes the reviewed
-diff; the lead grades that file from disk (SKILL.md Step 3, delivery-by-file rule,
-v2.15 — the Claude-agent mirror of run-lane's `RUN-LANE-ARTIFACT-PATH`, which
-`tools/run_lane/adapters.py` injects for external lanes). The relayed final message is only a signal: it
-was observed dropped three times on 2026-07-23 with the work itself intact. Workers
-without file-writing means (scout) are dispatched synchronously only.
+**Delivery by deliverable shape (SKILL.md Step 3, v2.16 — corrects v2.15).** A Claude
+Agent-tool subagent cannot deliver by writing a report file (the harness blocks it) and
+its background relay is lossy, so how a worker delivers depends on WHAT it produces:
+- **code / files** (builder): the deliverable is the worktree diff — the lead grades it
+  on disk; background is fine, the report is only narration.
+- **a report / verdict with no on-disk artifact** (critic, architect, report-only recon):
+  dispatch **synchronously** so the final text is the tool result (the relay can't drop a
+  synchronous return). Scout was always this case; it now covers every report-only agent.
+- **cross-provider lane** (run-lane): keeps the artifact-file path via `--out` /
+  `RUN-LANE-ARTIFACT-PATH` (run-lane writes it, not a subagent — the harness block does
+  not apply). OUTPUT for a cross-lane ticket names that file, outside the working tree.
 
 **Seeding tickets from the clarification ledger.** When Step 0.5 ran a grill, its ledger is
 the source for these fields: sharpened TERMS become the exact vocabulary in

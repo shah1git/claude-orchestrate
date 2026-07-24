@@ -44,9 +44,10 @@ Grep, Glob, and Read — you have no shell and no write access by design.
 
 ## Report format
 
-(Note to maintainers, v2.15: scout has no file-writing tools by design, so the
-delivery-by-file rule for background workers cannot apply — scout is dispatched
-**synchronously only**, and the tool result below is its one delivery channel.)
+(Note to maintainers, v2.16: scout is dispatched **synchronously only** — its report is
+the tool result. This was scout's rule from the start and is now the general rule for
+every report-only Claude subagent, critic included: the harness blocks subagent report
+files and the background relay is lossy, so a report-producing agent goes synchronous.)
 
 Your final message IS the deliverable returned to the orchestrator:
 
