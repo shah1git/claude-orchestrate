@@ -4,24 +4,20 @@ sees `inv.argv`/`inv.env`/`inv.stdin_policy`/`inv.cwd` (design-runlane.md
 §8). This is the other half of the N+M-not-N×M split: `adapters.py` builds
 argv without executing it, this module executes argv without building it.
 
-Slice 3 shipped `SubprocessSubstrate`. `OrcaTerminalSubstrate` is now **fully
-implemented** (2026-07-22): it runs the opaque `Invocation` inside an Orca
-terminal (`orca terminal create` … `close`), captures stdout/stderr via on-disk
-redirect files (terminal scrollback is unreliable for a fast exit), waits for
-completion by polling an on-disk exit-code sentinel the shell command writes
-last (`orca terminal wait --for exit` proved unreliable live — see run()),
-strips shell-integration control sequences, and returns the same `RunResult` as
-`SubprocessSubstrate`. It knows no vendor-CLI name — `orca` is its mechanism,
-exactly as `subprocess` is the other substrate's.
+`SubprocessSubstrate` is the sole substrate. An Orca-terminal substrate once
+lived here alongside it, transporting an `Invocation` through an Orca
+worktree terminal instead of a local `Popen`; it shipped and was later
+withdrawn outright — the owner's decision to drop Orca from the project
+(ADR-0008) — rather than kept dormant. Nothing Orca-shaped remains to opt
+into; the substrate axis has one member.
 
 Slice 4-5 (GAPS, flagged loudly per the ticket's own boundary clause — an
 adapter-driven necessity, not a scope creep): two fields on `Invocation`
-this module now has to honour that slice 3 never needed, because slice 3's
-one adapter never needed either of them.
+this module has to honour that its first adapter never needed.
   - `inv.stdin_data` — a transport whose CLI reads its prompt over stdin
     rather than an argv element needs the actual bytes handed to
     `subprocess.run(..., input=...)`; `stdin=PIPE` with no `input` merely
-    closes stdin immediately (an empty prompt), which slice 3's one adapter
+    closes stdin immediately (an empty prompt), which the first adapter
     never exercised (it puts the prompt in argv).
   - `inv.env_unset` — `{**os.environ, **inv.env}` can only ADD/OVERRIDE
     environment keys, never DELETE one; a transport that must ERASE an
@@ -31,20 +27,15 @@ one adapter never needed either of them.
 from __future__ import annotations
 
 import os
-import json
-import re
 import select
-import shlex
+import signal
 import subprocess
-import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from pathlib import Path
 
 from .adapters import Invocation
-from .envelope import LaneError
 
 
 @dataclass
@@ -138,8 +129,11 @@ class SubprocessSubstrate(Substrate):
         try:
             # bufsize=0: raw unbuffered pipes so os.read on the fd sees every
             # byte (no BufferedReader layer holding some back from select).
+            # start_new_session=True (E2): the child becomes the leader of its
+            # own session/process group, so `_terminate` can kill the whole tree
+            # a vendor CLI may itself have forked — not just this one process.
             proc = subprocess.Popen(
-                inv.argv, cwd=inv.cwd, env=env, bufsize=0,
+                inv.argv, cwd=inv.cwd, env=env, bufsize=0, start_new_session=True,
                 stdin=stdin_arg, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except OSError as exc:
             # The binary/cwd could not be started (missing CLI, bad workdir) —
@@ -202,20 +196,29 @@ class SubprocessSubstrate(Substrate):
         else:
             # Both pipes are at EOF. A well-behaved process has exited or is about
             # to; a pathological one (closed its fds but still running) must STILL
-            # honour the envelope — a bare `proc.wait()` here would block forever
-            # past both idle_s and max_s, defeating the ceiling ADR-0007 promises.
-            # Bound the final wait by the remaining envelope (or an idle-length
-            # grace when there is no ceiling); overrun is a real timeout.
+            # honour liveness — a bare `proc.wait()` here would block forever past
+            # both idle_s and max_s, defeating the ceiling ADR-0007 promises. E1
+            # fix: bound the wait by the SHORTER of idle_s and whatever envelope
+            # remains, not by the full remaining envelope — a post-EOF hang is pure
+            # silence (the work is over, only a zombie is left), so it is idle_s
+            # that must govern except when the envelope itself is the tighter
+            # bound (a lane already near its max_s when EOF hit). Letting a silent
+            # post-EOF process ride out the whole remaining envelope (the old
+            # behaviour) tolerated tens of minutes of nothing on a lane whose
+            # idle_s is far smaller than its max_s, and, if it then exited 0,
+            # recorded it a SUCCESS.
             now = self._clock()
-            grace = (max(0.0, limits.max_s - (now - start))
-                     if limits.max_s is not None else limits.idle_s)
+            remaining = (max(0.0, limits.max_s - (now - start))
+                         if limits.max_s is not None else float("inf"))
+            grace = min(limits.idle_s, remaining)
             try:
                 proc.wait(timeout=grace)
                 exit_code = proc.returncode
             except subprocess.TimeoutExpired:
                 self._terminate(proc)
                 timed_out = True
-                timeout_kind = "envelope" if limits.max_s is not None else "idle"
+                envelope_bound = limits.max_s is not None and remaining <= limits.idle_s
+                timeout_kind = "envelope" if envelope_bound else "idle"
                 exit_code = -1
 
         if writer is not None:
@@ -232,237 +235,30 @@ class SubprocessSubstrate(Substrate):
         return RunResult(exit_code, stdout, stderr, duration_ms, timed_out, timeout_kind)
 
     def _terminate(self, proc):
-        """SIGTERM → grace → SIGKILL → reap: a killed lane leaves no zombie, and
-        whatever it already flushed stays in the captured buffers."""
+        """SIGTERM → grace → SIGKILL → reap, on the WHOLE PROCESS GROUP (E2), not
+        just the direct child: `start_new_session=True` above makes this child
+        the leader of its own session/process group, so any subprocess the
+        vendor CLI itself forked (a common pattern) shares that group. Killing
+        only the leader let those grandchildren survive — reparented to init,
+        still working (and, for a real vendor CLI, still calling out to its
+        API) — long after run-lane had already reported the lane dead. A killed
+        lane still leaves no zombie of its own, and whatever it already flushed
+        stays in the captured buffers. `os.getpgid` resolves the leader's pid to
+        its group; a lookup failure (`OSError`, which covers
+        `ProcessLookupError`) means the process — and so its group — is
+        already gone, and there is nothing left to reap."""
         try:
-            proc.terminate()
+            pgid = os.getpgid(proc.pid)
+        except OSError:
+            return
+        try:
+            os.killpg(pgid, signal.SIGTERM)
             proc.wait(timeout=self._KILL_GRACE_S)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
             proc.wait()
         except OSError:
             pass
-
-
-_OSC_SEQUENCE_RE = re.compile(r"\x1b\].*?(?:\x07|\x1b\\)", re.DOTALL)
-_CSI_SEQUENCE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-
-
-def strip_terminal_control(text: str) -> str:
-    """Remove terminal control sequences from disk-captured terminal output.
-
-    Orca's shell integration can put OSC markers (including OSC 133) and
-    ordinary ANSI CSI styling around a program's output.  The captured files
-    are the artifact channel for this substrate, so return text suitable for
-    consumers that parse, for example, JSONL from stdout.
-    """
-    return _CSI_SEQUENCE_RE.sub("", _OSC_SEQUENCE_RE.sub("", text))
-
-
-def build_orca_shell_command(
-        inv: Invocation, stdout_path: str | Path, stderr_path: str | Path,
-        rc_path: str | Path, stdin_path: str | Path | None = None) -> str:
-    """Build the shell command run inside an Orca terminal.
-
-    This deliberately knows only the Invocation recipe.  ``env`` expresses
-    additions/overrides and removals before the opaque argv; redirections keep
-    output in ordinary files rather than relying on terminal scrollback.
-
-    LIVE FIX (2026-07-22, e2e): the Orca terminal runs an *interactive* shell
-    that does NOT reliably transition to an "exited" state that
-    `terminal wait --for exit` detects — verified live, it times out even for a
-    fast `sleep 4; exit 0`. So the command's exit code is written to an on-disk
-    **sentinel file** (`rc_path`) which the substrate polls, exactly the
-    artifact-from-disk discipline applied to the exit code. `wait` is no longer
-    trusted for the code. Deterministic fakes could not surface this — only a
-    live Orca round-trip did.
-    """
-    command = ["env"]
-    for key in getattr(inv, "env_unset", ()) or ():
-        command.extend(["-u", str(key)])
-    for key, value in (inv.env or {}).items():
-        command.append(f"{key}={value}")
-    command.extend(str(part) for part in inv.argv)
-
-    shell_command = (
-        f"{shlex.join(command)} > {shlex.quote(str(stdout_path))}"
-        f" 2> {shlex.quote(str(stderr_path))}"
-    )
-    if stdin_path is not None:
-        shell_command += f" < {shlex.quote(str(stdin_path))}"
-    elif inv.stdin_policy in {"devnull", "pipe"}:
-        shell_command += " < /dev/null"
-    # Write the exit code to the sentinel LAST — its presence is the "command
-    # finished" signal the substrate polls for. Space around `;` keeps it a
-    # separate shell token (valid either way; also keeps shlex-based tests clean).
-    shell_command += f' ; echo "$?" > {shlex.quote(str(rc_path))}'
-    return shell_command
-
-
-def build_orca_create_command(worktree_selector: str, title: str,
-                              shell_command: str) -> list[str]:
-    """Build the control-plane request to create a terminal."""
-    return [
-        "orca", "terminal", "create", "--worktree", worktree_selector,
-        "--title", title, "--command", shell_command, "--json",
-    ]
-
-
-def build_orca_close_command(handle: str) -> list[str]:
-    """Build the best-effort terminal cleanup request."""
-    return ["orca", "terminal", "close", "--terminal", handle, "--json"]
-
-
-class OrcaTerminalSubstrate(Substrate):
-    """Run an opaque Invocation command inside an Orca worktree terminal."""
-
-    def __init__(self, runner=None, clock=None, sleep=None):
-        # Kept injectable so deterministic tests exercise the control-plane
-        # protocol without creating a live Orca terminal. `sleep` paces the
-        # exit-code sentinel poll (see run()).
-        self._runner = runner or subprocess.run
-        self._clock = clock or time.monotonic
-        self._sleep = sleep or time.sleep
-
-    def _run_orca(self, command: list[str]):
-        proc = self._runner(command, capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise OSError(proc.stderr or proc.stdout or "orca command failed")
-        try:
-            response = json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
-            raise OSError(f"invalid orca JSON response: {exc}") from exc
-        if not response.get("ok"):
-            raise OSError(f"orca request failed: {response}")
-        return response.get("result") or {}
-
-    def run(self, inv: Invocation, limits: RunLimits) -> RunResult:
-        if not inv.cwd:
-            raise LaneError("config", "orca-terminal requires Invocation.cwd for its worktree")
-
-        worktree_selector = f"path:{inv.cwd}"
-        temp_dir = Path(inv.cwd)
-        # N1 fix: temp files are created INSIDE the try — a missing/unwritable
-        # cwd then surfaces as a RunResult (transport-death class upstream),
-        # symmetric with SubprocessSubstrate, not an uncaught FileNotFoundError.
-        stdout_file = None
-        stderr_file = None
-        stdin_file = None
-        rc_file = None
-        handle = None
-        wait_started = None
-
-        try:
-            stdout_file = tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", delete=False, dir=temp_dir,
-                prefix=".run-lane-orca-stdout-")
-            stderr_file = tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", delete=False, dir=temp_dir,
-                prefix=".run-lane-orca-stderr-")
-            stdout_file.close()
-            stderr_file.close()
-            stdin_data = getattr(inv, "stdin_data", None)
-            if stdin_data is not None:  # N2 fix: symmetric with subprocess `is not None`
-                stdin_file = tempfile.NamedTemporaryFile(
-                    mode="w", encoding="utf-8", delete=False, dir=temp_dir,
-                    prefix=".run-lane-orca-stdin-")
-                stdin_file.write(stdin_data)
-                stdin_file.close()
-
-            rc_file = tempfile.NamedTemporaryFile(
-                mode="w", encoding="utf-8", delete=False, dir=temp_dir,
-                prefix=".run-lane-orca-rc-")
-            rc_file.close()
-
-            shell_command = build_orca_shell_command(
-                inv, stdout_file.name, stderr_file.name, rc_file.name,
-                stdin_file.name if stdin_file is not None else None)
-            created = self._run_orca(build_orca_create_command(
-                worktree_selector, "run-lane", shell_command))
-            handle = ((created.get("terminal") or {}).get("handle"))
-            if not handle:
-                raise OSError("orca terminal create response has no terminal handle")
-
-            # Wait on LIVENESS, not a wall clock (ADR-0007). Two disk signals:
-            #   * the exit-code sentinel (rc file) — written LAST by the shell
-            #     command, so a complete (newline-terminated) rc means "finished";
-            #     the trailing `echo "$?"` newline is the completion marker, so a
-            #     read racing the write can never parse a torn partial integer.
-            #   * growth of the stdout/stderr files — the "still working" signal
-            #     while no rc is present. Silence (no growth) past `idle_s` = a
-            #     hung terminal; total duration past `max_s` = the lane's envelope
-            #     exceeded. `orca terminal wait` is NOT used (verified live: it
-            #     times out even for a command that has already exited).
-            # For a burst-only transport (one that writes the output file only on
-            # final flush) the file does not grow mid-work, so liveness there is
-            # governed by the lane's recorded `idle_s` envelope — the same
-            # deliberate requirement the subprocess pipe needs, not a defect.
-            wait_started = self._clock()
-            last_growth = wait_started
-            last_size = 0
-            exit_code = -1
-            timed_out = False
-            timeout_kind = None
-            while True:
-                now = self._clock()
-                try:
-                    rc_text = Path(rc_file.name).read_text()
-                except OSError:
-                    rc_text = ""
-                if rc_text.endswith("\n") and rc_text.strip():
-                    try:
-                        exit_code = int(rc_text.strip().splitlines()[-1].strip())
-                    except ValueError:
-                        # rc is written only by `echo "$?"` → always digits; a
-                        # complete-but-non-numeric line is anomalous. Keep waiting
-                        # (degrades to a clean idle/envelope timeout) rather than
-                        # crash or invent an exit code.
-                        pass
-                    else:
-                        break
-                try:
-                    size = (Path(stdout_file.name).stat().st_size
-                            + Path(stderr_file.name).stat().st_size)
-                except OSError:
-                    size = last_size
-                if size > last_size:
-                    last_size = size
-                    last_growth = now
-                verdict = classify_wait(now, last_growth, wait_started, limits)
-                if verdict != "continue":
-                    timed_out = True
-                    timeout_kind = verdict
-                    break
-                self._sleep(0.5)
-            duration_ms = int((self._clock() - wait_started) * 1000)
-            stdout = strip_terminal_control(Path(stdout_file.name).read_text())
-            stderr = strip_terminal_control(Path(stderr_file.name).read_text())
-            return RunResult(exit_code, stdout, stderr, duration_ms, timed_out, timeout_kind)
-        except (OSError, UnicodeError) as exc:
-            duration_ms = (
-                int((self._clock() - wait_started) * 1000)
-                if wait_started is not None else 0)
-            # N3 fix: preserve any stdout already flushed to disk before the
-            # failure — do not silently discard the terminal's partial work.
-            partial_out = ""
-            if stdout_file is not None:
-                try:
-                    partial_out = strip_terminal_control(
-                        Path(stdout_file.name).read_text())
-                except OSError:
-                    pass
-            return RunResult(-1, partial_out, str(exc), duration_ms, False)
-        finally:
-            if handle is not None:
-                try:
-                    self._run_orca(build_orca_close_command(handle))
-                except OSError:
-                    # The run result is already evidence of the terminal's
-                    # work; cleanup is still attempted but cannot replace it.
-                    pass
-            for file_obj in (stdout_file, stderr_file, stdin_file, rc_file):
-                if file_obj is not None:
-                    try:
-                        os.unlink(file_obj.name)
-                    except FileNotFoundError:
-                        pass

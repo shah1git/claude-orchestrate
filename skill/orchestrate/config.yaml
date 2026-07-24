@@ -766,8 +766,9 @@ cross_provider:
           видит работу, огибающая (idle 30мин / max 40мин) записана как требование §2.9,
           не случайный дефолт. Тюнить по телеметрии реальных крупных тикетов.
       transport: kimi-cli-headless # `kimi -p` (немодифиц. официальный CLI, ToS-совместимо),
-                                   # драйвинг Orca-терминалом; НЕ через bridge (подписочный
-                                   # токен нельзя переиспользовать — бан по ToS).
+                                   # раздаётся подложкой subprocess run_lane (Orca выведена,
+                                   # ADR-0008); НЕ через bridge (подписочный токен нельзя
+                                   # переиспользовать — бан по ToS).
       hardening: kimi_hardening    # references/kimi/: telemetry=false + env-выключатели.
                                    # Своей ФС-песочницы НЕТ -> worktree + OS/контейнер-изоляция.
       roles: [builder, recon, diagnosis, standards-lens, spec-lens, critic]
@@ -992,7 +993,7 @@ cross_provider:
       KIMI_DISABLE_TELEMETRY: "1"
       KIMI_CODE_NO_AUTO_UPDATE: "1"
       KIMI_DISABLE_CRON: "1"
-    isolation: "своей песочницы нет -> worktree + OS/контейнер (Orca); worktree НЕ барьер чтения"
+    isolation: "своей песочницы нет -> worktree + OS/контейнер-изоляция; worktree НЕ барьер чтения (Orca выведена, ADR-0008 — при нужде жёсткой OS-изоляции взять отдельное средство)"
     never_feedback: "/feedback не использовать — даже «Logs only» выгружает полный диалог"
     # client_data_gate снят 2026-07-19 (решение владельца-контролёра данных)
 

@@ -22,22 +22,13 @@ accept any result until three independent reviewers have checked it.
 чей уровень действительно нужен для этой работы. Затем — не принимает результат, пока
 его не проверят три независимых ревьюера.
 
-У оркестрации **три входа** (единое исполнительное ядро и тонкие головы, [ADR-0006](docs/adr/0006-execution-core-and-thin-heads.md)).
+У оркестрации **два входа** (единое исполнительное ядро и тонкие головы, [ADR-0006](docs/adr/0006-execution-core-and-thin-heads.md); третья голова `orca_orchestrate` выведена из проекта, см. [ADR-0008](docs/adr/0008-retire-orca-transport.md)).
 Полный — `/orchestrate`: он сам проводит подготовительную фазу (грилл → спецификация →
 тикеты) в своей же сессии и остаётся входом для сырых задач и расследований. Второй,
 тонкий — `/orchestrate-frontier` ([ADR-0004](docs/adr/0004-frontier-entry-skill.md)): если владелец уже прошёл подготовку в сольной сессии
 и в трекере лежат готовые тикеты, исполнение стартует сразу с маршрутизации — в свежем
 контекстном окне и без прозы подготовительной фазы; без опубликованной спеки и
-восходящих к ней тикетов этот вход отказывается работать. Третий, тоже тонкий — `orca_orchestrate`:
-сиблинг `/orchestrate-frontier` с тем же протоколом входа (ожидает готовый фронтир тикетов: спека + тикеты),
-маршрутизацией, гейтом трёх линз и синтезом, но с подложкой терминалов Orca — супервизора терминалов
-(настольное приложение) для агентных консольных утилит (stablyai/orca), который управляет рабочими деревьями
-git (worktree) и терминалами, где третий вход запускает консольные утилиты вендоров с их родной авторизацией.
-Каждый worker-лейн (именованный маршрут к конкретной модели конкретного вендора
-с закреплённой формой вызова) запускается как терминал в managed worktree Orca вместо подпроцесса/Agent tool
-харнесса (среды исполнения агента, здесь — Claude Code), давая нативную авторизацию вендоров и изоляцию.
-Используется, когда есть готовые тикеты и прогон должен идти из Orca; при отсутствии Orca делегирует
-выполнение `/orchestrate-frontier` (транспорт выбирается по наличию, а не по предпочтению).
+восходящих к ней тикетов этот вход отказывается работать.
 
 Четыре штатных исполнителя, каждый закреплён за своим тиром модели:
 
@@ -96,9 +87,9 @@ Standards никогда не пропускается молча.
 
 ### Исполнительный движок `run-lane`
 
-Все три входа опираются на единое исполнительное ядро — тонкий исполнитель `run-lane` (`skill/orchestrate/tools/run_lane/`, см. [ADR-0005](docs/adr/0005-lane-invocation-unification.md)):
+Оба входа опираются на единое исполнительное ядро — тонкий исполнитель `run-lane` (`skill/orchestrate/tools/run_lane/`, см. [ADR-0005](docs/adr/0005-lane-invocation-unification.md)):
 
-- Две независимые оси: **транспорт** — какой CLI вендора запускается (`agy` — консольный клиент Google Antigravity, транспорт Google-пула, форма вызова задокументирована в [`skill/orchestrate/references/cross-provider.md`](skill/orchestrate/references/cross-provider.md) / `codex` / `grok` / `kimi` / `claude-print`); **подложка** (substrate) — как он запускается (обычный subprocess или терминал Orca). N транспортов и M подложек комбинируются сложением, а не умножением.
+- **Транспорт** — какой CLI вендора запускается (`agy` — консольный клиент Google Antigravity, транспорт Google-пула, форма вызова задокументирована в [`skill/orchestrate/references/cross-provider.md`](skill/orchestrate/references/cross-provider.md) / `codex` / `grok` / `kimi` / `claude-print`) — единственная ось выбора; подложка запуска одна (обычный subprocess) и осью выбора больше не является — вторая подложка, терминал Orca, выведена (см. [ADR-0008](docs/adr/0008-retire-orca-transport.md)).
 - Результат работы всегда снимается **с файла на диске по `--out`**, а не из печати модели в консоли (печать усекается и пересказывается по памяти); фактически запустившаяся модель сверяется с запрошенной (проверка свидетеля / witness check).
 - Единый JSON-конверт возвращает итог (`ok`, `model_declared` против `model_observed`, свойства артефакта, класс ошибки).
 - Два вспомогательных режима: `run-lane detect` (проверка входа и доступности лейнов) и `run-lane smoke` (выполнение одного тривиального вызова на каждый лейн для проверки сквозного пути).
@@ -128,15 +119,11 @@ Standards никогда не пропускается молча.
 `/orchestrate` 把一个 Claude Code 主会话变成**首席编排者**：它拆解任务，把每一部分交给
 最适合该工作的模型层级来执行，然后在三位独立评审全部通过之前，拒绝接受任何结果。
 
-编排有**三个入口**（单一执行核心与轻量入口，参见 [ADR-0006](docs/adr/0006-execution-core-and-thin-heads.md)）。完整入口是
+编排有**两个入口**（单一执行核心与轻量入口，参见 [ADR-0006](docs/adr/0006-execution-core-and-thin-heads.md)；第三个入口 `orca_orchestrate` 已从项目中移除，参见 [ADR-0008](docs/adr/0008-retire-orca-transport.md)）。完整入口是
 `/orchestrate`：它在同一会话中亲自走完筹备阶段（盘问 → 规格 → 工单），仍是原始任务与
 排查类工作的入口。第二个是轻量入口 `/orchestrate-frontier`（[ADR-0004](docs/adr/0004-frontier-entry-skill.md)）：若负责人已在独立会话中完成
 筹备、工单追踪器中已有就绪工单，执行便直接从路由开始——使用全新的上下文窗口，且不加载
-筹备阶段的说明文字；缺少已发布的规格及其工单时，它会拒绝启动。第三个同样是轻量入口 `orca_orchestrate`：
-它是 `/orchestrate-frontier` 的同胞入口，具有相同的入口协议（要求已完成筹备的工单前沿：规格 + 工单）、路由、
-三重视角质量门与合成，唯一区别在于使用 Orca 终端底层（每个 worker lane 在 Orca 管理的 worktree 内作为终端分发，
-而非 harness 的子进程/Agent tool，由此提供原生供应商授权和 worktree/进程隔离）。
-当存在就绪工单且运行应由 Orca 驱动时使用；当 Orca 不可用时，它会自动回落至 `/orchestrate-frontier`（传输方式按存在性选择，绝非偏好）。
+筹备阶段的说明文字；缺少已发布的规格及其工单时，它会拒绝启动。
 
 四个常设执行者，各自绑定其真正需要的模型层级：
 
@@ -185,9 +172,9 @@ Google Gemini、xAI Grok——首领也可路由至它们：作为 Standards 的
 
 ### 执行引擎 `run-lane`
 
-所有三个入口均构建在同一个执行核心之上——轻量执行器 `run-lane`（`skill/orchestrate/tools/run_lane/`，参见 [ADR-0005](docs/adr/0005-lane-invocation-unification.md)）：
+两个入口均构建在同一个执行核心之上——轻量执行器 `run-lane`（`skill/orchestrate/tools/run_lane/`，参见 [ADR-0005](docs/adr/0005-lane-invocation-unification.md)）：
 
-- 两个独立维度：**传输方式 (transport)**——运行哪个供应商的 CLI（`agy`/`codex`/`grok`/`kimi`/`claude-print`）；**底层 (substrate)**——如何启动（普通子进程 subprocess 或 Orca 终端）。N 个传输方式与 M 个底层通过加法组合，而非乘法。
+- **传输方式 (transport)**——运行哪个供应商的 CLI（`agy`/`codex`/`grok`/`kimi`/`claude-print`）——唯一可选维度；底层启动方式只有一种（普通子进程 subprocess），不再是可选维度——第二种底层（Orca 终端）已移除（参见 [ADR-0008](docs/adr/0008-retire-orca-transport.md)）。
 - 交付物始终**从磁盘上的 `--out` 文件获取**，绝不从模型在终端打印的回复中提取（打印输出会被截断或凭记忆复述）；并且会针对请求的模型验证实际运行的模型（“见证人”检查 / witness check）。
 - 单一 JSON 封套返回执行结果（`ok`、`model_declared` 对比 `model_observed`、交付物属性、错误类别）。
 - 提供两个辅助模式：`run-lane detect`（探测哪些 lane 已登录且可用）和 `run-lane smoke`（对每个 lane 发起一次真实的简单调用以确认端到端通路）。
@@ -215,23 +202,15 @@ triages a task, decomposes it, and hands each piece to the model tier that piece
 actually needs — then refuses to accept the result until three independent reviewers
 have checked it.
 
-There are **three entries** into orchestration (a single execution core + thin heads, see
-[ADR-0006](docs/adr/0006-execution-core-and-thin-heads.md)). The full one is `/orchestrate`:
-it runs the preparatory phase (grill → spec → tickets) inside its own session and
-remains the door for raw tasks and investigations. The second, thin one is
-`/orchestrate-frontier` ([ADR-0004](docs/adr/0004-frontier-entry-skill.md)): when the owner has already done the preparation in a solo
+There are **two entries** into orchestration (a single execution core + thin heads, see
+[ADR-0006](docs/adr/0006-execution-core-and-thin-heads.md); a third entry, `orca_orchestrate`,
+has been retired from the project, see [ADR-0008](docs/adr/0008-retire-orca-transport.md)).
+The full one is `/orchestrate`: it runs the preparatory phase (grill → spec → tickets)
+inside its own session and remains the door for raw tasks and investigations. The
+second, thin one is `/orchestrate-frontier` ([ADR-0004](docs/adr/0004-frontier-entry-skill.md)): when the owner has already done the preparation in a solo
 session and ready tickets sit in the tracker, execution starts straight at routing —
 with a fresh context window and without the preparatory prose; with no published spec
-and tickets tracing to it, this entry refuses to run. The third, also thin entry is `orca_orchestrate`:
-a sibling of `/orchestrate-frontier` with the same entry protocol (expects a prepared ticket frontier: spec + tickets already done),
-routing, three-lens gate, and synthesis, but with worker lanes — a lane is a named route to a specific vendor's
-model with a pinned invocation form — dispatched over Orca terminals. Orca is a desktop supervisor for agentic
-CLIs (stablyai/orca) that drives worktrees and terminals in which this third entry launches vendor CLIs under
-their native authorization. Every worker lane is dispatched as a terminal inside an Orca-managed worktree instead
-of running as a subprocess or via the Agent tool inside the harness (the agent's execution environment, here
-Claude Code), supplying native per-vendor authorization and worktree/process isolation. Use it when ready tickets
-exist AND the run should be driven from Orca; when Orca is unavailable, it defers to
-`/orchestrate-frontier` (transport is chosen by presence, never preference).
+and tickets tracing to it, this entry refuses to run.
 
 Four standing executors, each pinned to its tier:
 
@@ -291,9 +270,9 @@ judgment-class of tasks and the primary grader of every gate always stay on Clau
 
 ### Execution engine `run-lane`
 
-All three heads sit on one execution core — the thin executor `run-lane` (`skill/orchestrate/tools/run_lane/`, see [ADR-0005](docs/adr/0005-lane-invocation-unification.md)):
+Both heads sit on one execution core — the thin executor `run-lane` (`skill/orchestrate/tools/run_lane/`, see [ADR-0005](docs/adr/0005-lane-invocation-unification.md)):
 
-- Two independent axes: **transport** — which vendor CLI runs (`agy` — Google Antigravity's console client, the Google-pool transport, its calling form documented in [`skill/orchestrate/references/cross-provider.md`](skill/orchestrate/references/cross-provider.md) / `codex` / `grok` / `kimi` / `claude-print`); **substrate** — how it is launched (a plain subprocess, or an Orca terminal). N transports and M substrates compose by addition, not multiplication.
+- **Transport** — which vendor CLI runs (`agy` — Google Antigravity's console client, the Google-pool transport, its calling form documented in [`skill/orchestrate/references/cross-provider.md`](skill/orchestrate/references/cross-provider.md) / `codex` / `grok` / `kimi` / `claude-print`) — the only remaining axis; the launch substrate is now a single one (a plain subprocess), no longer a choice — the second substrate, an Orca terminal, has been retired (see [ADR-0008](docs/adr/0008-retire-orca-transport.md)).
 - The deliverable is always taken **from the `--out` file on disk**, never from the model's printed reply in the console (printed output truncates and gets paraphrased); and the model that actually ran is verified against the one requested (a "witness" check).
 - One JSON envelope carries the outcome (`ok`, `model_declared` vs `model_observed`, artifact properties, error class).
 - Two auxiliary modes exist: `run-lane detect` (probe which lanes are logged in and available) and `run-lane smoke` (fire one trivial real call per lane to confirm the path end-to-end).
@@ -344,9 +323,8 @@ above wherever you keep checkouts.
 ```
 skill/orchestrate/          the skill itself (SKILL.md + config.yaml + references/)
 skill/orchestrate-frontier/ thin second entry: runs a prepared ticket frontier (ADR-0004)
-skill/orca_orchestrate/     thin third entry: runs a prepared frontier over the Orca terminal substrate (ADR-0006)
 skill/orchestrate/tools/    config validator (deterministic seam over config + prose)
-skill/orchestrate/tools/run_lane/ the lane-invocation executor (transport × substrate; artifact from disk; model witness) (ADR-0005)
+skill/orchestrate/tools/run_lane/ the lane-invocation executor (transport; artifact from disk; model witness) (ADR-0005)
 agents/                     the four agent definitions
 benchmark/                  the role-comparison polygon (fixtures, tasks, grader tools)
 benchmark/DESIGN.md         the polygon's protocol and anti-cheat design
@@ -367,11 +345,8 @@ install.sh                  wires ~/.claude/skills and ~/.claude/agents to this 
 Invoke explicitly with `/orchestrate <task>`, or let Claude Code auto-invoke it on
 large, multi-part tasks that decompose into independent subtasks. If the preparatory
 phase already happened in a solo session and the tracker holds ready tickets, use the
-thin frontier entry instead: `/orchestrate-frontier` (ADR-0004). If the prepared
-frontier should be executed from Orca (native per-vendor auth, worktree isolation), use
-`orca_orchestrate` instead of `/orchestrate-frontier`; it defers back to the frontier
-head when Orca is absent. The four agents are also directly invocable on their own,
-without going through the skill.
+thin frontier entry instead: `/orchestrate-frontier` (ADR-0004). The four agents are
+also directly invocable on their own, without going through the skill.
 
 See [skill/orchestrate/README.md](skill/orchestrate/README.md) for the detailed docs
 (in Russian) and the changelog.

@@ -6,7 +6,7 @@ Contract (ADR-0005, поправка B):
     run-lane --lane <name> --config <config.yaml> --prompt-file <file>
              --workdir <abs INPUTS dir> --out <abs artifact path>
              [--role <name>] [--schema <file>] [--timeout <s>] [--resume <id>]
-             [--substrate subprocess|orca-terminal] [--effort <level>]
+             [--substrate subprocess] [--effort <level>]
              [--model <slug>]
 
 `--effort`/`--model` default to the resolved lane's own `effort`/`model`
@@ -29,7 +29,7 @@ from pathlib import Path
 
 from . import adapters, artifact, config_resolve, envelope, hardening
 from .envelope import LaneError
-from .substrate import OrcaTerminalSubstrate, RunLimits, SubprocessSubstrate
+from .substrate import RunLimits, SubprocessSubstrate
 
 # No wall-clock DEFAULT_TIMEOUT any more (ADR-0007): the wait is bounded by
 # liveness (idle) plus the lane's recorded latency envelope, resolved per lane
@@ -41,11 +41,13 @@ from .substrate import OrcaTerminalSubstrate, RunLimits, SubprocessSubstrate
 GROK_SANDBOX_EVENTS_PATH = Path("~/.grok/sandbox-events.jsonl").expanduser()
 
 # Substrate registry keyed by the CLI's own vocabulary (--substrate
-# subprocess|orca-terminal) — tests substitute this mapping to inject a
-# FakeSubstrate without touching argument parsing.
+# subprocess) — tests substitute this mapping to inject a FakeSubstrate
+# without touching argument parsing. A second, Orca-terminal-backed entry
+# once lived here too; it shipped and was later withdrawn outright (ADR-0008,
+# owner's decision to drop Orca from the project) — `subprocess` is the sole
+# substrate now, not a default among several.
 SUBSTRATES = {
     "subprocess": SubprocessSubstrate,
-    "orca-terminal": OrcaTerminalSubstrate,
 }
 
 _SCHEMA_ENFORCEMENT = {"strict": "enforced", "prompt": "prompt_asked", "no": "none"}

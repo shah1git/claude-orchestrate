@@ -168,7 +168,7 @@ for recon, wrong for a Pro-tier critic.
 >   critic 7/8, 0 FP, and forced-Flash still caught the critical swapped-args seam). **But it is
 >   Flash-locked in print mode regardless of `--model`** (a warning surfaces): route it where Flash
 >   suffices; never *claim* a "3.1 Pro lens" through it — the connector does not expose the pin.
-> - **Native `agy` (interactive, e.g. inside an Orca terminal) honours the model** but is unfit for
+> - **Native `agy` (interactive, e.g. in an interactive session) honours the model** but is unfit for
 >   autonomous dispatch: it needs per-step permission approvals (not headless), and under `--sandbox`
 >   it relocates cwd and runs `find /` across the whole filesystem — in the re-test one candidate
 >   thereby answered a *neighbour* workspace's ticket and wrote+committed into its directory (a live
