@@ -245,10 +245,23 @@ if command -v grok >/dev/null; then
 
   # config.toml — ставим, только если файла ещё нет (иначе можем затереть ключи).
   if [ -f "${GROK_HOME}/config.toml" ]; then
-    warn "~/.grok/config.toml уже есть — НЕ трогаю; сверь с ${ORCH_DIR}/skill/orchestrate/references/grok/config.toml и слей вручную"
+    # Не заменяем файл (в нём ключи владельца), НО чиним одну конкретную строку:
+    # прежние версии bootstrap вписывали profile = "orchestrate" в этот ГЛОБАЛЬНЫЙ
+    # файл, из-за чего интерактивный grok владельца тоже садился в песочницу и терял
+    # доступ к ~/projects/git/.env/push (баг, исправлен 2026-07-24). Меняем ТОЛЬКО
+    # эту строку на "off" — ключи и прочие настройки не трогаем. Лейн защищает себя
+    # сам флагом --sandbox (references/grok/config.toml объясняет почему).
+    if grep -Eq '^[[:space:]]*profile[[:space:]]*=[[:space:]]*"orchestrate"' "${GROK_HOME}/config.toml"; then
+      awk '/^[[:space:]]*profile[[:space:]]*=[[:space:]]*"orchestrate"/{print "profile = \"off\"  # правка bootstrap 2026-07-24: глобально песочницу не форсим (ломала интерактив); лейн включает её сам флагом"; next} {print}' \
+        "${GROK_HOME}/config.toml" > "${GROK_HOME}/config.toml.tmp" && mv "${GROK_HOME}/config.toml.tmp" "${GROK_HOME}/config.toml"
+      ok "~/.grok/config.toml: profile \"orchestrate\" -> \"off\" (интерактивный grok разблокирован; защита лейна не тронута)"
+      warn "перезапусти grok НОВОЙ сессией — песочница фиксируется на сессию, resume её не снимет"
+    else
+      warn "~/.grok/config.toml уже есть — не трогаю (нет форс-строки profile=orchestrate); при желании сверь с ${ORCH_DIR}/skill/orchestrate/references/grok/config.toml"
+    fi
   else
     cp "${ORCH_DIR}/skill/orchestrate/references/grok/config.toml" "${GROK_HOME}/config.toml"
-    ok "~/.grok/config.toml установлен (выключатели телеметрии/выгрузки + профиль orchestrate)"
+    ok "~/.grok/config.toml установлен (выключатели телеметрии/выгрузки; песочницу лейн включает сам флагом, глобально НЕ форсится)"
   fi
 
   # sandbox.toml — генерируем с реальными абсолютными deny-путями (только
