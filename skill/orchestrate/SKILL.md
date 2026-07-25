@@ -608,7 +608,9 @@ Rules:
   bridge call still gets the lane's real tier·effort, not "general-purpose"). Why here
   and not a `subagentStatusLine`: the panel's per-subagent JSON carries `model` but **not
   effort** and **not** the agent-type name (verified 2026-07-18), so only a lead-authored
-  label can show both truthfully and survive every harness version and machine.
+  label can show both truthfully and survive every harness version and machine. The rule
+  follows the *displayed* field, not the tool: in Workflow scripts the same tag goes into
+  `label` (see "Large fan-outs"), because that is what the progress tree renders there.
 - **Calibrate ticket style to the model tier** — this is where per-model prompting lives:
   - `scout` (Haiku): maximally explicit — enumerated steps, exact paths and commands, a
     literal example of the expected output, and an escape hatch ("if the instructions
@@ -893,9 +895,18 @@ N modules to audit), prefer a Workflow pipeline over hand-spawning: pass these a
 
 ```js
 const results = await pipeline(items,
-  (item) => agent(ticketFor(item), { agentType: 'builder', label: item }),
-  (out, item) => agent(verifyTicket(out, item), { agentType: 'critic', label: `verify:${item}` }))
+  (item) => agent(ticketFor(item), { agentType: 'builder', label: `[sonnet·high] ${item}` }),
+  (out, item) => agent(verifyTicket(out, item),
+                       { agentType: 'critic', label: `[opus·xhigh] verify:${item}` }))
 ```
+
+**The `[<tier>·<effort>]` tag is mandatory here too** — in Workflow scripts it goes into
+`label`, the field the progress tree renders (Step 3 puts it in the Agent tool's
+`description` for the same reason: it is whatever the panel actually shows). This is the
+case where the tag matters *most*, not least: a uniform sweep is exactly where ten identical
+rows burn quota at a tier no one can see. Write it from the `agentType` you passed — the
+frontmatter model of `agents/<type>.md` — or, where `model`/`effort` is overridden on the
+call, from the override actually sent.
 
 **Routing is mandatory inside Workflow scripts — on every single `agent()` call.**
 An `agent()` call with neither `agentType` nor `model` inherits the session model —
