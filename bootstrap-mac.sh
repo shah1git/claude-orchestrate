@@ -8,15 +8,18 @@
 #   1. Преф-лайт: git/rsync/claude/python3 обязательны (плюс PyYAML для
 #      инструментов — warn); node/codex/agy/grok/kimi/gh — желательны (их
 #      отсутствие — штатная деградация лейнов/удобств, не ошибка установки).
-#   2. /opt/claude-orchestrate  — этот репозиторий (три головы orchestrate/
-#      orchestrate-frontier/orca_orchestrate + 4 агента + движок run-lane),
-#      clone/pull.
+#   2. /opt/claude-orchestrate  — этот репозиторий (две головы orchestrate/
+#      orchestrate-frontier + 4 агента + движок run-lane), clone/pull. Третья
+#      голова orca_orchestrate выведена из проекта (ADR-0008).
 #   3. Набор скиллов Мэтта Покока — канон в ~/.agents/skills (реальные каталоги,
 #      rsync из свежего клона апстрима), ~/.claude/skills/* — симлинки на канон,
 #      ~/.codex/skills — девять симлинков хребта (тикет #11). Раскладка
 #      байт-в-байт повторяет ВПС.
-#   4. ./install.sh — штатная установка трёх голов оркестрации и четырёх агентов.
-#   5. Самопроверка: семь канонических файлов хребта, предостережение об
+#   4. ./install.sh — штатная установка голов оркестрации и агентов (состав
+#      выводится из репозитория, а не перечисляется списком).
+#   5. Самопроверка: scripts/verify-install.sh — чекаут, головы, агенты, висячие
+#      ссылки, зеркало ~/.agents, хребет, инструменты, лейны; её код возврата
+#      становится кодом возврата бутстрапа. Плюс предостережение об
 #      ultra-эффорте в ~/.codex/config.toml.
 #
 # Мост /opt/tools/agent-bridge из этого контура УБРАН (2026-07-22): транспорт
@@ -337,12 +340,16 @@ if command -v kimi >/dev/null || [ -x "${HOME}/.kimi-code/bin/kimi" ]; then
 fi
 
 # --- 6. Самопроверка ---------------------------------------------------------
-echo "== Самопроверка =="
-spine_missing=0
-for name in grilling domain-modeling to-spec to-tickets implement tdd code-review; do
-  [ -f "${CLAUDE_SKILLS}/${name}/SKILL.md" ] || { warn "хребет: нет ${name}/SKILL.md"; spine_missing=1; }
-done
-[ "${spine_missing}" -eq 0 ] && ok "семь канонических файлов хребта на месте"
+# Делегируется scripts/verify-install.sh — одно определение «правильной
+# установки» на два случая (хвост бутстрапа и самостоятельный запуск), иначе две
+# копии критериев разъедутся. Код возврата проверки — код возврата бутстрапа:
+# установка, о провале которой сообщили строкой, но вышли нулём, ничем не лучше
+# необнаруженного провала. ORCH_SKIP_TESTS=1 — пропустить прогон тестов.
+if [ -n "${ORCH_SKIP_TESTS:-}" ]; then
+  bash "${ORCH_DIR}/scripts/verify-install.sh" --no-tests || verify_rc=$?
+else
+  bash "${ORCH_DIR}/scripts/verify-install.sh" || verify_rc=$?
+fi
 
 # Унаследованный ultra-эффорт: для оркестрации безопасно (лейны пинуют эффорт
 # явно), но ручной `codex` без флага будет молча жечь квоту на максимуме.
@@ -351,9 +358,16 @@ if [ -f "${HOME}/.codex/config.toml" ] && grep -q 'model_reasoning_effort *= *"u
 fi
 
 echo
+if [ "${verify_rc:-0}" -ne 0 ]; then
+  echo "Установка выполнена, но самопроверка нашла провалы (см. выше)." >&2
+  echo "Повторный запуск бутстрапа лечит большинство из них; остальное перечислено построчно." >&2
+  exit "${verify_rc}"
+fi
 echo "Готово. Дальше:"
 echo "  1. Перезапустите Claude Code — он перечитает реестр скиллов."
 echo "  2. В каждом новом проекте один раз выполните настройку по файлу"
 echo "     setup-matt-pocock-skills (трекер, метки триажа, путь документов)."
 echo "  3. Обновление всего контура в будущем — просто повторный запуск:"
 echo "     bash ${ORCH_DIR}/bootstrap-mac.sh"
+echo "  4. Проверить установку отдельно, ничего не меняя:"
+echo "     bash ${ORCH_DIR}/scripts/verify-install.sh"

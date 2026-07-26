@@ -332,7 +332,10 @@ benchmark/RESULTS.md        published synthesis of polygon runs
 docs/                       architecture decision records (docs/adr/) and agent docs (docs/agents/)
 CONTEXT.md                  the project's domain glossary
 scripts/                    maintenance scripts (e.g. doctrine sync)
-bootstrap-mac.sh            one-shot machine setup (macOS)
+scripts/verify-install.sh   self-check of an installed contour (exit 1 on any failure);
+                             runs standalone and as the tail of bootstrap-mac.sh
+bootstrap-mac.sh            one-shot machine setup (macOS) — and the update path:
+                             re-running it pulls, reinstalls and verifies
 telemetry-sync.sh           run-telemetry sync to the owner's private store
 LICENSE                     MIT
 .doctrine-version           doctrine sync marker (see AGENTS.md)

@@ -19,7 +19,7 @@ CLAUDE_DIR="${HOME}/.claude"
 SKILLS_DIR="${CLAUDE_DIR}/skills"
 AGENTS_DIR="${CLAUDE_DIR}/agents"
 
-mkdir -p "${SKILLS_DIR}" "${AGENTS_DIR}"
+# (каталоги назначения создаёт install_contour — по одному месту на реестр)
 
 # install_one SRC DEST
 # Links (default) or copies (--copy) SRC (a file or directory inside the repo)
@@ -59,31 +59,69 @@ install_one() {
   echo "linked  ${dest} -> ${src}"
 }
 
-install_one "${REPO_DIR}/skill/orchestrate" "${SKILLS_DIR}/orchestrate"
-install_one "${REPO_DIR}/skill/orchestrate-frontier" "${SKILLS_DIR}/orchestrate-frontier"
-install_one "${REPO_DIR}/skill/orca_orchestrate" "${SKILLS_DIR}/orca_orchestrate"
+# prune_retired DIR
+# Уборка следов выведенного из проекта. Удаляется ТОЛЬКО симлинк, который
+# одновременно (а) указывает внутрь этого чекаута и (б) чья цель больше не
+# существует, — то есть след прошлой установки головы или агента, удалённых из
+# репозитория. Потерять при этом нечего по построению: сам симлинк содержимого
+# не хранит, а его цели уже нет. Чужие ссылки (например, на канон Покока в
+# ~/.agents/skills) под условие не подпадают и не трогаются.
+prune_retired() {
+  local dir="$1" entry target
+  [ -d "${dir}" ] || return 0
+  for entry in "${dir}"/*; do
+    [ -L "${entry}" ] || continue      # не симлинк — не наше дело
+    [ -e "${entry}" ] && continue      # цель жива — это действующая установка
+    target="$(readlink "${entry}")"
+    case "${target}" in
+      "${REPO_DIR}"/skill/*|"${REPO_DIR}"/agents/*)
+        rm -f "${entry}"
+        echo "убрано  ${entry} (висячая ссылка на выведенное из репозитория)"
+        ;;
+    esac
+  done
+}
 
-for agent in architect builder scout critic; do
-  install_one "${REPO_DIR}/agents/${agent}.md" "${AGENTS_DIR}/${agent}.md"
-done
+# install_contour SKILLS_DEST AGENTS_DEST
+# Состав контура ВЫВОДИТСЯ из репозитория, а не перечисляется списком: голова —
+# любой каталог skill/<name>/ с файлом SKILL.md, агент — любой файл
+# agents/<name>.md. Перечисление именами разъезжается с репозиторием: третья
+# голова `orca_orchestrate` была выведена из проекта (ADR-0008), а установщик
+# продолжал её ставить, потому что помнил имя списком — в режиме симлинков это
+# давало висячую ссылку, а в режиме --copy `cp -r` падал на несуществующем
+# источнике и обрывал установку до агентов. Выводимый состав такой ошибки не
+# допускает по построению; prune_retired убирает следы прежних установок.
+install_contour() {
+  local skills_dest="$1" agents_dest="$2" src
+  mkdir -p "${skills_dest}" "${agents_dest}"
+
+  for src in "${REPO_DIR}"/skill/*/; do
+    [ -f "${src}SKILL.md" ] || continue
+    install_one "${src%/}" "${skills_dest}/$(basename "${src%/}")"
+  done
+
+  for src in "${REPO_DIR}"/agents/*.md; do
+    [ -f "${src}" ] || continue
+    install_one "${src}" "${agents_dest}/$(basename "${src}")"
+  done
+
+  prune_retired "${skills_dest}"
+  prune_retired "${agents_dest}"
+}
+
+install_contour "${SKILLS_DIR}" "${AGENTS_DIR}"
 
 # Also wire the shared `~/.agents` skills store, if present. Harnesses spawned
 # by Orca (and other agent CLIs) read skills from `~/.agents/skills` rather than
 # `~/.claude/skills`, so an install that only touched `~/.claude` left
 # `/orchestrate` reported as an "unknown skill" in those terminals. We mirror the
-# skill and the four agent definitions there too. NOTE: finding the skill file is
+# same derived contour there too. NOTE: finding the skill file is
 # necessary but not sufficient — `/orchestrate` spawns tiered Claude subagents via
 # the Agent tool, so it only *functions* in a Claude-Code-family harness that
 # supports subagents and model tiers; in others the skill is found but cannot run.
 SHARED_AGENTS_DIR="${HOME}/.agents"
 if [ -d "${SHARED_AGENTS_DIR}/skills" ]; then
-  mkdir -p "${SHARED_AGENTS_DIR}/agents"
-  install_one "${REPO_DIR}/skill/orchestrate" "${SHARED_AGENTS_DIR}/skills/orchestrate"
-  install_one "${REPO_DIR}/skill/orchestrate-frontier" "${SHARED_AGENTS_DIR}/skills/orchestrate-frontier"
-  install_one "${REPO_DIR}/skill/orca_orchestrate" "${SHARED_AGENTS_DIR}/skills/orca_orchestrate"
-  for agent in architect builder scout critic; do
-    install_one "${REPO_DIR}/agents/${agent}.md" "${SHARED_AGENTS_DIR}/agents/${agent}.md"
-  done
+  install_contour "${SHARED_AGENTS_DIR}/skills" "${SHARED_AGENTS_DIR}/agents"
 fi
 
 echo "Done (${MODE} mode)."
