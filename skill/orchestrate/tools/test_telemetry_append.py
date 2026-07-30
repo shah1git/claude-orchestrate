@@ -11,6 +11,9 @@ import sys
 from pathlib import Path
 from textwrap import dedent
 
+sys.path.insert(0, str(Path(__file__).parent))
+import telemetry_append  # noqa: E402 — must follow the sys.path insert above
+
 TOOL = Path(__file__).parent / "telemetry_append.py"
 
 # Only the keys the tool reads — deliberately independent of the full
@@ -108,7 +111,9 @@ def test_envelope_populates_observed_measurements_and_provenance(tmp_path):
     record = log_rows(d)[0]
     assert record["model"] == "gpt-5.6-terra"  # witness, never declared alias
     assert record["duration_ms"] == 3210
-    assert record["tokens"] == 190
+    # v32: cached_input_tokens (20) is a SUBSET of input_tokens (100), not a
+    # sibling to sum on top — (100-20) + 30 + 40 = 150, not the old 190.
+    assert record["tokens"] == 150
     assert record["note"] == (
         "gate accepted; run-lane: transport=codex-cli, substrate=subprocess, "
         "artifact_sha256=" + "a" * 64)
@@ -328,3 +333,141 @@ def test_malformed_entry_values_in_config_is_rejected(tmp_path):
     assert p.returncode == 1
     assert "entry_values must be a list of strings" in p.stderr
     assert log_rows(d) == []
+
+
+# =============================================================================
+# envelope_tokens — v32 not-cached-tokens-only convention (owner's decision,
+# 2026-07-30): direct unit tests against the two live-witness shapes named in
+# the ticket, plus the fallback/n-a paths. See telemetry_append.envelope_tokens
+# docstring for the full rationale.
+# =============================================================================
+
+
+def test_envelope_tokens_convention_a_openai_codex_subtracts_cached_subset():
+    """(a) `cached_input_tokens` present — it is a SUBSET of `input_tokens`
+    (OpenAI/codex naming). Live witness: input_tokens 783472,
+    cached_input_tokens 667648, output_tokens 7728,
+    reasoning_output_tokens 801 -> (783472-667648)+7728+801 = 124353."""
+    usage = {
+        "input_tokens": 783472,
+        "cached_input_tokens": 667648,
+        "output_tokens": 7728,
+        "reasoning_output_tokens": 801,
+    }
+    assert telemetry_append.envelope_tokens(usage) == 124353
+
+
+def test_envelope_tokens_convention_b_anthropic_style_total_minus_cache_read():
+    """(b) `cache_read_input_tokens` present and an explicit `total_tokens`
+    is also given — the not-cached total is total_tokens - cache_read
+    (never input_tokens - cache_read: it was never a subset). Live witness:
+    input_tokens 92302 + cache_read_input_tokens 701568 + output_tokens
+    16054 = total_tokens 809924 -> not-cached = 809924 - 701568 = 108356."""
+    usage = {
+        "input_tokens": 92302,
+        "cache_read_input_tokens": 701568,
+        "output_tokens": 16054,
+        "total_tokens": 809924,
+    }
+    assert telemetry_append.envelope_tokens(usage) == 108356
+
+
+def test_envelope_tokens_convention_b_without_total_does_not_subtract_from_input():
+    """Anthropic-shaped usage with NO explicit total_tokens: input_tokens
+    does NOT already include cache_read_input_tokens (they are siblings),
+    so the not-cached total is input_tokens + output_tokens (+ any fresh
+    cache-write counter) — cache_read_input_tokens must never be subtracted
+    from input_tokens here, unlike convention (a)."""
+    usage = {
+        "input_tokens": 92302,
+        "cache_read_input_tokens": 701568,
+        "output_tokens": 16054,
+    }
+    assert telemetry_append.envelope_tokens(usage) == 92302 + 16054
+
+
+def test_envelope_tokens_convention_b_counts_fresh_cache_write_tokens():
+    usage = {
+        "input_tokens": 100,
+        "cache_read_input_tokens": 50,
+        "cache_creation_input_tokens": 25,
+        "output_tokens": 10,
+    }
+    assert telemetry_append.envelope_tokens(usage) == 100 + 25 + 10
+
+
+def test_envelope_tokens_convention_a_ignores_cache_write_already_in_input():
+    """Under convention (a), a cache_write-style counter would already be
+    folded into input_tokens by the same naming convention's subset logic —
+    it must not be added a second time."""
+    usage = {
+        "input_tokens": 200,
+        "cached_input_tokens": 50,
+        "cache_write_input_tokens": 30,
+        "output_tokens": 10,
+    }
+    assert telemetry_append.envelope_tokens(usage) == (200 - 50) + 10
+
+
+def test_envelope_tokens_missing_usage_witness_is_na():
+    assert telemetry_append.envelope_tokens(None) == "n/a"
+    assert telemetry_append.envelope_tokens({}) == "n/a"
+
+
+def test_envelope_tokens_unrecognised_shape_falls_back_to_pre_v32_sum():
+    """Neither cache convention named: unchanged pre-v32 behaviour — prefer
+    an explicit total, else sum whatever counters are present."""
+    assert telemetry_append.envelope_tokens({"total_tokens": 12}) == 12
+    assert telemetry_append.envelope_tokens(
+        {"input_tokens": 5, "output_tokens": 6}) == 11
+
+
+# --- critic-gate findings 3/4 (2026-07-30): a broken witness invariant is an
+# UNKNOWN ("n/a"), never a negative number or a manufactured zero. --------
+
+
+def test_envelope_tokens_convention_a_broken_invariant_is_na_not_negative():
+    """Critic's exact reproduction: cached_input_tokens (500000) > input_tokens
+    (10) violates the subset invariant convention (a) depends on — must be
+    "n/a", never a negative number (which `spent()` would silently add to the
+    running budget total, DELAYING the very fuse this fix exists to protect)."""
+    usage = {"input_tokens": 10, "cached_input_tokens": 500000, "output_tokens": 1}
+    result = telemetry_append.envelope_tokens(usage)
+    assert result == "n/a"
+    assert not isinstance(result, int) or result >= 0
+
+
+def test_envelope_tokens_convention_a_cached_equal_to_input_is_zero_not_na():
+    """The boundary of the invariant (cached == input, not >) is still a
+    valid, if degenerate, reading: zero not-cached input tokens."""
+    usage = {"input_tokens": 100, "cached_input_tokens": 100, "output_tokens": 5}
+    assert telemetry_append.envelope_tokens(usage) == 5
+
+
+def test_envelope_tokens_convention_b_cache_read_exceeding_total_is_na():
+    usage = {"cache_read_input_tokens": 900, "total_tokens": 800}
+    assert telemetry_append.envelope_tokens(usage) == "n/a"
+
+
+def test_envelope_tokens_convention_b_lone_cache_read_counter_is_na():
+    """Critic's exact reproduction: {"cache_read_input_tokens": 701568} alone
+    (no input_tokens, no total_tokens, no cache-write/output counter) must be
+    "n/a" — the docstring's own promise ("rather than manufacturing a zero")
+    applies here: there is no witness at all for the not-cached work."""
+    assert telemetry_append.envelope_tokens({"cache_read_input_tokens": 701568}) == "n/a"
+
+
+def test_envelope_tokens_live_ticket_numbers_unaffected_by_the_na_guards():
+    """Regression guard: the two live-witness acceptance numbers from the
+    original ticket must still compute exactly, after the findings-3/4 fix."""
+    convention_a = {
+        "input_tokens": 783472, "cached_input_tokens": 667648,
+        "output_tokens": 7728, "reasoning_output_tokens": 801,
+    }
+    assert telemetry_append.envelope_tokens(convention_a) == 124353
+
+    convention_b = {
+        "input_tokens": 92302, "cache_read_input_tokens": 701568,
+        "output_tokens": 16054, "total_tokens": 809924,
+    }
+    assert telemetry_append.envelope_tokens(convention_b) == 108356

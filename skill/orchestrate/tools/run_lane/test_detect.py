@@ -305,3 +305,194 @@ def test_unknown_transport_recorded_without_probe():
     assert mapping["future-cli"]["present"] is False
     assert "no adapter" in mapping["future-cli"]["evidence"]
     assert mapping["future-cli"]["lanes"] == ["future-lane"]
+    assert mapping["future-cli"]["login_probe"] == "failed"
+    assert mapping["future-cli"]["login_probe_reason"] == "no adapter registered"
+
+
+# --- Fix 1 (2026-07-30): a failed probe must never read as a confident
+# "not logged in" — the working-lane-looked-dead incident. ------------------
+
+
+def test_unknown_transport_is_failed_not_a_confident_negative():
+    """The 'no adapter registered' branch: `logged_in` stays False (unknown
+    whichever way), but `login_probe` must say the probe never ran at all —
+    not a confident negative answer."""
+    config = {"cross_provider": {"lanes": {"future-lane": {"transport": "future-cli"}}}}
+    mapping = detect.detect_transports(config, substrate=FakeSubstrate())
+    entry = mapping["future-cli"]
+    assert entry["logged_in"] is False
+    assert entry["login_probe"] == "failed"
+    assert entry["login_probe_reason"] == "no adapter registered"
+
+
+class _EmptyProbeCommandAdapter:
+    """Stand-in transport whose adapter returns an empty probe_command."""
+
+    transport = "empty-probe-cli"
+
+    def probe_command(self, lane):
+        return []
+
+
+def test_empty_probe_command_is_login_probe_failed(monkeypatch, tmp_path):
+    monkeypatch.setitem(adapters.ADAPTERS, "empty-probe-cli", _EmptyProbeCommandAdapter)
+    config = {"cross_provider": {"lanes": {"empty-lane": {"transport": "empty-probe-cli"}}}}
+    mapping = detect.detect_transports(config, substrate=FakeSubstrate())
+    entry = mapping["empty-probe-cli"]
+    assert entry["present"] is False
+    assert entry["logged_in"] is False
+    assert entry["login_probe"] == "failed"
+    assert entry["login_probe_reason"] == "empty probe_command"
+
+
+def test_probe_timeout_is_login_probe_failed_not_a_confident_negative():
+    """2026-07-30 incident, reproduced structurally: a probe that never came
+    back (timed_out=True, exit_code -1) must NOT be recorded the same way
+    as a CLI that genuinely said 'not logged in' — logged_in stays False,
+    but login_probe must say the probe failed, with a named reason."""
+    config = __import__("yaml").safe_load(DETECT_CONFIG)
+    fake = FakeSubstrate(results_by_cli={
+        "codex": RunResult(-1, "", "", 30000, True, timeout_kind="idle"),
+        "agy": _rr(0, "gemini-3.6-flash-high\n"),
+        "grok": _rr(0, "grok 0.2.101\n"),
+        "kimi": _rr(0, "0.27.0\n"),
+        "claude": _rr(0, json.dumps({"loggedIn": True})),
+    })
+    mapping = detect.detect_transports(config, substrate=fake)
+    entry = mapping["codex-cli"]
+    assert entry["logged_in"] is False
+    assert entry["login_probe"] == "failed"
+    assert entry["login_probe_reason"] == "probe timed out"
+
+
+def test_probe_crash_with_no_parseable_output_is_login_probe_failed():
+    """The actual 2026-07-30 incident: agy overwrote its own binary
+    (self-update) mid-probe; the exec failed with an OSError that does NOT
+    match the adapter's known "CLI genuinely absent" phrasing (unlike a
+    plain FileNotFoundError), so the adapter fell through to `present:
+    True, logged_in: False` — a confident-looking false negative for a
+    working lane. `login_probe` must mark this `failed`, distinguishing it
+    from a real "not logged in" answer."""
+    config = __import__("yaml").safe_load(DETECT_CONFIG)
+    fake = FakeSubstrate(results_by_cli={
+        "codex": RunResult(-1, "", "Exec format error while starting 'codex'", 50, False),
+        "agy": _rr(0, "gemini-3.6-flash-high\n"),
+        "grok": _rr(0, "grok 0.2.101\n"),
+        "kimi": _rr(0, "0.27.0\n"),
+        "claude": _rr(0, json.dumps({"loggedIn": True})),
+    })
+    mapping = detect.detect_transports(config, substrate=fake)
+    entry = mapping["codex-cli"]
+    assert entry["logged_in"] is False
+    assert entry["login_probe"] == "failed"
+    assert entry["login_probe_reason"] == "probe exited nonzero with no parseable output"
+
+
+def test_probe_empty_output_is_login_probe_failed():
+    config = __import__("yaml").safe_load(DETECT_CONFIG)
+    fake = FakeSubstrate(results_by_cli={
+        "codex": _rr(0, "", ""),
+        "agy": _rr(0, "gemini-3.6-flash-high\n"),
+        "grok": _rr(0, "grok 0.2.101\n"),
+        "kimi": _rr(0, "0.27.0\n"),
+        "claude": _rr(0, json.dumps({"loggedIn": True})),
+    })
+    mapping = detect.detect_transports(config, substrate=fake)
+    entry = mapping["codex-cli"]
+    assert entry["logged_in"] is False
+    assert entry["login_probe"] == "failed"
+    assert entry["login_probe_reason"] == "empty output"
+
+
+def test_genuine_cli_missing_is_login_probe_ok_not_failed():
+    """A CLI that is honestly not on PATH is a reliable, deterministic
+    finding — not a probe malfunction — so `login_probe` stays 'ok' even
+    though `present`/`logged_in` are both False."""
+    config = __import__("yaml").safe_load(DETECT_CONFIG)
+    fake = FakeSubstrate(default=_rr(
+        -1, "", "[Errno 2] No such file or directory: 'missing'"))
+    mapping = detect.detect_transports(config, substrate=fake)
+    for entry in mapping.values():
+        assert entry["present"] is False
+        assert entry["logged_in"] is False
+        assert entry["login_probe"] == "ok"
+        assert entry["login_probe_reason"] is None
+
+
+def test_genuine_negative_login_answer_is_login_probe_ok():
+    """A CLI that ran, exited, and printed a real 'please log in' invite is
+    a trustworthy negative — `login_probe` must be 'ok', not 'failed'."""
+    adapter = CodexAdapter()
+    res = _rr(0, "Not logged in\n", "")
+    parsed = adapter.parse_probe(res)
+    status, reason = detect._login_probe_status(res, parsed)
+    assert parsed["logged_in"] is False
+    assert status == "ok"
+    assert reason is None
+
+
+def test_genuine_positive_login_answer_is_logged_in_true():
+    adapter = CodexAdapter()
+    res = _rr(0, "Logged in as user@example.com\n", "")
+    parsed = adapter.parse_probe(res)
+    status, _reason = detect._login_probe_status(res, parsed)
+    assert parsed["logged_in"] is True
+    assert status == "ok"
+
+
+# --- Finding 6b (critic-gate, 2026-07-30): login_probe matrix by exit code --
+#
+# The critic's own reproduction: `RunResult(exit_code=1, stdout="",
+# stderr="Text file busy", timed_out=False)` at `present=True` with no
+# recognizable marker must be `"failed"` — a bare nonzero exit is NOT the
+# rule (that theory was rejected, finding 1); the adapter's own
+# `login_signal` is. This is exercised across a small spread of exit codes a
+# real CLI can plausibly produce (1 — generic failure, 127 — "command not
+# found" from a shell wrapper, 139 — 128+11, SIGSEGV) plus the substrate's
+# own -1 sentinel and a genuine timeout, so the "failed" verdict is not an
+# artefact of one particular exit code.
+
+
+@pytest.mark.parametrize("exit_code", [-1, 1, 127, 139])
+def test_login_probe_matrix_no_markers_is_failed_at_every_exit_code(exit_code):
+    adapter = CodexAdapter()
+    res = _rr(exit_code, "", "Text file busy", timed_out=False)
+    parsed = adapter.parse_probe(res)
+    assert parsed["logged_in"] is False
+    status, reason = detect._login_probe_status(res, parsed)
+    assert status == "failed"
+    assert reason is not None
+
+
+def test_login_probe_matrix_timed_out_is_failed():
+    adapter = CodexAdapter()
+    res = RunResult(-1, "", "", 30000, True, timeout_kind="idle")
+    parsed = adapter.parse_probe(res)
+    status, reason = detect._login_probe_status(res, parsed)
+    assert status == "failed"
+    assert reason == "probe timed out"
+
+
+@pytest.mark.parametrize("exit_code", [1, 127, 139])
+def test_login_probe_matrix_login_invite_is_ok_at_every_realistic_nonzero_exit_code(exit_code):
+    """The other half of the same matrix, and finding 1's core point: a CLI
+    that is genuinely present and honestly prints a login invite is not
+    penalized for exiting nonzero while doing so.
+
+    `exit_code == -1` is deliberately NOT part of this half of the matrix:
+    it is the substrate's sentinel for "the child process never actually
+    ran" (a Popen-level OSError, `substrate.py`) — no real CLI text, invite
+    or otherwise, can physically co-occur with it, so `_login_probe_status`
+    treats it as a sufficient failure signal on its own (finding 1: "ещё
+    один достаточный признак сбоя"), independent of any marker. Testing
+    "-1 + invite text" would only be testing that internal priority choice
+    against a combination that cannot occur from a real subprocess run, not
+    a real behaviour — so it is documented here rather than asserted.
+    """
+    adapter = CodexAdapter()
+    res = _rr(exit_code, "Please log in to continue\n", "", timed_out=False)
+    parsed = adapter.parse_probe(res)
+    assert parsed["logged_in"] is False
+    status, reason = detect._login_probe_status(res, parsed)
+    assert status == "ok"
+    assert reason is None

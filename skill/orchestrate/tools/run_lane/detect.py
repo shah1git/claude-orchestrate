@@ -67,6 +67,69 @@ def _probe_invocation(argv: list) -> Invocation:
     )
 
 
+# The two PERMANENT (config-level) reasons detect_transports can attach
+# below, kept as a set so verify-install.sh's report (and any other reader)
+# can tell them apart from a TRANSIENT probe failure without re-deriving the
+# distinction: "no adapter" / "empty probe_command" will not go away on a
+# retry (2026-07-30 critic-gate finding 5 — "повторите" is misleading advice
+# for a config error, and misleading in the other direction is exactly what
+# this whole fix exists to stop).
+PERMANENT_LOGIN_PROBE_REASONS = frozenset({"no adapter registered", "empty probe_command"})
+
+
+def _login_probe_status(res, parsed: dict) -> tuple:
+    """Classify whether the transport-level probe itself answered at all,
+    separately from what it answered.
+
+    2026-07-30 00:27:53 бинарь agy перезаписал сам себя (самообновление)
+    ровно во время пробы; проба упала, и это было записано как достоверное
+    "не залогинен" — работающий лейн выглядел мёртвым. Правило владельца:
+    лейн отключается только живым сигналом диспетча, не упавшей пробой.
+    That incident is exactly the gap this function closes.
+
+    2026-07-30 critic-gate finding 1 (introduced, load-bearing): the first
+    cut of this fix tried to tell a failed probe apart from a genuine
+    negative using only `RunResult` (timeout / empty output / `exit_code ==
+    -1`), on the theory that "any nonzero exit is a failed probe". That
+    theory is WRONG and was rejected here: a CLI that is honestly present
+    and honestly prints a login invite often exits nonzero too, and treating
+    every nonzero exit as a probe failure would throw away that confirmed
+    negative. The three-way answer instead lives on the adapter, which is
+    the only place that actually parsed the text — `parse_probe` now names
+    its own outcome via `login_signal: "invite" | "success" | "none"`
+    (`adapters.py`, "detect probes" section, has the full vocabulary).
+    `logged_in` keeps meaning "the adapter parsed a confirmed logged-in
+    state" (unchanged); `login_probe`/`login_probe_reason` record,
+    independently, whether the probe produced anything to parse at all:
+      - a timeout is always a failed probe (no answer arrived at all);
+      - `parsed["present"] is False` is a real, reliable adapter finding
+        (the CLI genuinely is not on PATH) — a legitimate negative, not a
+        probe malfunction, so it stays `"ok"`;
+      - an `exit_code == -1` (the substrate's sentinel for "the subprocess
+        itself could not be run to completion", e.g. the self-overwrite
+        case) remains a SUFFICIENT signal of failure on its own — but, per
+        finding 1, no longer the ONLY one;
+      - completely empty output, or a `login_signal` of `"none"` (or
+        missing/unrecognized — an adapter that has not yet been updated to
+        report it must not be silently read as a confident answer either),
+        means the probe gave nothing trustworthy to read, so `"failed"`;
+      - `login_signal` of `"invite"` or `"success"` is a confirmed answer
+        either way, so `"ok"`.
+    """
+    if getattr(res, "timed_out", False):
+        return "failed", "probe timed out"
+    if not parsed.get("present"):
+        return "ok", None
+    if getattr(res, "exit_code", None) == -1:
+        return "failed", "probe exited nonzero with no parseable output"
+    text = f"{getattr(res, 'stdout', None) or ''}{getattr(res, 'stderr', None) or ''}"
+    if not text.strip():
+        return "failed", "empty output"
+    if parsed.get("login_signal") in ("invite", "success"):
+        return "ok", None
+    return "failed", "probe produced no recognizable login signal"
+
+
 def detect_transports(config: dict, substrate=None) -> dict:
     """Probe each distinct transport once; return the availability map.
 
@@ -83,6 +146,8 @@ def detect_transports(config: dict, substrate=None) -> dict:
                 "cli": transport,
                 "present": False,
                 "logged_in": False,
+                "login_probe": "failed",
+                "login_probe_reason": "no adapter registered",
                 "evidence": f"no adapter registered for transport {transport!r}",
                 "lanes": list(lane_names),
             }
@@ -96,6 +161,8 @@ def detect_transports(config: dict, substrate=None) -> dict:
                 "cli": transport,
                 "present": False,
                 "logged_in": False,
+                "login_probe": "failed",
+                "login_probe_reason": "empty probe_command",
                 "evidence": f"adapter {type(adapter).__name__} returned empty probe_command",
                 "lanes": list(lane_names),
             }
@@ -105,10 +172,19 @@ def detect_transports(config: dict, substrate=None) -> dict:
         res = substrate.run(inv, RunLimits(idle_s=PROBE_TIMEOUT_SECONDS,
                                            max_s=PROBE_TIMEOUT_SECONDS))
         parsed = adapter.parse_probe(res)
+        login_probe, login_probe_reason = _login_probe_status(res, parsed)
+        # Finding 2 (defensive, critic-gate 2026-07-30): a failed probe can
+        # never prove a login. Enforced HERE rather than trusted from the
+        # adapter, so a future adapter bug (or one not yet updated to set
+        # `login_signal`) cannot leak `logged_in: True` out of a probe that
+        # never actually confirmed anything.
+        logged_in = bool(parsed.get("logged_in")) and login_probe != "failed"
         result[transport] = {
             "cli": str(argv[0]),
             "present": bool(parsed.get("present")),
-            "logged_in": bool(parsed.get("logged_in")),
+            "logged_in": logged_in,
+            "login_probe": login_probe,
+            "login_probe_reason": login_probe_reason,
             "evidence": str(parsed.get("evidence") or ""),
             "lanes": list(lane_names),
         }

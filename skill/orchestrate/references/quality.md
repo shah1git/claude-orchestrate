@@ -391,7 +391,21 @@ record. They are free: the harness reports them in each Agent result's `usage` b
 (`subagent_tokens` / `tool_uses` / `duration_ms`), so the lead already has them at
 synthesis time. Recording them lets the log calibrate *cost per class* — is a class
 routinely burning more than its tier is worth? — not just correctness; the two together
-are what make the Step 2 rubric empirical.
+are what make the Step 2 rubric empirical. **v32 (owner's decision, 2026-07-30):** for a
+cross-provider record populated `--from-envelope`, `tokens` counts only NOT-cached
+tokens — a cached read is billed at roughly a tenth of a fresh token, and summing it at
+face value nearly doubled the recorded spend on a live run, tripping `session_budget`
+mid-run. `tools/telemetry_append.py`'s `envelope_tokens()` picks the accounting
+convention by the NAME of the usage counter actually present (never guessed from the
+lane/vendor): `cached_input_tokens` (OpenAI/codex) is a subset of `input_tokens` and is
+subtracted out; `cache_read_input_tokens` (Anthropic/xAI/Moonshot) is a sibling counter,
+excluded rather than subtracted from `input_tokens`. A counter that violates its own
+convention's invariant (a cached count larger than the total it should be a subset of, or
+a lone cache counter with no other witness at all) yields `"n/a"`, never a negative number
+or a manufactured zero — a broken witness must not silently move the running budget total
+the wrong direction. Records written before v32 are unaffected and not retroactively
+recomputed — they are read as their own config fingerprint's rule, per that snapshot's
+`session_budget` note.
 
 Review-loop fields (optional, v8) — `rounds` (integer: full critic rounds consumed, §3b;
 delta re-verifications excluded) may be appended to gated records. Finding-scope counts

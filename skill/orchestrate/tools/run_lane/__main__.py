@@ -71,6 +71,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--substrate", choices=sorted(SUBSTRATES), default="subprocess")
     ap.add_argument("--effort")
     ap.add_argument("--model")
+    # 2026-07-30 fix: a bare "the file exists" check let a 369-byte artifact
+    # whose whole content was "записать файл невозможно: песочница
+    # read-only" through as ok:true. 0 (default) leaves the check off —
+    # `compute_ok` still refuses a zero-byte file regardless; a nonzero
+    # value here is a TICKET-declared floor (override: ticket-declared-only,
+    # the same discipline as gates.pre_gate.max_diff_lines), never guessed
+    # or raised after the fact.
+    ap.add_argument("--min-artifact-bytes", type=int, default=0,
+                     dest="min_artifact_bytes")
     return ap
 
 
@@ -172,7 +181,11 @@ def run(args: argparse.Namespace) -> dict:
         )
 
     adapter.materialize_artifact(res, args.out)
-    art = artifact.capture(args.out)
+    # getattr, not args.min_artifact_bytes: run_lane.smoke builds its own
+    # argparse.Namespace by hand for the combat path and does not carry this
+    # flag — smoke runs are never ticket-scoped, so "the flag was not given"
+    # (0, the check off) is the correct default there too.
+    art = artifact.capture(args.out, min_bytes=getattr(args, "min_artifact_bytes", 0) or 0)
     model_obs = adapter.parse_model_witness(res, inv)
     usage = adapter.parse_usage(res)
     session_id = adapter.parse_session_id(res)
@@ -233,7 +246,8 @@ def _error_envelope(args: argparse.Namespace, exc: LaneError) -> dict:
         "model_declared": args.model,
         "model_observed": None,
         "effort": args.effort,
-        "artifact": {"path": str(args.out), "present": False, "bytes": 0, "sha256": None},
+        "artifact": {"path": str(args.out), "present": False, "bytes": 0, "sha256": None,
+                     "min_bytes": getattr(args, "min_artifact_bytes", 0) or 0},
         "printed_text": "",
         "printed_truncated": False,
         "schema_enforcement": None,

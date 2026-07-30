@@ -310,11 +310,29 @@ try:
     data = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
+# 2026-07-30 критик-гейт находка 5: "no adapter registered" и "empty
+# probe_command" — ПОСТОЯННЫЕ ошибки конфигурации (правка конфига их не
+# переживёт, повторный запуск ничего не изменит); всё прочее, что попадает в
+# login_probe == "failed" (таймаут, самообновление бинаря, нераспознанный
+# вывод), — ВРЕМЕННЫЙ сбой самой пробы. Смешивать их в один совет "повторите"
+# вводит в заблуждение для первой категории.
+PERMANENT_LOGIN_PROBE_REASONS = {"no adapter registered", "empty probe_command"}
 for key in sorted(data):
     t = data[key]
     lanes = ", ".join(t.get("lanes") or []) or "—"
+    # 2026-07-30: упавшая проба (login_probe == "failed", CLI мог обновляться
+    # ровно в момент проверки) — это НЕ то же самое, что достоверный отрицательный
+    # ответ (login_probe == "ok", logged_in false). Формулировка "CLI есть, но не
+    # залогинен" подразумевает второе и не должна звучать при первом — иначе
+    # рабочий лейн, чья проба просто не успела ответить, выглядит мёртвым.
     if t.get("present") and t.get("logged_in"):
         print("  \033[32m✓\033[0m %s (%s): лейны %s" % (key, t.get("cli"), lanes))
+    elif t.get("login_probe") == "failed" and t.get("login_probe_reason") in PERMANENT_LOGIN_PROBE_REASONS:
+        reason = t.get("login_probe_reason") or "причина не названа"
+        print("  \033[33m!\033[0m %s (%s): логин не проверить — %s (ошибка конфигурации, не временный сбой) — лейны %s недоступны" % (key, t.get("cli"), reason, lanes))
+    elif t.get("login_probe") == "failed":
+        reason = t.get("login_probe_reason") or "причина не названа"
+        print("  \033[33m!\033[0m %s (%s): проверить логин не удалось (%s) — возможно, CLI обновлялся; повторите" % (key, t.get("cli"), reason))
     elif t.get("present"):
         print("  \033[33m!\033[0m %s (%s): CLI есть, но не залогинен — лейны %s уйдут в Claude-фолбэк" % (key, t.get("cli"), lanes))
     else:

@@ -12,14 +12,27 @@ import hashlib
 from pathlib import Path
 
 
-def capture(out_path: Path) -> dict:
+def capture(out_path: Path, min_bytes: int = 0) -> dict:
+    """Snapshot `out_path`, stamping the size floor it was checked against.
+
+    `min_bytes` (from run-lane's `--min-artifact-bytes`, a TICKET-declared
+    threshold — override: ticket-declared-only, never guessed after the
+    fact) travels with the snapshot as `min_bytes` so the envelope this
+    dict ends up inside of is self-contained: the routing-log record needs
+    no outside lookup to know what floor a given run was actually graded
+    against. `0` (the default) means the flag was not given — the caller
+    (`envelope.compute_ok`) still enforces its own unconditional zero-byte-
+    is-absent floor regardless of this value.
+    """
     out_path = Path(out_path)
     if not out_path.is_file():
-        return {"path": str(out_path), "present": False, "bytes": 0, "sha256": None}
+        return {"path": str(out_path), "present": False, "bytes": 0,
+                 "sha256": None, "min_bytes": min_bytes}
     data = out_path.read_bytes()
     return {
         "path": str(out_path),
         "present": True,
         "bytes": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
+        "min_bytes": min_bytes,
     }
