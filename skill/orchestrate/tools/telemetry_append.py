@@ -180,28 +180,126 @@ def validate_record(row: dict, config: dict) -> dict:
 # --- run-lane envelope intake -------------------------------------------------
 
 def envelope_tokens(usage) -> int | str:
-    """Return the truthful §7 token total exposed by a run-lane envelope.
+    """Return the truthful §7 token total exposed by a run-lane envelope —
+    NOT-CACHED tokens only (owner's decision, 2026-07-30, config v32).
 
-    The bridge's structured usage has no separate §7 home for its component
-    counters. Prefer an explicitly supplied total; otherwise sum the counters
-    that the bridge documents. `cached_input_tokens` is deliberately included:
-    it is a separately reported observed counter, never a guessed adjustment.
-    A missing or unrecognised usage witness is `n/a`, matching §7's data-
-    honesty rule rather than manufacturing a zero.
+    A live конверт (2026-07-30) showed `input_tokens: 783472` /
+    `cached_input_tokens: 667648`: summing both at face value counted the
+    same tokens roughly twice over (a cached read is billed at roughly a
+    tenth of a fresh token), the session_budget fuse's running total was
+    off by nearly 2x, and it tripped `stop-dispatch-finish-gates-report`
+    in the middle of a perfectly healthy run. This function's old
+    docstring called including `cached_input_tokens` "deliberate" — that
+    reasoning no longer holds; it is exactly the bug.
+
+    Which counter is a SUBSET of another, versus a SIBLING counted
+    separately, differs by vendor naming — so the convention is picked BY
+    THE NAME of the counter actually present in this particular envelope,
+    never guessed from the lane/vendor elsewhere in the record:
+
+      (a) `cached_input_tokens` present (OpenAI/codex naming): it is a
+          SUBSET of `input_tokens` (live witness above: 667648 < 783472,
+          drawn from it). The not-cached input is therefore
+          `input_tokens - cached_input_tokens`. A `cache_write_input_tokens`
+          / `cache_creation_input_tokens` counter under this SAME naming
+          convention would, by the same subset logic, already be folded
+          into `input_tokens` — it is never added a second time.
+
+      (b) `cache_read_input_tokens` present (Anthropic/xAI/Moonshot
+          naming): cached reads are a SIBLING counter, never a subset of
+          `input_tokens` (live witness: `input_tokens` 92302 +
+          `cache_read_input_tokens` 701568 + `output_tokens` 16054 =
+          `total_tokens` 809924 exactly — the three add up to the total,
+          so `input_tokens` plainly does not already contain the cached
+          count). A `cache_write_input_tokens` / `cache_creation_input_tokens`
+          counter here is fresh (never-before-cached) work and IS added.
+          When this envelope also states an explicit `total_tokens`, the
+          not-cached total is `total_tokens - cache_read_input_tokens` —
+          the one case where an early return by subtraction is still
+          correct, because (unlike convention (a)) the cached count was
+          never already inside another counter being kept.
+
+    `output_tokens`, `reasoning_output_tokens`, and `reasoning_tokens` are
+    always fresh work and are always counted, under either convention.
+
+    When NEITHER cache counter is named, this falls back to the pre-v32
+    behaviour unchanged: prefer an explicit total (`total_tokens`/`total`/
+    `tokens`), else sum whatever counters are present — there is no cache
+    breakdown to get wrong. A missing or entirely unrecognised usage
+    witness is `n/a`, matching §7's data-honesty rule rather than
+    manufacturing a zero.
     """
     if not isinstance(usage, dict):
         return "n/a"
 
-    for key in ("total_tokens", "total", "tokens"):
+    def as_int(key: str) -> int | None:
         value = usage.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    fresh_output = [v for v in (as_int("output_tokens"),
+                                 as_int("reasoning_output_tokens"),
+                                 as_int("reasoning_tokens")) if v is not None]
+
+    if "cached_input_tokens" in usage:
+        # Convention (a): cached is a SUBSET of input_tokens — never trust a
+        # bare total_tokens here (it cannot be told apart from one that
+        # double-counted the cached slice); always compute by subtraction.
+        input_tokens = as_int("input_tokens")
+        cached = as_int("cached_input_tokens")
+        if input_tokens is None or cached is None:
+            return "n/a"
+        if cached > input_tokens:
+            # 2026-07-30 critic-gate finding 3: the subset invariant
+            # (`cached_input_tokens <= input_tokens`) is broken — a live
+            # witness reporting {"input_tokens": 10, "cached_input_tokens":
+            # 500000, "output_tokens": 1} would otherwise subtract to -499989
+            # and `spent()` would happily add a NEGATIVE number to the
+            # session-budget running total, silently DELAYING the fuse —
+            # the exact opposite of this fix's purpose. A broken invariant
+            # is not "zero" and not "a negative number of tokens spent"; it
+            # is an UNTRUSTWORTHY witness, so `"n/a"` (never clamped to 0 —
+            # that would quietly relabel a broken counter as free work).
+            return "n/a"
+        return (input_tokens - cached) + sum(fresh_output)
+
+    if "cache_read_input_tokens" in usage:
+        # Convention (b): cache_read is a SIBLING of input_tokens, never a
+        # subset — an explicit total is trustworthy here, but only with the
+        # subtraction (the cached slice is not already excluded from it).
+        cache_read = as_int("cache_read_input_tokens")
+        if cache_read is None:
+            return "n/a"
+        total = as_int("total_tokens")
+        if total is not None:
+            if cache_read > total:
+                # Same broken-invariant guard as convention (a) above
+                # (finding 3): cache_read can never exceed the reported
+                # total it is a component of.
+                return "n/a"
+            return total - cache_read
+        input_tokens = as_int("input_tokens")
+        cache_write = as_int("cache_write_input_tokens")
+        if cache_write is None:
+            cache_write = as_int("cache_creation_input_tokens")
+        if input_tokens is None and cache_write is None and not fresh_output:
+            # 2026-07-30 critic-gate finding 4: the ONLY counter this usage
+            # witness names is the cached-read count we deliberately
+            # exclude — there is no witness at all for the not-cached work,
+            # so this docstring's own promise ("rather than manufacturing a
+            # zero") applies here too: `"n/a"`, not a fabricated `0`.
+            return "n/a"
+        return (input_tokens or 0) + (cache_write or 0) + sum(fresh_output)
+
+    # Neither cache convention is named: nothing to get wrong by caching —
+    # unchanged pre-v32 behaviour.
+    for key in ("total_tokens", "total", "tokens"):
+        value = as_int(key)
+        if value is not None:
             return value
 
-    counters = ("input_tokens", "cached_input_tokens", "output_tokens",
-                "reasoning_output_tokens")
-    values = [usage[key] for key in counters
-              if isinstance(usage.get(key), int)
-              and not isinstance(usage[key], bool)]
+    counters = ("input_tokens", "output_tokens", "reasoning_output_tokens")
+    values = [as_int(key) for key in counters]
+    values = [v for v in values if v is not None]
     return sum(values) if values else "n/a"
 
 

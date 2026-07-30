@@ -375,20 +375,137 @@ def test_parse_model_witness_missing_log_file_is_unavailable(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "exit_code,artifact_present,verification,declared,observed,error,expected", [
-        (0, True, "log", "M", "M", None, True),
-        (0, True, "log", "M", "OTHER", None, False),      # model mismatch
-        (1, True, "log", "M", "M", None, False),           # nonzero exit
-        (0, False, "log", "M", "M", None, False),          # missing artifact
-        (0, True, "none", "M", "OTHER", None, True),        # no witness: conjunct dropped
-        (0, True, "log", "M", "M", {"class": "hardening-gate", "message": "x"}, False),
+    "exit_code,artifact_bytes,verification,declared,observed,error,expected", [
+        (0, 10, "log", "M", "M", None, True),
+        (0, 10, "log", "M", "OTHER", None, False),      # model mismatch
+        (1, 10, "log", "M", "M", None, False),           # nonzero exit
+        (0, 0, "log", "M", "M", None, False),            # missing artifact (0 bytes)
+        (0, 10, "none", "M", "OTHER", None, True),        # no witness: conjunct dropped
+        (0, 10, "log", "M", "M", {"class": "hardening-gate", "message": "x"}, False),
     ])
-def test_compute_ok_table(exit_code, artifact_present, verification, declared,
+def test_compute_ok_table(exit_code, artifact_bytes, verification, declared,
                            observed, error, expected):
     assert envelope.compute_ok(
-        exit_code=exit_code, artifact_present=artifact_present,
+        exit_code=exit_code, artifact_bytes=artifact_bytes,
         model_verification=verification, model_declared=declared,
         model_observed=observed, error=error) is expected
+
+
+# --- Fix 2: zero-byte / --min-artifact-bytes (2026-07-30) --------------------
+
+
+def test_compute_ok_zero_byte_artifact_is_false_even_with_no_threshold_declared():
+    """Baseline rule, unconditional: a zero-byte artifact is treated as
+    absent even when no ticket declared --min-artifact-bytes (min=0/off)."""
+    assert envelope.compute_ok(
+        exit_code=0, artifact_bytes=0, model_verification="none",
+        model_declared="M", model_observed="M", error=None) is False
+
+
+def test_compute_ok_below_declared_min_artifact_bytes_is_false():
+    assert envelope.compute_ok(
+        exit_code=0, artifact_bytes=100, min_artifact_bytes=200,
+        model_verification="none", model_declared="M", model_observed="M",
+        error=None) is False
+
+
+def test_compute_ok_at_or_above_declared_min_artifact_bytes_is_true():
+    assert envelope.compute_ok(
+        exit_code=0, artifact_bytes=200, min_artifact_bytes=200,
+        model_verification="none", model_declared="M", model_observed="M",
+        error=None) is True
+
+
+def test_build_flags_artifact_too_small_error_class(tmp_path):
+    """§(б)/(в): a --min-artifact-bytes breach both fails `ok` and surfaces a
+    classified error carrying the actual and required sizes; the envelope's
+    artifact sub-object carries the threshold that was actually used (§в:
+    the record must be self-contained)."""
+    out = tmp_path / "out.md"
+    out.write_text("too short")  # 9 bytes
+    art = artifact.capture(out, min_bytes=500)
+    env = envelope.build(
+        lane="agy-test-lane", transport="agy-print", substrate="subprocess",
+        model_declared="M", model_observed="M", model_verification="none",
+        effort="medium", artifact=art, printed_text="", printed_truncated=False,
+        schema_enforcement="none", duration_ms=1, usage=None, session_id=None,
+        sandbox=None, command=["agy"], evidence=None, exit_code=0, error=None,
+    )
+    assert env["ok"] is False
+    assert env["error"]["class"] == "artifact-too-small"
+    assert env["error"]["bytes"] == 9
+    assert env["error"]["min_artifact_bytes"] == 500
+    assert env["artifact"]["min_bytes"] == 500
+
+
+def test_build_artifact_at_or_above_min_bytes_is_ok(tmp_path):
+    out = tmp_path / "out.md"
+    out.write_text("x" * 500)
+    art = artifact.capture(out, min_bytes=500)
+    env = envelope.build(
+        lane="agy-test-lane", transport="agy-print", substrate="subprocess",
+        model_declared="M", model_observed="M", model_verification="none",
+        effort="medium", artifact=art, printed_text="", printed_truncated=False,
+        schema_enforcement="none", duration_ms=1, usage=None, session_id=None,
+        sandbox=None, command=["agy"], evidence=None, exit_code=0, error=None,
+    )
+    assert env["ok"] is True
+    assert env["error"] is None
+
+
+def test_build_369_byte_incident_artifact_fails_declared_threshold_passes_undeclared(tmp_path):
+    """Finding 6 (critic-gate, 2026-07-30): the actual incident number. A
+    369-byte artifact ("записать файл невозможно: песочница read-only") at a
+    ticket-declared --min-artifact-bytes 500 must fail with the classified
+    error; at the undeclared default (0, threshold off) it passes — this IS
+    the documented boundary ("порог объявляется тикетом заранее"), not a
+    residual bug: a run with no declared floor is graded by the older,
+    coarser presence-only rule (plus the unconditional zero-byte guard),
+    exactly as override: ticket-declared-only prescribes."""
+    out = tmp_path / "out.md"
+    out.write_text("x" * 369)
+
+    art_declared = artifact.capture(out, min_bytes=500)
+    env_declared = envelope.build(
+        lane="agy-test-lane", transport="agy-print", substrate="subprocess",
+        model_declared="M", model_observed="M", model_verification="none",
+        effort="medium", artifact=art_declared, printed_text="", printed_truncated=False,
+        schema_enforcement="none", duration_ms=1, usage=None, session_id=None,
+        sandbox=None, command=["agy"], evidence=None, exit_code=0, error=None,
+    )
+    assert env_declared["ok"] is False
+    assert env_declared["error"]["class"] == "artifact-too-small"
+    assert env_declared["error"]["bytes"] == 369
+    assert env_declared["error"]["min_artifact_bytes"] == 500
+
+    art_undeclared = artifact.capture(out)  # min_bytes defaults to 0 (off)
+    env_undeclared = envelope.build(
+        lane="agy-test-lane", transport="agy-print", substrate="subprocess",
+        model_declared="M", model_observed="M", model_verification="none",
+        effort="medium", artifact=art_undeclared, printed_text="", printed_truncated=False,
+        schema_enforcement="none", duration_ms=1, usage=None, session_id=None,
+        sandbox=None, command=["agy"], evidence=None, exit_code=0, error=None,
+    )
+    assert env_undeclared["ok"] is True
+    assert env_undeclared["error"] is None
+
+
+def test_artifact_capture_zero_byte_file_is_present_but_gets_zero_bytes(tmp_path):
+    """artifact.capture itself still reports the honest file-level fact
+    (`present: True`, the file exists) — the zero-size-is-absent rule lives
+    in compute_ok/build, not by lying about presence at the snapshot layer."""
+    out = tmp_path / "empty.md"
+    out.write_text("")
+    art = artifact.capture(out)
+    assert art["present"] is True
+    assert art["bytes"] == 0
+    assert art["min_bytes"] == 0
+
+
+def test_artifact_capture_stamps_min_bytes_used():
+    art = artifact.capture(Path("/no/such/file"), min_bytes=42)
+    assert art["present"] is False
+    assert art["min_bytes"] == 42
 
 
 def test_envelope_build_carries_substrate_field_and_all_adr_keys():
@@ -1116,6 +1233,63 @@ def test_cli_requires_all_mandatory_flags():
         [sys.executable, str(RUN_LANE)], capture_output=True, text=True)
     assert result.returncode != 0
     assert result.stdout == ""
+
+
+def test_cli_min_artifact_bytes_flag_fails_a_too_small_artifact(tmp_path):
+    """End-to-end plumbing for --min-artifact-bytes: fake agy writes its
+    fixed 18-byte artifact ("fake agy artifact\\n"); a ticket-declared floor
+    above that must fail the run with a classified error, never a silent
+    ok:true (the 2026-07-30 369-byte incident this flag exists to catch)."""
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    config = tmp_path / "config.yaml"
+    config.write_text(MINIMAL_CONFIG)
+    env = _cli_env(tmp_path)
+
+    result = _run_cli([
+        "--lane", "agy-test-lane", "--config", str(config),
+        "--prompt-file", str(prompt_file), "--workdir", str(workdir),
+        "--out", str(out), "--min-artifact-bytes", "1000",
+    ], env=env)
+    envelope_out = json.loads(result.stdout)
+    assert envelope_out["ok"] is False
+    assert envelope_out["error"]["class"] == "artifact-too-small"
+    assert envelope_out["error"]["bytes"] == len("fake agy artifact\n")
+    assert envelope_out["error"]["min_artifact_bytes"] == 1000
+    assert envelope_out["artifact"]["min_bytes"] == 1000
+
+
+def test_cli_min_artifact_bytes_flag_passes_a_large_enough_artifact(tmp_path):
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    config = tmp_path / "config.yaml"
+    config.write_text(MINIMAL_CONFIG)
+    env = _cli_env(tmp_path)
+
+    result = _run_cli([
+        "--lane", "agy-test-lane", "--config", str(config),
+        "--prompt-file", str(prompt_file), "--workdir", str(workdir),
+        "--out", str(out), "--min-artifact-bytes", "5",
+    ], env=env)
+    envelope_out = json.loads(result.stdout)
+    assert envelope_out["ok"] is True
+    assert envelope_out["error"] is None
+
+
+def test_cli_min_artifact_bytes_defaults_to_off(tmp_path):
+    """No flag given -> min_bytes 0 stamped on the artifact, threshold off
+    (only the unconditional zero-byte-is-absent rule still applies)."""
+    workdir, prompt_file, out = _make_workdir(tmp_path)
+    config = tmp_path / "config.yaml"
+    config.write_text(MINIMAL_CONFIG)
+    env = _cli_env(tmp_path)
+
+    result = _run_cli([
+        "--lane", "agy-test-lane", "--config", str(config),
+        "--prompt-file", str(prompt_file), "--workdir", str(workdir),
+        "--out", str(out),
+    ], env=env)
+    envelope_out = json.loads(result.stdout)
+    assert envelope_out["ok"] is True
+    assert envelope_out["artifact"]["min_bytes"] == 0
 
 
 # =============================================================================

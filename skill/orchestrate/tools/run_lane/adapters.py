@@ -384,16 +384,19 @@ class AgyAdapter(LaneAdapter):
         text = _probe_text(res)
         evidence = _probe_evidence(res)
         if _LOGIN_INVITE_RE.search(text):
-            return {"present": True, "logged_in": False, "evidence": evidence}
+            return {"present": True, "logged_in": False, "login_signal": "invite",
+                    "evidence": evidence}
         # Success token: at least one non-empty catalog line (model slug).
         models = [ln.strip() for ln in (res.stdout or "").splitlines() if ln.strip()]
         if getattr(res, "exit_code", None) == 0 and models:
             return {
                 "present": True,
                 "logged_in": True,
+                "login_signal": "success",
                 "evidence": evidence or f"{len(models)} models",
             }
-        return {"present": True, "logged_in": False, "evidence": evidence}
+        return {"present": True, "logged_in": False, "login_signal": "none",
+                "evidence": evidence}
 
 
 # --- detect probes (presence + auth; no model quota) -------------------------
@@ -403,6 +406,33 @@ class AgyAdapter(LaneAdapter):
 # transport via the substrate, then fan the result out to every lane that
 # shares that transport. Success tokens are REQUIRED for `logged_in` — a CLI
 # that prints a login invite but exits 0 must not be marked logged-in.
+#
+# `parse_probe`'s return dict names WHICH of exactly three outcomes it
+# observed, via `login_signal` (2026-07-30, critic-gate finding on the first
+# cut of this fix — the fix originally lived entirely in `detect.py`, but
+# `detect.py` cannot tell these three apart from `RunResult` alone; only the
+# adapter that actually parsed the text knows):
+#   "invite"  — a confirmed NEGATIVE was observed: `_LOGIN_INVITE_RE` matched,
+#               or (ClaudePrintAdapter) an explicit structured `loggedIn:
+#               false` report. A reliable "not logged in" answer, not a probe
+#               failure.
+#   "success" — a confirmed POSITIVE: the transport's own success token
+#               (a catalog line, a version string, `loggedIn: true`, …).
+#   "none"    — neither: the probe ran and produced SOME output, but nothing
+#               in it confirms either state one way or the other. This is the
+#               ambiguous case that used to collapse into a bare
+#               `logged_in: False` before `detect.py` ever saw it — the exact
+#               gap that let a self-overwriting `agy` binary's crash output,
+#               or a `codex login status` exit-1-with-unrelated-stderr, read
+#               as a confident "not logged in" for a working lane. `detect.py`
+#               maps `"invite"`/`"success"` to `login_probe: "ok"` and
+#               `"none"` to `login_probe: "failed"` — a bare nonzero exit
+#               code is deliberately NOT used as that signal (a CLI honestly
+#               printing a login invite often exits nonzero too).
+# The CLI-missing case (`_probe_missing_result`, `present: False`) carries no
+# `login_signal` at all — no probe text was ever produced to classify; it is
+# its own reliable finding (the binary is not on PATH), handled by
+# `detect.py` checking `present` first.
 
 
 def _probe_text(res) -> str:
@@ -654,12 +684,19 @@ class CodexAdapter(LaneAdapter):
         evidence = _probe_evidence(res)
         # "Not logged in" must lose before the bare "logged in" token match.
         if _LOGIN_INVITE_RE.search(text):
-            return {"present": True, "logged_in": False, "evidence": evidence}
+            return {"present": True, "logged_in": False, "login_signal": "invite",
+                    "evidence": evidence}
         if getattr(res, "exit_code", None) == 0 and _LOGGED_IN_TOKEN_RE.search(text):
-            return {"present": True, "logged_in": True, "evidence": evidence}
-        # exit 0 without an affirmative success token is not logged-in
-        # (login-invite class of failure).
-        return {"present": True, "logged_in": False, "evidence": evidence}
+            return {"present": True, "logged_in": True, "login_signal": "success",
+                    "evidence": evidence}
+        # Neither the invite phrase nor the success token matched — an
+        # unconfirmed outcome (`login_signal: "none"`), regardless of exit
+        # code. 2026-07-30 critic-gate finding: a NONZERO exit here (e.g.
+        # `Text file busy`-style stderr from a working lane mid self-update)
+        # must not be conflated with a confirmed "not logged in" — only a
+        # recognized signal earns `login_probe: "ok"` in `detect.py`.
+        return {"present": True, "logged_in": False, "login_signal": "none",
+                "evidence": evidence}
 
 
 # --- grok (slice 5) ------------------------------------------------------------
@@ -785,11 +822,16 @@ class GrokAdapter(LaneAdapter):
         text = _probe_text(res)
         evidence = _probe_evidence(res)
         if _LOGIN_INVITE_RE.search(text):
-            return {"present": True, "logged_in": False, "evidence": evidence}
+            return {"present": True, "logged_in": False, "login_signal": "invite",
+                    "evidence": evidence}
         # Success token: a version string (e.g. "grok 0.2.101"), not bare exit 0.
         if getattr(res, "exit_code", None) == 0 and _VERSION_TOKEN_RE.search(text):
-            return {"present": True, "logged_in": True, "evidence": evidence}
-        return {"present": True, "logged_in": False, "evidence": evidence}
+            return {"present": True, "logged_in": True, "login_signal": "success",
+                    "evidence": evidence}
+        # Neither marker matched: unconfirmed, regardless of exit code
+        # (2026-07-30 fix — see the "detect probes" module note above).
+        return {"present": True, "logged_in": False, "login_signal": "none",
+                "evidence": evidence}
 
 
 # --- kimi (slice 5) -------------------------------------------------------------
@@ -888,10 +930,15 @@ class KimiAdapter(LaneAdapter):
         text = _probe_text(res)
         evidence = _probe_evidence(res)
         if _LOGIN_INVITE_RE.search(text):
-            return {"present": True, "logged_in": False, "evidence": evidence}
+            return {"present": True, "logged_in": False, "login_signal": "invite",
+                    "evidence": evidence}
         if getattr(res, "exit_code", None) == 0 and _VERSION_TOKEN_RE.search(text):
-            return {"present": True, "logged_in": True, "evidence": evidence}
-        return {"present": True, "logged_in": False, "evidence": evidence}
+            return {"present": True, "logged_in": True, "login_signal": "success",
+                    "evidence": evidence}
+        # Neither marker matched: unconfirmed, regardless of exit code
+        # (2026-07-30 fix — see the "detect probes" module note above).
+        return {"present": True, "logged_in": False, "login_signal": "none",
+                "evidence": evidence}
 
 
 # --- claude-print (slice 4, запас / not-Claude-host fallback) ------------------
@@ -1001,18 +1048,27 @@ class ClaudePrintAdapter(LaneAdapter):
         text = _probe_text(res)
         evidence = _probe_evidence(res)
         if _LOGIN_INVITE_RE.search(text):
-            return {"present": True, "logged_in": False, "evidence": evidence}
+            return {"present": True, "logged_in": False, "login_signal": "invite",
+                    "evidence": evidence}
         envelope = _extract_single_json(res.stdout if res else "")
         if isinstance(envelope, dict) and "loggedIn" in envelope:
-            # Success token is the explicit boolean, not exit code.
+            # Success token is the explicit boolean, not exit code. An
+            # explicit `loggedIn: false` is a CONFIRMED negative here — the
+            # CLI's own structured auth report, not the ambiguous "no marker
+            # found" case — so it shares `login_signal: "invite"`'s meaning
+            # (a reliable negative), even though it never touches the
+            # `_LOGIN_INVITE_RE` text pattern.
             logged_in = envelope.get("loggedIn") is True
             return {
                 "present": True,
                 "logged_in": logged_in,
+                "login_signal": "success" if logged_in else "invite",
                 "evidence": (json.dumps(envelope, ensure_ascii=False)[:400]
                              if envelope else evidence),
             }
-        return {"present": True, "logged_in": False, "evidence": evidence}
+        # No login-invite phrase AND no structured loggedIn field: unconfirmed.
+        return {"present": True, "logged_in": False, "login_signal": "none",
+                "evidence": evidence}
 
 
 ADAPTERS = {
