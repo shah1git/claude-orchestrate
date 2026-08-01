@@ -2,17 +2,14 @@
 # =============================================================================
 # verify-install.sh — самопроверка установленного контура /orchestrate.
 #
-# Отвечает ровно на один вопрос: «то, что сейчас лежит в реестрах харнесса, —
-# рабочая установка ЭТОГО чекаута?» Проверяется именно установленное
-# (~/.claude/skills, ~/.claude/agents, зеркало ~/.agents), а не исходный
-# репозиторий: установка ломается не там, где лежит код, а на стыке — висячая
-# ссылка, устаревшая копия, отставший чекаут, отсутствующий PyYAML.
+# Отвечает ровно на один вопрос: «нативный OMP-контур этого чекаута установлен
+# полностью и согласован?» Проверяются публичные головы в ~/.agents/skills,
+# capability-agents и extension в активной базе OMP, эффективные глобальные
+# task-инварианты, Python-runtime, конфиг и регресс-стражи.
 #
-# Состав контура нигде не перечислен списком, а ВЫВОДИТСЯ из чекаута: голова —
-# любой каталог skill/<name>/ с SKILL.md, агент — любой файл agents/<name>.md.
-# Список разъезжается с репозиторием (именно так висячая ссылка на выведенную
-# ADR-0008 третью голову `orca_orchestrate` пережила её удаление); выводимый
-# состав такой ошибки не допускает по построению.
+# Состав голов и OMP-агентов выводится из чекаута, а не дублируется списком.
+# Поэтому удалённый или переименованный артефакт не может незаметно остаться
+# обязательной частью проверки.
 #
 # Запуск:
 #   bash scripts/verify-install.sh              # полная проверка
@@ -50,11 +47,14 @@ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
 ORCH_DIR="$(cd "$(dirname "${SCRIPT_PATH}")/.." && pwd)"
 [ -d "${ORCH_DIR}/skill" ] || { echo "✗ ${ORCH_DIR} не похож на чекаут claude-orchestrate" >&2; exit 2; }
 
-CLAUDE_SKILLS="${HOME}/.claude/skills"
-CLAUDE_AGENTS="${HOME}/.claude/agents"
 SHARED_SKILLS="${HOME}/.agents/skills"
-SHARED_AGENTS="${HOME}/.agents/agents"
-CODEX_SKILLS="${HOME}/.codex/skills"
+OMP_BASE_DIR="${PI_CODING_AGENT_DIR:-${HOME}/.omp/agent}"
+OMP_AGENTS_DIR="${OMP_BASE_DIR}/agents"
+OMP_EXTENSION_DIR="${OMP_BASE_DIR}/extensions"
+OMP_AGENTS_SOURCE="${ORCH_DIR}/.omp/agents"
+OMP_EXTENSION_SOURCE="${ORCH_DIR}/.omp/extensions/pocock-control"
+OMP_CONFIG_SOURCE="${ORCH_DIR}/.omp/config.yml"
+
 
 FAILS=0
 WARNS=0
@@ -77,6 +77,136 @@ guard() { # guard СЕКУНДЫ КОМАНДА...
 # расхождение делает `/имя` ненаходимым при внешне корректной раскладке.
 frontmatter_name() {
   awk 'NR<=12 && /^name:[[:space:]]*/ { sub(/^name:[[:space:]]*/, ""); print; exit }' "$1"
+}
+
+# verify_omp_file SOURCE DEST LABEL
+# An OMP agent is a single file. It may be the default copied artifact or an
+# explicit development link; either must match this checkout.
+verify_omp_file() {
+  local src="$1" dest="$2" label="$3"
+  if [ ! -e "${dest}" ]; then
+    if [ -L "${dest}" ]; then
+      bad "${label}: висячая ссылка — запустите install.sh"
+    else
+      bad "${label}: не установлен — запустите install.sh"
+    fi
+  elif [ -L "${dest}" ]; then
+    if [ "$(readlink -f "${dest}")" = "$(readlink -f "${src}")" ]; then
+      ok "${label}: симлинк на этот чекаут"
+    else
+      bad "${label}: ссылка ведёт не в этот чекаут"
+    fi
+  elif cmp -s "${src}" "${dest}"; then
+    ok "${label}: копия совпадает с чекаутом"
+  else
+    bad "${label}: копия отстала от чекаута — перезапустите install.sh"
+  fi
+}
+
+# verify_omp_tree SOURCE DEST LABEL
+# Extensions and skill heads are directories; exclude the same mutable runtime
+# state as the legacy skill verification above.
+verify_omp_tree() {
+  local src="$1" dest="$2" label="$3" diff_out
+  if [ ! -e "${dest}" ]; then
+    if [ -L "${dest}" ]; then
+      bad "${label}: висячая ссылка — запустите install.sh"
+    else
+      bad "${label}: не установлен — запустите install.sh"
+    fi
+  elif [ -L "${dest}" ]; then
+    if [ "$(readlink -f "${dest}")" = "$(readlink -f "${src}")" ]; then
+      ok "${label}: симлинк на этот чекаут"
+    else
+      bad "${label}: ссылка ведёт не в этот чекаут"
+    fi
+  else
+    diff_out="$(diff -rq -x __pycache__ -x .pytest_cache -x telemetry "${src}" "${dest}" 2>&1 || true)"
+    if [ -z "${diff_out}" ]; then
+      ok "${label}: копия совпадает с чекаутом"
+    else
+      bad "${label}: копия отстала от чекаута — перезапустите install.sh"
+    fi
+  fi
+}
+
+# yaml_section_value SECTION KEY EXPECTED FILE
+# The repository config has a deliberately small, fixed shape; checking these
+# scalar settings needs no global PyYAML dependency and stays offline-safe.
+yaml_section_value() {
+  local section="$1" key="$2" expected="$3" file="$4"
+  awk -v section="${section}" -v key="${key}" -v expected="${expected}" '
+    $0 == section ":" { active=1; next }
+    active && /^[^[:space:]#]/ { exit }
+    active && $0 ~ "^[[:space:]]+" key ":[[:space:]]*" expected "([[:space:]]*(#.*)?)?$" {
+      found=1; exit
+    }
+    END { exit !found }
+  ' "${file}"
+}
+
+# yaml_task_isolation_value KEY EXPECTED FILE
+yaml_task_isolation_value() {
+  local key="$1" expected="$2" file="$3"
+  awk -v key="${key}" -v expected="${expected}" '
+    $0 == "task:" { in_task=1; next }
+    in_task && /^[^[:space:]#]/ { exit }
+    in_task && /^  isolation:[[:space:]]*$/ { in_isolation=1; next }
+    in_isolation && /^  [^[:space:]#]/ { exit }
+    in_isolation && $0 ~ "^    " key ":[[:space:]]*" expected "([[:space:]]*(#.*)?)?$" {
+      found=1; exit
+    }
+    END { exit !found }
+  ' "${file}"
+}
+
+yaml_task_isolation_mode_isolated() {
+  local file="$1" mode
+  for mode in auto apfs btrfs zfs linux-reflink overlayfs windows-blockclone projfs rcopy worktree fuse-overlay fuse-projfs; do
+    if yaml_task_isolation_value mode "${mode}" "${file}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+verify_omp_config() {
+  local file="$1"
+  if [ ! -f "${file}" ]; then
+    bad "нет обязательного репозиторного .omp/config.yml"
+    return
+  fi
+  ok "репозиторный .omp/config.yml найден"
+
+  if yaml_section_value async enabled false "${file}"; then ok "async.enabled: false"; else bad "async.enabled должен быть false"; fi
+  if yaml_section_value display showTokenUsage true "${file}"; then ok "display.showTokenUsage: true"; else bad "display.showTokenUsage должен быть true"; fi
+  if yaml_section_value task batch true "${file}"; then ok "task.batch: true"; else bad "task.batch должен быть true"; fi
+  if yaml_section_value task enableEffort true "${file}"; then ok "task.enableEffort: true"; else bad "task.enableEffort должен быть true"; fi
+  if yaml_section_value task showResolvedModelBadge true "${file}"; then ok "task.showResolvedModelBadge: true"; else bad "task.showResolvedModelBadge должен быть true"; fi
+  if yaml_task_isolation_mode_isolated "${file}"; then ok "task.isolation.mode включает штатный backend"; else bad "task.isolation.mode должен включать известный backend OMP и не может быть none"; fi
+  if yaml_task_isolation_value apply false "${file}"; then ok "task.isolation.apply: false"; else bad "task.isolation.apply должен быть false"; fi
+  if yaml_task_isolation_value merge patch "${file}"; then ok "task.isolation.merge: patch"; else bad "task.isolation.merge должен быть patch"; fi
+  if yaml_section_value task maxRecursionDepth 1 "${file}"; then ok "task.maxRecursionDepth: 1"; else bad "task.maxRecursionDepth должен быть 1"; fi
+  if yaml_section_value task maxConcurrency 6 "${file}"; then ok "task.maxConcurrency: 6"; else bad "task.maxConcurrency должен быть 6"; fi
+  if yaml_section_value retry modelFallback false "${file}"; then ok "retry.modelFallback: false"; else bad "retry.modelFallback должен быть false"; fi
+}
+
+verify_effective_omp_config() {
+  local runtime="${ORCH_DIR}/skill/orchestrate/tools/omp_runtime.py"
+  local report
+  if ! command -v omp >/dev/null 2>&1; then
+    bad "OMP CLI не найден"
+    return
+  fi
+  if [ ! -x "${runtime}" ]; then
+    bad "исполняемый OMP runtime не найден: ${runtime}"
+    return
+  fi
+  if report="$(cd /tmp && "${runtime}" metadata --request '{}' 2>&1)"; then
+    ok "глобальные OMP task-инварианты действуют вне этого чекаута"
+  else
+    bad "глобальные OMP task-инварианты несовместимы: ${report}"
+  fi
 }
 
 # --- A. Чекаут ---------------------------------------------------------------
@@ -114,18 +244,16 @@ else
   warn "${ORCH_DIR} не git-репозиторий — свежесть проверить нечем"
 fi
 
-# --- B. Головы оркестрации ---------------------------------------------------
-# Для каждой головы из чекаута: установлена ли, читается ли SKILL.md сквозь
-# ссылку, и совпадает ли установленное с чекаутом (симлинк — целью, копия —
-# содержимым). Копия, отставшая от чекаута, — самый тихий из отказов: файлы на
-# месте, поведение старое.
-echo "== Головы оркестрации (${CLAUDE_SKILLS}) =="
+# --- B. Публичные головы OMP -------------------------------------------------
+# Для каждой головы из чекаута проверяем установленный shared skill. Копия,
+# отставшая от чекаута, считается отказом так же, как неверный симлинк.
+echo "== Публичные головы OMP (${SHARED_SKILLS}) =="
 heads_seen=0
 for src in "${ORCH_DIR}"/skill/*/; do
   [ -f "${src}SKILL.md" ] || continue
   heads_seen=$((heads_seen + 1))
   name="$(basename "${src%/}")"
-  dest="${CLAUDE_SKILLS}/${name}"
+  dest="${SHARED_SKILLS}/${name}"
 
   if [ ! -e "${dest}" ]; then
     if [ -L "${dest}" ]; then bad "${name}: висячая ссылка (цель не существует) — запустите install.sh"
@@ -144,14 +272,14 @@ for src in "${ORCH_DIR}"/skill/*/; do
       bad "${name}: ссылка ведёт в $(readlink -f "${dest}"), а не в этот чекаут — на машине две копии, они разъедутся"
     fi
   else
-    # Режим --copy: сверяем содержимое. telemetry — симлинк в приватное репо,
-    # __pycache__ — производный мусор; и то и другое к составу скилла не относится.
+    # Режим копирования: telemetry — изменяемое состояние, __pycache__ —
+    # производный мусор; и то и другое к составу скилла не относится.
     # Ключ -x (а не длинный --exclude) — он есть и в GNU, и в BSD diff (macOS).
-    diff_out="$(diff -rq -x __pycache__ -x telemetry "${src%/}" "${dest}" 2>&1 || true)"
+    diff_out="$(diff -rq -x __pycache__ -x .pytest_cache -x telemetry "${src%/}" "${dest}" 2>&1 || true)"
     if [ -z "${diff_out}" ]; then
       ok "${name}: копия совпадает с чекаутом"
     else
-      bad "${name}: копия отстала от чекаута — перезапустите install.sh --copy (расхождений: $(printf '%s\n' "${diff_out}" | wc -l | tr -d ' '))"
+      bad "${name}: копия отстала от чекаута — перезапустите install.sh (расхождений: $(printf '%s\n' "${diff_out}" | wc -l | tr -d ' '))"
       printf '%s\n' "${diff_out}" | head -3 | sed 's/^/      /'
     fi
   fi
@@ -161,38 +289,11 @@ for src in "${ORCH_DIR}"/skill/*/; do
 done
 [ "${heads_seen}" -gt 0 ] || bad "в чекауте нет ни одной головы (skill/*/SKILL.md) — неполный клон?"
 
-# --- C. Агенты ---------------------------------------------------------------
-echo "== Агенты (${CLAUDE_AGENTS}) =="
-for src in "${ORCH_DIR}"/agents/*.md; do
-  [ -f "${src}" ] || continue
-  file="$(basename "${src}")"
-  name="${file%.md}"
-  dest="${CLAUDE_AGENTS}/${file}"
 
-  if [ ! -e "${dest}" ]; then
-    bad "${name}: не установлен — запустите install.sh"
-    continue
-  fi
-  fm="$(frontmatter_name "${dest}" || true)"
-  if [ "${fm}" != "${name}" ]; then
-    bad "${name}: в шапке name=\"${fm}\" — тип агента не совпадёт с именем файла"
-    continue
-  fi
-  # Тир модели: агенты контура пинуют модель явно; без пина воркер уедет на
-  # модель сессии, и маршрутизация по тирам перестанет быть маршрутизацией.
-  if awk 'NR<=12 && /^model:[[:space:]]*[^[:space:]]/ { found=1 } END { exit !found }' "${dest}"; then
-    ok "${name}: установлен, модель пинована ($(awk 'NR<=12 && /^model:/ { sub(/^model:[[:space:]]*/, ""); print; exit }' "${dest}"))"
-  else
-    warn "${name}: установлен, но без поля model — воркер унаследует модель сессии"
-  fi
-done
-
-# --- C.2 Висячие ссылки в реестрах -------------------------------------------
-# Обобщение того самого дефекта: ссылка есть, цели нет. Харнесс показывает такой
-# скилл в списке и падает при вызове. Проверяем все реестры разом.
-echo "== Висячие ссылки в реестрах =="
+# --- C. Висячие ссылки в активных OMP-реестрах -------------------------------
+echo "== Висячие ссылки в активных OMP-реестрах =="
 dangling=0
-for reg in "${CLAUDE_SKILLS}" "${CLAUDE_AGENTS}" "${SHARED_SKILLS}" "${SHARED_AGENTS}" "${CODEX_SKILLS}"; do
+for reg in "${SHARED_SKILLS}" "${OMP_AGENTS_DIR}" "${OMP_EXTENSION_DIR}"; do
   [ -d "${reg}" ] || continue
   for entry in "${reg}"/*; do
     [ -L "${entry}" ] || continue
@@ -205,49 +306,117 @@ for reg in "${CLAUDE_SKILLS}" "${CLAUDE_AGENTS}" "${SHARED_SKILLS}" "${SHARED_AG
 done
 [ "${dangling}" -eq 0 ] && ok "висячих ссылок нет"
 
-# --- D. Зеркало ~/.agents ----------------------------------------------------
-# Харнессы, порождённые не-Claude CLI, читают скиллы отсюда, а не из ~/.claude.
-echo "== Зеркало ~/.agents =="
-if [ -d "${SHARED_SKILLS}" ]; then
-  mirror_bad=0
-  for src in "${ORCH_DIR}"/skill/*/; do
-    [ -f "${src}SKILL.md" ] || continue
-    name="$(basename "${src%/}")"
-    [ -f "${SHARED_SKILLS}/${name}/SKILL.md" ] || { bad "зеркало: ${name} не установлен в ${SHARED_SKILLS}"; mirror_bad=1; }
-  done
-  for src in "${ORCH_DIR}"/agents/*.md; do
+# --- D. Legacy non-OMP contour ------------------------------------------------
+# A successful cutover leaves no callable project head in Claude Code. Generic
+# agent names are checked only when they still point at this checkout, so an
+# unrelated user-created agent is never mistaken for Pocock residue.
+echo "== Legacy non-OMP contour =="
+legacy_found=0
+for entry in \
+  "${HOME}/.claude/skills/orchestrate" \
+  "${HOME}/.claude/skills/orchestrate-frontier" \
+  "${HOME}/.claude/skills/orchestrate-sweep" \
+  "${HOME}/.claude/skills/pocock-run" \
+  "${HOME}/.claude/skills/pocock-frontier" \
+  "${HOME}/.claude/skills/pocock-sweep"; do
+  if [ -e "${entry}" ] || [ -L "${entry}" ]; then
+    bad "legacy Claude skill всё ещё активен: ${entry} — запустите install.sh"
+    legacy_found=$((legacy_found + 1))
+  fi
+done
+for entry in \
+  "${HOME}/.claude/agents/architect.md" \
+  "${HOME}/.claude/agents/builder.md" \
+  "${HOME}/.claude/agents/critic.md" \
+  "${HOME}/.claude/agents/scout.md" \
+  "${HOME}/.agents/agents/architect.md" \
+  "${HOME}/.agents/agents/builder.md" \
+  "${HOME}/.agents/agents/critic.md" \
+  "${HOME}/.agents/agents/scout.md"; do
+  [ -L "${entry}" ] || continue
+  case "$(readlink "${entry}")" in
+    "${ORCH_DIR}"/agents/*)
+      bad "legacy Pocock agent всё ещё активен: ${entry}"
+      legacy_found=$((legacy_found + 1))
+      ;;
+  esac
+done
+[ "${legacy_found}" -eq 0 ] && ok "активных ссылок старого Claude-контура нет"
+
+
+# --- D.1 Нативный контур OMP -------------------------------------------------
+# OMP uses the shared skill registry for the three public heads, but loads native
+# task agents and global extensions from separate registries.  These checks are
+# deliberately local: --offline must never require a network connection.
+echo "== Нативный контур OMP =="
+verify_omp_config "${OMP_CONFIG_SOURCE}"
+verify_effective_omp_config
+cat <<'EOF'
+  Дефолт и инварианты изоляции задач в .omp/config.yml:
+    async.enabled: false
+    display.showTokenUsage: true
+    task.batch: true; task.enableEffort: true; task.showResolvedModelBadge: true
+    task.isolation.mode: auto (дефолт); явный изолирующий backend тоже допустим
+    task.isolation.apply: false; task.isolation.merge: patch
+    task.maxRecursionDepth: 1; task.maxConcurrency: 6
+    retry.modelFallback: false
+EOF
+
+for name in orchestrate orchestrate-frontier orchestrate-sweep; do
+  src="${ORCH_DIR}/skill/${name}"
+  if [ -f "${src}/SKILL.md" ]; then
+    verify_omp_tree "${src}" "${SHARED_SKILLS}/${name}" "OMP skill ${name}"
+  else
+    bad "исходник OMP skill ${name} отсутствует в чекауте"
+  fi
+done
+
+for name in pocock-run pocock-frontier pocock-sweep; do
+  if [ -e "${SHARED_SKILLS}/${name}" ] || [ -L "${SHARED_SKILLS}/${name}" ]; then
+    bad "выведенная OMP-голова ${name} всё ещё активна в ${SHARED_SKILLS}"
+  fi
+done
+
+omp_agents_seen=0
+if [ -d "${OMP_AGENTS_SOURCE}" ]; then
+  for src in "${OMP_AGENTS_SOURCE}"/*.md; do
     [ -f "${src}" ] || continue
-    [ -f "${SHARED_AGENTS}/$(basename "${src}")" ] || { bad "зеркало: $(basename "${src}") не установлен в ${SHARED_AGENTS}"; mirror_bad=1; }
+    omp_agents_seen=$((omp_agents_seen + 1))
+    verify_omp_file "${src}" "${OMP_AGENTS_DIR}/$(basename "${src}")" "OMP agent $(basename "${src}")"
   done
-  [ "${mirror_bad}" -eq 0 ] && ok "головы и агенты продублированы в ~/.agents"
+  [ "${omp_agents_seen}" -gt 0 ] || bad "в ${OMP_AGENTS_SOURCE} нет ожидаемых OMP agents (*.md)"
 else
-  warn "${SHARED_SKILLS} нет — зеркало не нужно (нет сторонних харнессов на этой машине)"
+  bad "исходный каталог OMP agents отсутствует: ${OMP_AGENTS_SOURCE}"
 fi
 
-# --- E. Хребет Покока --------------------------------------------------------
-# Семь канонических скиллов подготовительной фазы: /orchestrate ссылается на них
-# из прозы, и без них фронтир готовить нечем.
+if [ -d "${OMP_EXTENSION_SOURCE}" ]; then
+  verify_omp_tree "${OMP_EXTENSION_SOURCE}" "${OMP_EXTENSION_DIR}/pocock-control" "OMP extension pocock-control"
+else
+  bad "исходник OMP extension отсутствует: ${OMP_EXTENSION_SOURCE}"
+fi
+
+# Семь канонических скиллов подготовительной фазы должны быть в общем
+# OMP-совместимом реестре ~/.agents/skills.
 echo "== Хребет Покока =="
 spine_missing=0
 for name in grilling domain-modeling to-spec to-tickets implement tdd code-review; do
-  [ -f "${CLAUDE_SKILLS}/${name}/SKILL.md" ] || { bad "хребет: нет ${name}/SKILL.md"; spine_missing=1; }
+  [ -f "${SHARED_SKILLS}/${name}/SKILL.md" ] || { bad "хребет OMP: нет ${name}/SKILL.md"; spine_missing=1; }
 done
 [ "${spine_missing}" -eq 0 ] && ok "семь канонических файлов хребта на месте"
 
-# --- F. Инструменты установленного скилла ------------------------------------
-# Проверяем инструменты ИМЕННО установленного экземпляра и его же валидатором:
-# так проверка касается артефакта, который будет исполняться, а не исходника.
-echo "== Инструменты =="
-INSTALLED="${CLAUDE_SKILLS}/orchestrate"
+# --- F. Инструменты установленного OMP-скилла --------------------------------
+# Проверяем именно установленный экземпляр и его же валидатор.
+echo "== Инструменты OMP =="
+INSTALLED="${SHARED_SKILLS}/orchestrate"
 if [ ! -f "${INSTALLED}/SKILL.md" ]; then
-  bad "инструменты не проверены: голова orchestrate не установлена"
+  bad "инструменты не проверены: OMP-голова orchestrate не установлена"
 else
   if command -v python3 >/dev/null; then
     ok "python3: $(python3 --version 2>&1)"
     if python3 -c 'import yaml' 2>/dev/null; then
       ok "PyYAML"
     else
-      bad "PyYAML не установлен — run-lane, валидатор конфига и телеметрия не стартуют: pip3 install pyyaml"
+      bad "PyYAML не установлен — OMP runtime, валидатор и телеметрия не стартуют: pip3 install pyyaml"
     fi
 
     # Валидатор: конфиг против схемы + проза против конфига (детерминированный шов).
@@ -262,15 +431,13 @@ else
       bad "нет ${INSTALLED}/tools/validate_config.py"
     fi
 
-    # Движок раздачи: пакет должен импортироваться установленным путём — битый
-    # или неполный перенос виден именно здесь, а не при первом наряде.
-    if guard 60 python3 -c "import sys; sys.path.insert(0, '${INSTALLED}/tools'); import run_lane.__main__" 2>/dev/null; then
-      ok "run_lane импортируется"
+    if core_out="$(cd /tmp && guard 60 "${INSTALLED}/tools/omp_runtime.py" metadata --request '{}' 2>&1)"; then
+      ok "OMP runtime запускается и принимает эффективный профиль"
     else
-      bad "run_lane не импортируется из ${INSTALLED}/tools — раздача нарядов работать не будет"
+      bad "OMP runtime не прошёл metadata preflight: ${core_out}"
     fi
   else
-    bad "python3 не найден — без него не работают ни run-lane, ни валидатор, ни телеметрия"
+    bad "python3 не найден — без него не работают OMP runtime, валидатор и телеметрия"
   fi
 
   # Тесты инструментов гоняем в чекауте (это dev-артефакт, в установку он
@@ -290,77 +457,30 @@ else
   fi
 fi
 
-# --- G. Лейны ----------------------------------------------------------------
-# Инвентарь исполнителей. Отсутствие внешнего CLI — не отказ установки: конфиг
-# штатно деградирует в Claude-дефолты. Отказ ровно один — нет самого claude.
-echo "== Лейны =="
-if command -v claude >/dev/null; then
-  ok "claude: $(command -v claude)"
+# --- G. Нативный OMP runtime -------------------------------------------------
+echo "== OMP runtime =="
+if command -v omp >/dev/null 2>&1; then
+  ok "omp: $(command -v omp)"
 else
-  bad "claude CLI не найден — контур не работает ни в каком виде"
+  bad "OMP CLI не найден — нативный контур не работает"
 fi
-if [ -x "${INSTALLED}/tools/run-lane" ] && python3 -c 'import yaml' 2>/dev/null; then
-  det_out="$(guard 180 "${INSTALLED}/tools/run-lane" detect --config "${INSTALLED}/config.yaml" 2>/dev/null || true)"
-  if [ -n "${det_out}" ]; then
-    # Разбор JSON — питоном: свой парсер в bash был бы ровно тем «умным трюком»,
-    # который потом врёт на первом же изменении формата.
-    printf '%s' "${det_out}" | python3 -c '
-import json, sys
-try:
-    data = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-# 2026-07-30 критик-гейт находка 5: "no adapter registered" и "empty
-# probe_command" — ПОСТОЯННЫЕ ошибки конфигурации (правка конфига их не
-# переживёт, повторный запуск ничего не изменит); всё прочее, что попадает в
-# login_probe == "failed" (таймаут, самообновление бинаря, нераспознанный
-# вывод), — ВРЕМЕННЫЙ сбой самой пробы. Смешивать их в один совет "повторите"
-# вводит в заблуждение для первой категории.
-PERMANENT_LOGIN_PROBE_REASONS = {"no adapter registered", "empty probe_command"}
-for key in sorted(data):
-    t = data[key]
-    lanes = ", ".join(t.get("lanes") or []) or "—"
-    # 2026-07-30: упавшая проба (login_probe == "failed", CLI мог обновляться
-    # ровно в момент проверки) — это НЕ то же самое, что достоверный отрицательный
-    # ответ (login_probe == "ok", logged_in false). Формулировка "CLI есть, но не
-    # залогинен" подразумевает второе и не должна звучать при первом — иначе
-    # рабочий лейн, чья проба просто не успела ответить, выглядит мёртвым.
-    if t.get("present") and t.get("logged_in"):
-        print("  \033[32m✓\033[0m %s (%s): лейны %s" % (key, t.get("cli"), lanes))
-    elif t.get("login_probe") == "failed" and t.get("login_probe_reason") in PERMANENT_LOGIN_PROBE_REASONS:
-        reason = t.get("login_probe_reason") or "причина не названа"
-        print("  \033[33m!\033[0m %s (%s): логин не проверить — %s (ошибка конфигурации, не временный сбой) — лейны %s недоступны" % (key, t.get("cli"), reason, lanes))
-    elif t.get("login_probe") == "failed":
-        reason = t.get("login_probe_reason") or "причина не названа"
-        print("  \033[33m!\033[0m %s (%s): проверить логин не удалось (%s) — возможно, CLI обновлялся; повторите" % (key, t.get("cli"), reason))
-    elif t.get("present"):
-        print("  \033[33m!\033[0m %s (%s): CLI есть, но не залогинен — лейны %s уйдут в Claude-фолбэк" % (key, t.get("cli"), lanes))
-    else:
-        print("  \033[33m!\033[0m %s (%s): CLI нет — лейны %s недоступны" % (key, t.get("cli"), lanes))
-'
-    # Предупреждения посчитаны выше только визуально; для итога поднимаем счётчик
-    # по числу недоступных транспортов — без влияния на код возврата.
-    unavailable="$(printf '%s' "${det_out}" | python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print(0); sys.exit(0)
-print(sum(1 for v in d.values() if not (v.get("present") and v.get("logged_in"))))
-')"
-    WARNS=$((WARNS + unavailable))
+
+if command -v bun >/dev/null 2>&1; then
+  if adapter_out="$(cd "${ORCH_DIR}" && guard 60 bun test ./.omp/extensions/pocock-control/index.test.ts 2>&1)"; then
+    ok "OMP adapter regression: $(printf '%s\n' "${adapter_out}" | tail -1)"
   else
-    warn "run-lane detect не дал ответа — инвентарь лейнов не построен"
+    bad "OMP adapter regression красный:"
+    printf '%s\n' "${adapter_out}" | tail -5 | sed 's/^/      /'
   fi
 else
-  warn "инвентарь лейнов пропущен (нет run-lane или PyYAML)"
+  bad "bun не найден — TypeScript-адаптер OMP нельзя проверить"
 fi
 
 # --- Итог --------------------------------------------------------------------
 echo
 if [ "${FAILS}" -eq 0 ]; then
   printf '\033[32m✓ Установка исправна\033[0m — провалов нет, предупреждений: %s\n' "${WARNS}"
-  echo "  Напоминание: Claude Code перечитывает реестр скиллов только при старте сессии."
+  echo "  Напоминание: OMP перечитывает реестры скиллов и extensions при старте сессии."
   exit 0
 else
   printf '\033[31m✗ Провалено проверок: %s\033[0m (предупреждений: %s)\n' "${FAILS}" "${WARNS}" >&2

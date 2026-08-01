@@ -1,13 +1,12 @@
-# Agent teams: experimental third delegation channel
+# Historical reference: retired agent-team experiment
 
-**STATUS: DORMANT — pilot rejected without a run (owner decision 2026-07-23; skill
-README Changelog v2.14, issue #2). Retained for the recorded revisit case only.**
+> **NON-OPERATIONAL SINCE ADR-0009 (2026-08-01).** Active Pocock runs have one
+> native OMP `task` transport and no team channel. The remainder is retained only
+> to explain the rejected experiment; it is not an execution option.
 
-Source of truth for the OPTIONAL team channel. The orchestrate skill is complete without
-it: with the surface absent — or the pilot below failed — every delegation resolves to the
-one-shot or Workflow channel and the run completes normally. This channel exists for a
-narrow niche where worker *persistence* and *worker↔worker exchange* demonstrably pay;
-everywhere else it is over-process (core doctrine: the simplest system that works).
+Historically this described an optional third channel. The experiment was rejected:
+the extra persistent worker network duplicated the lead's coordination and introduced
+another state surface. The facts below are kept for provenance only.
 
 > **Verified for: Claude Code 2.1.204–2.1.205 · agent-teams docs as of v2.1.178+ —
 > checked 2026-07-08; phase-0 first run on 2.1.205 (results in the Pilot section).** The surface is experimental upstream and disabled by default; at design

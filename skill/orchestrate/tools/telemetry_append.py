@@ -81,6 +81,8 @@ ALIASES = {
 }
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
 
 
 def fail(msg: str) -> NoReturn:
@@ -108,8 +110,9 @@ def validate_record(row: dict, config: dict) -> dict:
     on new appends when telemetry.require_entry_on_append is set. The two rules
     are not in conflict: records already in the log legitimately predate the
     field and are read as `full` (quality.md §7), but a record being written
-    now can always state its entrance — and the pilot's whole falsifiability
-    rests on it doing so.
+    now can always state its entrance. `sweep` is a separate ADR-0011 audit
+    form, not a member of the historical full-versus-frontier pilot; its rows
+    must carry the sealed ledger and DAG SHA-256 hashes.
     """
     if "event" in row:
         return row
@@ -163,8 +166,26 @@ def validate_record(row: dict, config: dict) -> dict:
             fail(f"entry must be one of {entry_values}, got {row['entry']!r}")
         needed = requires_shape.get(row["entry"])
         if needed is not None and row.get("shape") != needed:
-            fail(f"entry {row['entry']!r} requires shape {needed!r} — a "
-                 f"frontier exists only after tickets have been cut (ADR-0004)")
+            explanation = (
+                "a frontier exists only after tickets have been cut (ADR-0004)"
+                if row["entry"] == "frontier"
+                else "the entry-to-shape policy is config-owned"
+            )
+            fail(f"entry {row['entry']!r} requires shape {needed!r} — {explanation}")
+        if row["entry"] == "sweep":
+            missing_sweep_hashes = [
+                field for field in ("ledger_hash", "dag_hash") if field not in row
+            ]
+            if missing_sweep_hashes:
+                fail("sweep record lacks required sealed hash field(s): "
+                     f"{', '.join(missing_sweep_hashes)}")
+            malformed_sweep_hashes = [
+                field for field in ("ledger_hash", "dag_hash")
+                if not isinstance(row[field], str) or not SHA256_RE.fullmatch(row[field])
+            ]
+            if malformed_sweep_hashes:
+                fail("sweep sealed hash field(s) must be lowercase SHA-256 hex: "
+                     f"{', '.join(malformed_sweep_hashes)}")
 
     tokens = row.get("tokens")
     if not (tokens is None or isinstance(tokens, int) or tokens == "n/a"):

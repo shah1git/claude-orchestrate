@@ -11,14 +11,13 @@
 #   2. При содержательной правке подними `version` на единицу. Забытый бамп
 #      не страшен: телеметрия штампует записи отпечатком v<version>+<sha256:7>,
 #      и хеш выдаст незабампленную правку.
-#   3. Новую МОДЕЛЬ в cross_provider не пиновать, пока она не проверена живьём
-#      по каталогу коннектора (правило «pin only what the connector exposes»,
-#      references/cross-provider.md). Если конфиг опережает баннер верификации —
-#      сначала проверка, потом первый маршрутизированный вызов.
-#   4. Модели/эффорты четырёх Claude-агентов здесь НЕ дублируются: их источник
-#      истины — фронтматтер agents/*.md (architect=fable/xhigh, builder=
-#      sonnet/high, scout=haiku, critic=opus/xhigh) — это точка, где пины
-#      реально исполняются харнессом. Меняешь их — меняй там.
+#   3. Конкретные модели здесь не пинуются: lanes ссылаются только на роли OMP
+#      `@smol`/`@task`/`@advisor`/`@slow`. Адаптер разрешает роли через живой
+#      model registry, а runtime записывает и проверяет фактический provider/id.
+#   4. Capability-контракт ролей живёт во фронтматтере `.omp/agents/pocock-*.md`;
+#      `omp.agents` ниже только связывает класс работы с этими именами. Адаптер
+#      хеширует эффективные manifests и отклоняет project-shadow либо дрейф
+#      снимка до нативной раздачи.
 #
 # Провенанс: каждая запись routing-log.jsonl несёт поле config с отпечатком
 # этого файла на момент диспетча; при первом появлении нового отпечатка лид
@@ -26,7 +25,28 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 32
+version: 39
+# v39 (2026-08-01, ADR-0011): третья тонкая Голова допускает только
+#      run-local Прочёс. `entry: sweep` запечатывает полный локальный ledger
+#      и DAG; телеметрия несёт их отпечатки. Это отдельная форма входа, не
+#      наблюдение исторического пилота full-vs-frontier.
+# v38 (2026-08-01): снимок runtime/config/dependencies аутентифицирован и
+#      закреплён на run; эффективные capability-agent manifests хешируются и
+#      защищены от project shadowing. Результат Task сверяется с фактическими
+#      agentSource/resolvedModel/fallback witnesses. UI evidence требует
+#      challenge-named browser tab и host assert, а линзы получают критерий и
+#      ограниченный host-result record. Установщик по умолчанию копирует один
+#      снимок; живые симлинки оставлены явному --link.
+# v37 (2026-08-01): native task patch стал единственным каналом изменений.
+#      Тикет объявляет writablePaths и argv/cwd/timeoutSeconds; runtime до
+#      применения валидирует каждый patch, область записи и changedFiles,
+#      атомарно применяет всю волну, считает diff per-attempt и откатывает
+#      отвергнутые изменения. UI evidence связан с выданным challenge token.
+# v36 (2026-08-01): промежуточный per-wave diff ceiling; заменён v37 после
+#      появления достоверной атрибуции patch к producer attempt.
+# v35 (2026-08-01): нативный OMP-контур. Роли ссылаются только на OMP model
+#      aliases @smol/@task/@advisor/@slow; runtime с дисковым FSM владеет
+#      маршрутизацией, бюджетом, запечатанным task.batch и тремя линзами.
 # v32 (2026-07-30, решение владельца: «в бюджет идут только НЕ кешированные
 #      токены»): tools/telemetry_append.py envelope_tokens() переписан — счёт
 #      выбирает соглашение ПО ИМЕНИ счётчика, а не угадывает его. Живой прогон
@@ -297,7 +317,7 @@ version: 32
 #      контаминация 2026-07-15), критиком НИКОГДА (reward-hacking репутация). (в)
 #      Composer 2.5 отклонён (not_on_pilot): кодинг по спеке провален — переставил коды
 #      ошибок вопреки порядку спецификации, который взяли все 4 остальные модели.
-updated: 2026-07-19    # v22: entry full/frontier — исполняемый словарь ADR-0004.
+updated: 2026-08-01    # v39: entry full/frontier/sweep — исполняемый словарь ADR-0011.
 # v12: Standards-ось — механика лейна, не структура гейта (срез 4,
                        #     issue #8, спека #4; срез 3 уже вписал gates.lenses.standards.
                        #     executor: codex-critic — здесь только маршрут и цепочка недоступности).
@@ -358,15 +378,15 @@ updated: 2026-07-19    # v22: entry full/frontier — исполняемый с�
 # разрешённой спекой #4 (issue #4): цена — легитимный аргумент только на слое
 # Исполнителя, глубину проверки ценой больше не масштабируем — гейт фиксируется
 # тремя линзами безусловно (config gates:, срез 3 — issue #7, здесь не тронут).
-# shape: решает не ГЛУБИНУ проверки, а ПОСЛЕДОВАТЕЛЬНОСТЬ шагов: нужны ли спека
-# и нарезка на тикеты перед фронтиром, или работа идёт сразу в разбирательство.
-# Критерий развилки — разваливается ли работа на вертикальные срезы, а не
-# важность, риск или размер в строках; размер задачи (таблица триажа Step 0)
-# отдельно управляет ШИРИНОЙ веера, как и раньше. Профиль low не существует:
-# критерий входа ADR-0002 («я не отдам простую задачу в оркестратор; если я
-# отдаю задачу — значит там есть над чем подумать», владелец, 2026-07-15;
-# орфография и пунктуация нормализованы) исключает класс задач, который low
-# описывал, — тривиальное сюда не приезжает по построению.
+# shape: решает не ГЛУБИНУ проверки, а ПОСЛЕДОВАТЕЛЬНОСТЬ подготовки и источник
+# допуска. `сборка` проходит грилл, спеку и публикацию тикетов; `разбирательство`
+# остаётся одной нитью; `прочёс` допускает только уже закрытый локальный ledger.
+# Критерий развилки — не важность, риск или размер в строках. Размер работы отдельно
+# управляет ШИРИНОЙ веера, как и раньше. Профиль low не существует: критерий входа
+# ADR-0002 («я не отдам простую задачу в оркестратор; если я отдаю задачу — значит
+# там есть над чем подумать», владелец, 2026-07-15; орфография и пунктуация
+# нормализованы) исключает класс задач, который low описывал, — тривиальное сюда
+# не приезжает по построению.
 # -----------------------------------------------------------------------------
 shape:
   values:
@@ -376,6 +396,9 @@ shape:
     разбирательство:         # investigation — одна нитка, резать нечего
       criterion: one thread, nothing to cut into slices
       sequence: straight to work; no spec, no tickets; Step 0.5 clarification rules apply unchanged
+    прочёс:                  # sweep — закрытый run-local ledger с реальной шириной DAG
+      criterion: all ticket acceptance and integration decisions are pre-decided; the complete local DAG has independent work
+      sequence: owner witness -> seal local ledger and DAG -> native execution; never publish as a frontier
 
 # -----------------------------------------------------------------------------
 # Маршрутизация: класс подзадачи -> агент (SKILL.md Step 2).
@@ -581,26 +604,13 @@ gates:
   # Ревью всего интегрированного диффа после волны из >= N писателей.
   whole_diff_review_from_writers: 2
 
-  # v15 (2026-07-17, чужой инцидент как сигнал §8: ночной omp-прогон соседнего проекта —
-  # тикет с планом 2–4k строк разросся до ~43k незакоммиченных строк; разбор показал
-  # петлю «ревьюер вознаграждается за найденный пробел -> автор дописывает» без чьего-либо
-  # права сказать «достаточно»). Наш детерминированный прегейт уже ограничивает дифф
-  # ПО ПУТЯМ (quality.md §4: дифф только в названных тикетом файлах); этот блок добавляет
-  # ограничение ПО ОБЪЁМУ — ноль LLM-токенов, срабатывает до критика. Объём для модели
-  # бесплатен, поэтому объём — не сигнал усилия, а сигнал тревоги.
+  # v37: native task возвращает отдельный patch для каждого producer attempt,
+  # поэтому runtime измеряет insertions + deletions до merge и применяет лимит
+  # к каждому тикету независимо. Больший объём разрешается только полем
+  # max_diff_lines_override в заранее утверждённом тикете.
   pre_gate:
-    # Потолок строк диффа на тикет: insertions + deletions по git diff --numstat против
-    # пофайлового снапшота тикета (SKILL.md «Working-tree discipline»). Превышение —
-    # детерминированный FAIL: возврат продюсеру с требованием нарезать по-трассирующему,
-    # не вход в критика. Начальная догадка — правь по данным (§5): типичный трассирующий
-    # тикет на порядок меньше потолка.
+    # Консервативный потолок одного вертикального среза.
     max_diff_lines: 1200
-    # Переопределение — ТОЛЬКО заранее: тикет сам объявляет ожидаемый объём в ACCEPTANCE
-    # (законные случаи: wide-refactor батч, сгенерированный артефакт), лид фиксирует
-    # именованное решение с причиной в телеметрии — тот же паттерн, что у
-    # review_loop.proportionality_stop и fan_out.stale_base_max_behind. Пост-фактум
-    # поднимать потолок под уже раздутый дифф запрещено: это ровно та лазейка,
-    # которую потолок закрывает.
     override: ticket-declared-only
 
   # v8 (кейс a real project #21, 2026-07-12): контур ревью. Два корня: критик без семантики
@@ -1486,12 +1496,12 @@ telemetry:
   log: telemetry/routing-log.jsonl    # v21: писать ТОЛЬКО через tools/telemetry_append.py
                                       # (исполняемый §7-словарь + бюджетный предохранитель);
                                       # строка дописывается в момент приёмки тикета
-  entry_values: [full, frontier]      # v22, ADR-0004: словарь входов для сравнения
-                                      # first-try успеха между полным и фронтирным входом
-  entry_requires_shape:               # v22: какой вход какую форму требует. Ключ здесь,
-    frontier: сборка                  # а не в коде: фронтир существует только там, где
-                                      # тикеты нарезаны, и расширение оси не требует правки
-                                      # инструмента (правило нулевого дублирования ADR-0004)
+  entry_values: [full, frontier, sweep]  # v39, ADR-0011: vocabulary of public entries
+                                      # `full` and `frontier` alone remain the ADR-0004
+                                      # first-try pilot pair; `sweep` is audit-only there.
+  entry_requires_shape:               # config, not code, owns entry -> required shape
+    frontier: сборка                  # a published frontier exists only after tickets are cut
+    sweep: прочёс                     # a sealed run-local ledger is the only sweep admission
   require_entry_on_append: true       # v22: поле entry ОБЯЗАТЕЛЬНО у новых записей.
                                       # Старые записи журнала законно его не имеют и
                                       # читаются как full — но пропуск в НОВОЙ записи
@@ -1509,6 +1519,67 @@ telemetry:
                                                        # Пер-тикет: +fallback_reason(provider-degraded/
                                                        # hardening-gate), +redispatch_of/redispatch_no
                                                        # (отдельно от retries), +salvage, +run_id.
+
+# -----------------------------------------------------------------------------
+# Native OMP policy seam. The Python runtime reads this block; public skill
+# prose and the OMP adapter receive only its metadata, never routing authority.
+# -----------------------------------------------------------------------------
+omp:
+  lanes:
+    smol:    {alias: "@smol",    rank: 0}
+    task:    {alias: "@task",    rank: 1}
+    advisor: {alias: "@advisor", rank: 2}
+    slow:    {alias: "@slow",    rank: 3}
+
+  roles:
+    scout:
+      writer: false
+      agents:
+        smol: pocock-scout-smol
+        task: pocock-scout-task
+        advisor: pocock-scout-advisor
+        slow: pocock-scout-slow
+    builder:
+      writer: true
+      agents:
+        task: pocock-builder-task
+        advisor: pocock-builder-advisor
+        slow: pocock-builder-slow
+    architect:
+      writer: false
+      agents:
+        advisor: pocock-architect-advisor
+        slow: pocock-architect-slow
+    reviewer:
+      writer: false
+      agents:
+        smol: pocock-reviewer-smol
+        task: pocock-reviewer-task
+        advisor: pocock-reviewer-advisor
+        slow: pocock-reviewer-slow
+
+  # Every resolved role must belong to a known provider. Capability control is
+  # native OMP: agent tool allowlists plus core-sealed isolation options apply
+  # uniformly to every provider, so no vendor-specific wrapper or attestation
+  # is permitted.
+  known_vendors: [anthropic, openai, google, xai, moonshot]
+
+  lenses:
+    names: [Standards, Spec, Critic]
+    reviewer_role: reviewer
+    critic_min_rank: 1
+    standards_non_claude: true
+
+  pre_gate:
+    command_timeout_seconds: 600
+    max_result_bytes: 262144
+    patch_bytes_max: 16777216
+
+  # Reservation before a native task batch is sealed. It is a dispatch fuse,
+  # not a substitute for the canonical observed-token accounting at acceptance.
+  budget_projection:
+    producer_per_ticket: 180000
+    lens_per_ticket: 60000
 
 # -----------------------------------------------------------------------------
 # Кандидаты на будущие ручки — пока живут в прозе или не параметризованы вовсе.

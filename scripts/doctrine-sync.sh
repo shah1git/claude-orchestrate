@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# managed-by: rikanv-doctrine
 #
 # doctrine-sync.sh — синхронизация доктрины RikaNV + сигнал об изменении.
 #
@@ -25,8 +26,9 @@
 # Режимы:
 #   (по умолчанию)  синхронизировать: fetch + merge --ff-only (или первый
 #                   клон), показать дельту, обновить маркер. exit 0.
-#   --check         только проверить и показать; НИЧЕГО не мутировать —
-#                   ни маркер, ни существующий клон (только fetch, без merge).
+#   --check         проверить и показать; не менять checkout и маркер. `fetch`
+#                   обновляет object database и отдельный trust ref клона,
+#                   поэтому режим не называется полностью немутирующим.
 #                   Для CI/cron. Если постоянного клона нет вовсе, но есть
 #                   закоммиченный потребителем маркер .doctrine-version —
 #                   типичный случай для CI-раннера: доктрина лежит в
@@ -39,30 +41,135 @@
 # doctrine-subscribe.sh; меняешь код здесь — синхронно правь генератор):
 #   0  — актуально / синхронизировано, непросмотренной дельты нет;
 #   2  — ошибка использования (неизвестный флаг);
-#   10 — потребитель реально отстал: есть непросмотренная дельта. Единственный
-#        код, по которому CI-workflow открывает issue;
-#   11 — ТОЛЬКО в --check: определить состояние невозможно — нет ни клона, ни
-#        маркера .doctrine-version. Это НЕ «отстал» (10), а «сверяться не с
-#        чем» — типичная причина: подписка настроена, но маркер не закоммитили;
-#   12 — локальный клон разошёлся с origin: git merge --ff-only невозможен
-#        (в клон доктрины закоммитили руками, либо он «застрял» на старом
-#        форке ветки). Скрипт это не чинит сам — rm -rf клона удаляет данные,
-#        решение оставляем человеку;
-#   13 — каталог доктрины существует, но НЕ является самостоятельным клоном:
+#   10 — потребитель отстал и в дельте есть hard-файл. Единственный код, по
+#        которому CI-workflow открывает issue;
+#   11 — ТОЛЬКО в --check: маркер .doctrine-version отсутствует. Это НЕ
+#        «отстал» (10), а «сверяться не с чем» — типичная причина: подписка
+#        настроена, но маркер не закоммитили;
+#   12 — checkout изменился уже после успешного trust-check, поэтому
+#        git merge --ff-only не применился. Это race/локальная мутация во
+#        время sync; скрипт её не чинит сам;
+#   13 — каталог доктрины существует, но НЕ является самостоятельным клоном
+#        с identity-маркером `.rikanv-doctrine-id`:
 #        git-контекст из него резолвится в родительский репозиторий (типовой
 #        случай — пустой или битый doctrine/.git в throwaway-worktree
 #        потребителя). Скрипт не делает НИЧЕГО — иначе fetch/merge/rev-parse
 #        ушли бы в репозиторий потребителя, и маркер получил бы его SHA.
+#   14 — потребитель отстал, но дельта состоит только из soft/derived-файлов;
+#        CI сообщает это в логе, но не открывает issue о hard-изменении.
+#   15 — marker невалиден либо его SHA не принадлежит актуальной истории
+#        доктрины; классифицировать дельту как hard или soft нельзя, нужна
+#        полная ручная сверка, marker автоматически не перезаписывается.
+#  124 — clone/fetch превысил DOCTRINE_NETWORK_TIMEOUT_SECONDS.
 #
 # Переменные окружения:
 #   DOCTRINE_REPO_URL   адрес репо (по умолчанию https://github.com/shah1git/rikanv-doctrine.git)
 #   DOCTRINE_BRANCH     ветка (по умолчанию main)
 #   DOCTRINE_SEEN_FILE  файл-маркер (по умолчанию .doctrine-version в текущем каталоге)
+#   DOCTRINE_NETWORK_TIMEOUT_SECONDS сетевой порог Git (по умолчанию 120 с):
+#                       HTTP low-speed timeout и SSH connect/keepalive.
 #
 # Использование:
-#   bash doctrine-sync.sh [DOCTRINE_DIR] [--check]
+#   bash doctrine-sync.sh [DOCTRINE_DIR] [--check] [--status-json]
 #
 set -euo pipefail
+export GIT_NO_REPLACE_OBJECTS=1
+script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+[ -f "$script_dir/lib/doctrine-repo-url.sh" ] || { printf '%s\n' 'doctrine-sync.sh: missing managed scripts/lib/doctrine-repo-url.sh' >&2; exit 2; }
+# shellcheck source=lib/doctrine-repo-url.sh
+source "$script_dir/lib/doctrine-repo-url.sh"
+
+STATUS_JSON=0
+SYNC_ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --status-json) STATUS_JSON=1 ;;
+    *) SYNC_ARGS+=("$arg") ;;
+  esac
+done
+
+if [ "$STATUS_JSON" -eq 1 ]; then
+  command -v jq >/dev/null 2>&1 || { printf '%s\n' 'doctrine-sync.sh --status-json требует jq' >&2; exit 2; }
+  script_path="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
+  status_tmp="$(mktemp)"
+  detail_tmp="$(mktemp)"
+  trap 'rm -f "$status_tmp" "$detail_tmp"' EXIT
+  set +e
+  DOCTRINE_STATUS_FD=3 bash "$script_path" "${SYNC_ARGS[@]}" --check 3>"$detail_tmp" >"$status_tmp" 2>&1
+  status_rc=$?
+  set -e
+  cat "$status_tmp" >&2
+
+  status_dir="doctrine"
+  for arg in "${SYNC_ARGS[@]}"; do
+    case "$arg" in -*) ;; *) status_dir="$arg" ;; esac
+  done
+  status_seen_file="${DOCTRINE_SEEN_FILE:-.doctrine-version}"
+  seen_revision=""
+  local_revision=""
+  trusted_revision=""
+  seen_version=""
+  trusted_version=""
+  network_effect=false
+  git_metadata_effect=false
+  if [ -f "$status_seen_file" ] && [ ! -L "$status_seen_file" ]; then
+    seen_revision="$(tr -d '[:space:]' <"$status_seen_file")"
+  fi
+  if [ "$status_rc" -ne 13 ] && git -C "$status_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    local_revision="$(git -C "$status_dir" rev-parse HEAD 2>/dev/null || true)"
+    trusted_revision="$(git -C "$status_dir" rev-parse refs/rikanv-doctrine/trusted-tip 2>/dev/null || true)"
+    [ -n "$trusted_revision" ] || trusted_revision="$(git -C "$status_dir" rev-parse "origin/${DOCTRINE_BRANCH:-main}" 2>/dev/null || true)"
+    if [ -n "$seen_revision" ]; then
+      seen_version="$(git -C "$status_dir" show "$seen_revision:VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+    if [ -n "$trusted_revision" ]; then
+      trusted_version="$(git -C "$status_dir" show "$trusted_revision:VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+    fi
+  fi
+  if [ -s "$detail_tmp" ] && jq -e '.effects.network | type == "boolean"' "$detail_tmp" >/dev/null 2>&1; then
+    network_effect="$(jq -r '.effects.network' "$detail_tmp")"
+    git_metadata_effect="$(jq -r '.effects.git_metadata' "$detail_tmp")"
+    trusted_revision="$(jq -r '.trusted_revision // empty' "$detail_tmp")"
+    trusted_version="$(jq -r '.trusted_version // empty' "$detail_tmp")"
+    seen_version="$(jq -r '.seen_version // empty' "$detail_tmp")"
+  fi
+  case "$status_rc" in
+    0) status="current"; code="CURRENT" ;;
+    10) status="hard_delta"; code="HARD_DELTA" ;;
+    11) status="missing_marker"; code="MISSING_MARKER" ;;
+    12) status="checkout_changed"; code="CHECKOUT_CHANGED" ;;
+    13) status="foreign_checkout"; code="FOREIGN_CHECKOUT" ;;
+    14) status="soft_delta"; code="SOFT_DELTA" ;;
+    15) status="invalid_revision"; code="INVALID_REVISION" ;;
+    124) status="infra_timeout"; code="INFRA_TIMEOUT" ;;
+    *) status="error"; code="UNCLASSIFIED_ERROR" ;;
+  esac
+  jq -n --arg status "$status" --arg code "$code" --argjson exit_code "$status_rc" \
+    --arg seen "$seen_revision" --arg local "$local_revision" --arg trusted "$trusted_revision" \
+    --arg seen_version "$seen_version" --arg trusted_version "$trusted_version" \
+    --argjson network_effect "$network_effect" --argjson git_metadata_effect "$git_metadata_effect" \
+    '{schema_version:1,module:"sync",operation:"check",status:$status,code:$code,exit_code:$exit_code,effects:{project_files:false,checkout:false,git_metadata:$git_metadata_effect,network:$network_effect},revisions:{seen:($seen|if .=="" then null else . end),local:($local|if .=="" then null else . end),trusted:($trusted|if .=="" then null else . end)},versions:{seen:($seen_version|if .=="" then null else . end),trusted:($trusted_version|if .=="" then null else . end)}}'
+  exit "$status_rc"
+fi
+
+set -- "${SYNC_ARGS[@]}"
+
+# The JSON wrapper runs this invocation with fd 3 open.  Emit effects from the
+# branch that actually ran instead of guessing from its exit code: code 13, for
+# example, can be discovered either before or after a remote operation.
+status_network_effect=false
+status_git_metadata_effect=false
+status_trusted_revision=""
+status_trusted_version=""
+status_seen_version=""
+emit_status_detail() {
+  [ "${DOCTRINE_STATUS_FD:-}" = "3" ] || return 0
+  jq -cn --argjson network "$status_network_effect" --argjson git_metadata "$status_git_metadata_effect" \
+    --arg trusted_revision "$status_trusted_revision" --arg trusted_version "$status_trusted_version" \
+    --arg seen_version "$status_seen_version" \
+    '{effects:{network:$network,git_metadata:$git_metadata},trusted_revision:($trusted_revision|if .=="" then null else . end),trusted_version:($trusted_version|if .=="" then null else . end),seen_version:($seen_version|if .=="" then null else . end)}' >&3
+}
+trap 'status_exit_code=$?; trap - EXIT; emit_status_detail; exit "$status_exit_code"' EXIT
 
 DOCTRINE_DIR="doctrine"
 MODE="sync"
@@ -77,17 +184,265 @@ done
 REPO_URL="${DOCTRINE_REPO_URL:-https://github.com/shah1git/rikanv-doctrine.git}"
 BRANCH="${DOCTRINE_BRANCH:-main}"
 SEEN_FILE="${DOCTRINE_SEEN_FILE:-.doctrine-version}"
+NETWORK_TIMEOUT_SECONDS="${DOCTRINE_NETWORK_TIMEOUT_SECONDS:-120}"
+TRUSTED_REF="refs/rikanv-doctrine/trusted-tip"
+
+case "$DOCTRINE_DIR" in
+  ""|.|./|..|../|/|*/.|*/..|*/./*|*/../*)
+    printf 'DOCTRINE_DIR не может быть текущим каталогом или корнем файловой системы: %s\n' "$DOCTRINE_DIR" >&2
+    exit 2
+    ;;
+esac
+if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+  printf 'DOCTRINE_BRANCH не является допустимым именем ветки Git: %s\n' "$BRANCH" >&2
+  exit 2
+fi
+case "$REPO_URL" in
+  ""|-*) printf 'DOCTRINE_REPO_URL не может быть пустым или начинаться с дефиса.\n' >&2; exit 2 ;;
+esac
+case "$REPO_URL" in
+  https://*|http://*|ssh://*|git@*:*|file://*|/*) ;;
+  *) printf 'DOCTRINE_REPO_URL должен быть абсолютным URL/путём.\n' >&2; exit 2 ;;
+esac
+seen_base="${SEEN_FILE##*/}"
+seen_parent="${SEEN_FILE%/*}"
+[ "$seen_parent" != "$SEEN_FILE" ] || seen_parent="."
+case "$seen_base" in
+  ""|.|..|*[!A-Za-z0-9._-]*)
+    printf 'DOCTRINE_SEEN_FILE должен оканчиваться безопасным именем файла.\n' >&2
+    exit 2
+    ;;
+esac
+consumer_root="$(pwd -P)"
+seen_parent_abs="$(cd "$seen_parent" 2>/dev/null && pwd -P || true)"
+case "$seen_parent_abs" in
+  "$consumer_root"|"$consumer_root"/*) ;;
+  *) printf 'DOCTRINE_SEEN_FILE должен находиться внутри текущего проекта и иметь существующий parent-каталог.\n' >&2; exit 2 ;;
+esac
+if { [ -e "$SEEN_FILE" ] || [ -L "$SEEN_FILE" ]; } && { [ ! -f "$SEEN_FILE" ] || [ -L "$SEEN_FILE" ]; }; then
+  printf 'DOCTRINE_SEEN_FILE должен быть обычным файлом, не symlink.\n' >&2
+  exit 2
+fi
+case "$NETWORK_TIMEOUT_SECONDS" in
+  ""|0|*[!0-9]*)
+    printf 'DOCTRINE_NETWORK_TIMEOUT_SECONDS должен быть целым числом больше нуля.\n' >&2
+    exit 2
+    ;;
+esac
+
+build_ssh_command() {
+  local custom="${GIT_SSH_COMMAND:-ssh}" program suffix
+  case "$custom" in
+    ssh|ssh\ *|/usr/bin/ssh|/usr/bin/ssh\ *) ;;
+    *)
+      printf 'GIT_SSH_COMMAND должен запускать OpenSSH (ssh или /usr/bin/ssh), чтобы doctrine могла гарантировать timeout.\n' >&2
+      return 2
+      ;;
+  esac
+  case "$custom" in
+    *ConnectTimeout*|*ServerAliveInterval*|*ServerAliveCountMax*)
+      printf 'Не задавай timeout-опции в GIT_SSH_COMMAND: doctrine добавляет обязательные значения сама.\n' >&2
+      return 2
+      ;;
+  esac
+  program="${custom%% *}"
+  [ "$program" != "$custom" ] && suffix="${custom#* }" || suffix=""
+  SSH_COMMAND_WITH_TIMEOUT="$program -o ConnectTimeout=$NETWORK_TIMEOUT_SECONDS -o ServerAliveInterval=$NETWORK_TIMEOUT_SECONDS -o ServerAliveCountMax=1"
+  [ -z "$suffix" ] || SSH_COMMAND_WITH_TIMEOUT="$SSH_COMMAND_WITH_TIMEOUT $suffix"
+}
+build_ssh_command || exit $?
 
 # Доктрина — приватный репо. Локально доступ даёт git credential helper
 # (`gh auth` / SSH-ключ). В CI интерактивного логина нет — туда пробрасывается
-# DOCTRINE_TOKEN (PAT с доступом к доктрине), и мы вшиваем его в HTTPS-URL.
+# fine-grained read-only DOCTRINE_TOKEN. Токен не добавляется в URL: иначе
+# постоянный clone сохранял бы секрет в remote.origin.url.
+ASKPASS=""
 if [ -n "${DOCTRINE_TOKEN:-}" ]; then
-  case "$REPO_URL" in
-    https://github.com/*)
-      REPO_URL="https://x-access-token:${DOCTRINE_TOKEN}@github.com/${REPO_URL#https://github.com/}"
-      ;;
-  esac
+  ASKPASS="$(mktemp)"
+  printf '%s\n' '#!/bin/sh' \
+    'case "$1" in' \
+    '  *Username*) printf "%s\n" "x-access-token" ;;' \
+    '  *Password*) printf "%s\n" "$DOCTRINE_TOKEN" ;;' \
+    'esac' > "$ASKPASS"
+  chmod 700 "$ASKPASS"
+  export DOCTRINE_TOKEN
 fi
+
+run_with_timeout() {
+  local timeout_seconds="$1" command_pid watchdog_pid command_rc timeout_flag timeout_state
+  shift
+  timeout_flag="$(mktemp)"
+  printf 'waiting\n' > "$timeout_flag"
+  "$@" &
+  command_pid=$!
+  (
+    sleep "$timeout_seconds"
+    printf 'timeout\n' > "$timeout_flag"
+    kill -TERM "$command_pid" 2>/dev/null || exit 0
+    sleep 1
+    kill -KILL "$command_pid" 2>/dev/null || true
+  ) &
+  watchdog_pid=$!
+  if wait "$command_pid"; then command_rc=0; else command_rc=$?; fi
+  kill "$watchdog_pid" 2>/dev/null || true
+  wait "$watchdog_pid" 2>/dev/null || true
+  timeout_state="$(<"$timeout_flag")"
+  rm -f -- "$timeout_flag"
+  if [ "$timeout_state" = "timeout" ]; then
+    printf 'Git-операция превысила timeout %s с.\n' "$timeout_seconds" >&2
+    return 124
+  fi
+  return "$command_rc"
+}
+
+load_credential_config() {
+  local scope entry key value
+  GIT_CREDENTIAL_ARGS=()
+  for scope in system global; do
+    while IFS= read -r -d '' entry; do
+      key="${entry%%$'\n'*}"
+      value="${entry#*$'\n'}"
+      GIT_CREDENTIAL_ARGS+=(-c "$key=$value")
+    done < <(
+      if [ "$scope" = "system" ]; then
+        env -u GIT_CONFIG -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_SYSTEM -u GIT_CONFIG_NOSYSTEM \
+          GIT_CONFIG_COUNT=0 GIT_CONFIG_GLOBAL=/dev/null \
+          git config --system --includes --null --get-regexp '^credential(\..*)?\.(helper|username|usehttppath)$' 2>/dev/null || true
+      else
+        env -u GIT_CONFIG -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_GLOBAL \
+          GIT_CONFIG_COUNT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+          git config --global --includes --null --get-regexp '^credential(\..*)?\.(helper|username|usehttppath)$' 2>/dev/null || true
+      fi
+    )
+  done
+}
+load_credential_config
+
+remote_git() {
+  status_git_metadata_effect=true
+  case "$REPO_URL" in
+    https://*|http://*|ssh://*|git@*:*) status_network_effect=true ;;
+  esac
+  if [ -n "$ASKPASS" ]; then
+    run_with_timeout "$NETWORK_TIMEOUT_SECONDS" env \
+      -u GIT_CONFIG -u GIT_CONFIG_PARAMETERS \
+      GIT_CONFIG_COUNT=0 GIT_CONFIG_NOSYSTEM=1 \
+      GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null \
+      GIT_ASKPASS="$ASKPASS" GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="$SSH_COMMAND_WITH_TIMEOUT" git \
+      "${GIT_CREDENTIAL_ARGS[@]}" \
+      -c http.lowSpeedLimit=1 -c "http.lowSpeedTime=$NETWORK_TIMEOUT_SECONDS" "$@"
+  else
+    run_with_timeout "$NETWORK_TIMEOUT_SECONDS" env \
+      -u GIT_CONFIG -u GIT_CONFIG_PARAMETERS \
+      GIT_CONFIG_COUNT=0 GIT_CONFIG_NOSYSTEM=1 \
+      GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null \
+      GIT_SSH_COMMAND="$SSH_COMMAND_WITH_TIMEOUT" git \
+      "${GIT_CREDENTIAL_ARGS[@]}" \
+      -c http.lowSpeedLimit=1 -c "http.lowSpeedTime=$NETWORK_TIMEOUT_SECONDS" "$@"
+  fi
+}
+
+trusted_doctrine_checkout() {
+  local dir="$1" require_seen_match="${2:-1}" top dir_abs top_abs common_dir actual_origin checkout_status current_branch
+  local seen_rev head_rev seen_lines seen_line tracking_ref fetch_rc trust_root trust_tmp trust_template trust_bundle trusted_tip
+  trust_error=""
+  trust_infra_failure=0
+  trust_infra_rc=0
+  [ -d "$dir" ] || { trust_error="каталог отсутствует"; return 1; }
+  top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null || true)"
+  [ -n "$top" ] || { trust_error="Git не видит самостоятельный репозиторий"; return 1; }
+  dir_abs="$(cd "$dir" && pwd -P)"
+  top_abs="$(cd "$top" 2>/dev/null && pwd -P || true)"
+  [ "$top_abs" = "$dir_abs" ] || { trust_error="Git поднимается к родительскому репозиторию $top"; return 1; }
+  common_dir="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  [ -n "$common_dir" ] || { trust_error="не удалось определить Git common dir"; return 1; }
+  if [ -e "$common_dir/info/grafts" ] || [ -L "$common_dir/info/grafts" ]; then
+    trust_error="legacy info/grafts меняет историю checkout"
+    return 1
+  fi
+  grep -qxF 'rikanv-doctrine/v1' "$dir/.rikanv-doctrine-id" 2>/dev/null || {
+    trust_error="нет identity-маркера .rikanv-doctrine-id"; return 1;
+  }
+  if git -C "$dir" config --local --includes --name-only --get-regexp \
+    '^(url\..*\.insteadof|include(if\..*)?\.path)$' >/dev/null 2>&1; then
+    trust_error="локальная Git-конфигурация перенаправляет или подключает источник"
+    return 1
+  fi
+  actual_origin="$(git -C "$dir" config --local --get remote.origin.url 2>/dev/null || true)"
+  [ -n "$actual_origin" ] || { trust_error="не настроен remote origin"; return 1; }
+  normalize_repo_url "$actual_origin"; actual_origin="$normalized_repo_url"
+  normalize_repo_url "$REPO_URL"
+  [ "$actual_origin" = "$normalized_repo_url" ] || {
+    trust_error="origin '$actual_origin' не совпадает с доверенным '$normalized_repo_url'"; return 1;
+  }
+  current_branch="$(git -C "$dir" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  if [ -n "$current_branch" ] && [ "$current_branch" != "$BRANCH" ]; then
+    trust_error="checkout находится на ветке '$current_branch', а настроена '$BRANCH'"
+    return 1
+  fi
+  if ! checkout_status="$(git -C "$dir" status --porcelain=v1 --untracked-files=all 2>/dev/null)"; then
+    trust_error="не удалось проверить чистоту checkout"
+    return 1
+  fi
+  [ -z "$checkout_status" ] || { trust_error="checkout содержит незакоммиченные изменения"; return 1; }
+  if [ "$require_seen_match" -eq 1 ] && [ -f "$SEEN_FILE" ]; then
+    seen_rev=""
+    seen_lines=0
+    while IFS= read -r seen_line || [ -n "$seen_line" ]; do
+      seen_lines=$((seen_lines + 1))
+      [ "$seen_lines" -ne 1 ] || seen_rev="${seen_line%$'\r'}"
+    done < "$SEEN_FILE"
+    head_rev="$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)"
+    if [ "$seen_lines" -ne 1 ] || [ -z "$head_rev" ] || [ "$seen_rev" != "$head_rev" ]; then
+      trust_error="$SEEN_FILE не соответствует HEAD доверенного checkout"
+      return 1
+    fi
+  fi
+  # Fetch выполняется в новом bare repo, не читающем конфигурацию проверяемого
+  # checkout. Объекты возвращаются bundle-командой без URL/remote resolution.
+  tracking_ref="$TRUSTED_REF"
+  trust_root="$(mktemp -d)"
+  trust_tmp="$trust_root/repo.git"
+  trust_template="$trust_root/empty-template"
+  trust_bundle="$trust_root/trusted.bundle"
+  mkdir "$trust_template"
+  if ! env -u GIT_CONFIG -u GIT_CONFIG_PARAMETERS -u GIT_TEMPLATE_DIR \
+    GIT_CONFIG_COUNT=0 GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null \
+    git init --quiet --bare --template="$trust_template" "$trust_tmp"; then
+    rm -rf -- "$trust_root"
+    trust_error="не удалось создать временное хранилище trust-fetch"
+    trust_infra_failure=1
+    trust_infra_rc=1
+    return 1
+  fi
+  fetch_rc=0
+  remote_git -C "$trust_tmp" fetch --quiet --no-tags -- "$REPO_URL" \
+    "+refs/heads/$BRANCH:$tracking_ref" || fetch_rc=$?
+  if [ "$fetch_rc" -ne 0 ]; then
+    rm -rf -- "$trust_root"
+    trust_error="не удалось получить доверенную ветку $BRANCH из origin"
+    trust_infra_failure=1
+    trust_infra_rc="$fetch_rc"
+    return 1
+  fi
+  trusted_tip="$(git -C "$trust_tmp" rev-parse "$tracking_ref")"
+  if ! git -C "$trust_tmp" bundle create "$trust_bundle" "$tracking_ref" >/dev/null ||
+     ! git -C "$dir" bundle unbundle "$trust_bundle" >/dev/null 2>&1 ||
+     ! git -C "$dir" update-ref "$tracking_ref" "$trusted_tip"; then
+    rm -rf -- "$trust_root"
+    trust_error="не удалось импортировать доверенную ревизию origin/$BRANCH"
+    trust_infra_failure=1
+    trust_infra_rc=1
+    return 1
+  fi
+  rm -rf -- "$trust_root"
+  if ! git -C "$dir" merge-base --is-ancestor HEAD "$tracking_ref" 2>/dev/null; then
+    trust_error="HEAD не происходит из актуальной доверенной ветки origin/$BRANCH"
+    return 1
+  fi
+  return 0
+}
 
 bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m%s\033[0m\n' "$*"; }
@@ -107,6 +462,35 @@ is_hard() {
   ' "$1"
 }
 
+read_seen_marker() {
+  seen_file_present=0
+  seen_file_valid=0
+  old_rev=""
+  if [ -f "$SEEN_FILE" ]; then
+    seen_file_present=1
+    seen_lines=0
+    while IFS= read -r seen_line || [ -n "$seen_line" ]; do
+      seen_lines=$((seen_lines + 1))
+      [ "$seen_lines" -ne 1 ] || old_rev="${seen_line%$'\r'}"
+    done < "$SEEN_FILE"
+    old_rev_len="${#old_rev}"
+    case "$old_rev" in *[!0-9a-f]*) old_rev_hex=0 ;; *) old_rev_hex=1 ;; esac
+    if [ "$seen_lines" -eq 1 ] && { [ "$old_rev_len" -eq 40 ] || [ "$old_rev_len" -eq 64 ]; } &&
+       [ "$old_rev_hex" -eq 1 ]; then
+      seen_file_valid=1
+    fi
+  fi
+}
+
+# Повреждённый существующий marker — отдельное состояние, не «первый запуск».
+# Проверяем до clone/trust, чтобы код 15 не зависел от наличия ignored checkout.
+read_seen_marker
+if [ "$seen_file_present" -eq 1 ] && [ "$seen_file_valid" -ne 1 ]; then
+  warn "Маркер $SEEN_FILE существует, но не содержит ровно один полный commit SHA."
+  warn "Нужна ручная сверка; marker не изменён."
+  exit 15
+fi
+
 # Временный каталог для сверки без постоянного клона (CI-раннер, см. ниже).
 # Объявляем и вешаем trap заранее, до первого возможного exit: если скрипт
 # упадёт (в том числе на set -e) уже после того, как временный клон создан,
@@ -118,12 +502,27 @@ TMP_CLONE=""
 # подменяет код возврата всего скрипта на код последней команды трапа,
 # затирая настоящий exit N (например, 11 превратился бы в 1). `if` этого не
 # делает: код возврата функции не зависит от того, была ветка пустой.
-cleanup_tmp_clone() { if [ -n "$TMP_CLONE" ]; then rm -rf -- "$TMP_CLONE"; fi; }
-trap cleanup_tmp_clone EXIT
+cleanup_tmp_clone() {
+  if [ -n "$TMP_CLONE" ]; then rm -rf -- "$TMP_CLONE"; fi
+  if [ -n "$ASKPASS" ]; then rm -f -- "$ASKPASS"; fi
+}
+trap 'status_exit_code=$?; trap - EXIT; cleanup_tmp_clone; emit_status_detail; exit "$status_exit_code"' EXIT
 
 # --- Гарантировать наличие клона (или временную замену для --check) --------
-skip_fetch=0
-if [ ! -d "$DOCTRINE_DIR/.git" ]; then
+doctrine_repo_present=0
+trust_seen_match=1
+trusted_doctrine_checkout "$DOCTRINE_DIR" "$trust_seen_match" && doctrine_repo_present=1
+if [ "$trust_infra_failure" -ne 0 ]; then exit "$trust_infra_rc"; fi
+if [ "$doctrine_repo_present" -ne 1 ]; then
+  if [ -e "$DOCTRINE_DIR" ]; then
+    if [[ "$trust_error" == HEAD\ не\ происходит\ из\ актуальной\ доверенной\ ветки* ]] && [ -f "$SEEN_FILE" ]; then
+      warn "Ревизия маркера больше не принадлежит актуальной истории origin/$BRANCH; полная ручная сверка обязательна."
+      exit 15
+    fi
+    warn "Каталог $DOCTRINE_DIR не является доверенным checkout доктрины: $trust_error."
+    warn "Не перезаписываю его; выбери другой путь или убери конфликт вручную."
+    exit 13
+  fi
   if [ "$MODE" = "check" ]; then
     # На CI-раннере постоянного клона нет НИКОГДА — доктрина в .gitignore
     # потребителя (см. doctrine-subscribe.sh, шаг 3), actions/checkout её не
@@ -142,17 +541,22 @@ if [ ! -d "$DOCTRINE_DIR/.git" ]; then
     fi
     bold "Постоянного клона нет — временно клонирую доктрину для сверки"
     TMP_CLONE="$(mktemp -d)"
-    git clone --quiet --branch "$BRANCH" "$REPO_URL" "$TMP_CLONE"
+    remote_git clone --quiet --branch "$BRANCH" -- "$REPO_URL" "$TMP_CLONE"
     DOCTRINE_DIR="$TMP_CLONE"
-    skip_fetch=1
+    trust_seen_match=0
   else
     bold "Доктрина не найдена — клонирую в $DOCTRINE_DIR"
-    git clone --quiet --branch "$BRANCH" "$REPO_URL" "$DOCTRINE_DIR"
-    new_rev="$(git -C "$DOCTRINE_DIR" rev-parse HEAD)"
-    new_ver="$(cat "$DOCTRINE_DIR/VERSION" 2>/dev/null || echo '?')"
-    echo "$new_rev" > "$SEEN_FILE"
-    bold "Доктрина подключена. Версия $new_ver. Маркер записан в $SEEN_FILE."
-    exit 0
+    remote_git clone --quiet --branch "$BRANCH" -- "$REPO_URL" "$DOCTRINE_DIR"
+    trust_seen_match=0
+    if ! trusted_doctrine_checkout "$DOCTRINE_DIR" "$trust_seen_match"; then
+      [ "$trust_infra_failure" -eq 0 ] || exit "$trust_infra_rc"
+      warn "Клон $DOCTRINE_DIR не прошёл проверку доверия: $trust_error."
+      warn "Маркер $SEEN_FILE не записан; каталог автоматически не удаляю."
+      exit 13
+    fi
+    # Даже для обычного sync продолжаем общий путь сравнения ниже. Клон мог
+    # исчезнуть как ignored-артефакт, пока закоммиченный marker сохранился;
+    # его нельзя молча выдать за «первое подключение» и перезаписать.
   fi
 fi
 
@@ -168,10 +572,14 @@ fi
 # который git видит из $DOCTRINE_DIR, — это сам $DOCTRINE_DIR. Пути сравниваем
 # физические (pwd -P): git отдаёт toplevel с раскрытыми симлинками, и
 # лексическое сравнение дало бы ложный отказ на симлинк-пути.
-doctrine_abs="$(cd "$DOCTRINE_DIR" && pwd -P)"
-doctrine_top="$(git -C "$DOCTRINE_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
-if [ -z "$doctrine_top" ] || [ "$(cd "$doctrine_top" 2>/dev/null && pwd -P)" != "$doctrine_abs" ]; then
-  warn "Каталог $DOCTRINE_DIR не является самостоятельным клоном доктрины."
+if ! trusted_doctrine_checkout "$DOCTRINE_DIR" "$trust_seen_match"; then
+  [ "$trust_infra_failure" -eq 0 ] || exit "$trust_infra_rc"
+  if [[ "$trust_error" == HEAD\ не\ происходит\ из\ актуальной\ доверенной\ ветки* ]] && [ -f "$SEEN_FILE" ]; then
+    warn "Ревизия маркера больше не принадлежит актуальной истории origin/$BRANCH; полная ручная сверка обязательна."
+    exit 15
+  fi
+  doctrine_top="$(git -C "$DOCTRINE_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+  warn "Каталог $DOCTRINE_DIR не является доверенным самостоятельным клоном доктрины: $trust_error."
   if [ -n "$doctrine_top" ]; then
     warn "git-контекст из него поднимается к «$doctrine_top» — это РОДИТЕЛЬСКИЙ репозиторий, и его SHA попал бы в маркер."
   else
@@ -181,25 +589,19 @@ if [ -z "$doctrine_top" ] || [ "$(cd "$doctrine_top" 2>/dev/null && pwd -P)" != 
   exit 13
 fi
 
-# --- Подтянуть свежий main ---------------------------------------------------
-# --check не должен мутировать существующий клон: делаем только fetch и
-# сравниваем с origin/$BRANCH напрямую, merge — исключительно в режиме sync.
-# Раньше merge выполнялся в обоих режимах, из-за чего «просто проверка» тихо
-# двигала рабочую копию потребителя — сайд-эффект, недопустимый для --check.
-if [ "$skip_fetch" != "1" ]; then
-  git -C "$DOCTRINE_DIR" fetch --quiet origin "$BRANCH"
-  if [ "$MODE" = "check" ]; then
-    new_rev="$(git -C "$DOCTRINE_DIR" rev-parse "origin/$BRANCH")"
-  else
-    if ! git -C "$DOCTRINE_DIR" merge --quiet --ff-only "origin/$BRANCH"; then
-      warn "Клон $DOCTRINE_DIR разошёлся с origin/$BRANCH — fast-forward невозможен."
-      warn "Рецепт: rm -rf $DOCTRINE_DIR и запусти sync заново (сам rm -rf НЕ выполняю — это удаление данных, решать человеку)."
-      exit 12
-    fi
-    new_rev="$(git -C "$DOCTRINE_DIR" rev-parse HEAD)"
-  fi
+# --- Использовать вершину, уже полученную trust-fetch -----------------------
+# `trusted_doctrine_checkout` непосредственно перед этим блоком принудительно
+# обновил TRUSTED_REF из явного REPO_URL. Не делаем второй fetch через имя
+# remote: его refspec — локальная конфигурация checkout и не является границей
+# доверия. В --check рабочее дерево не двигаем; обычный sync делает ff-only.
+if [ "$MODE" = "check" ]; then
+  new_rev="$(git -C "$DOCTRINE_DIR" rev-parse "$TRUSTED_REF")"
 else
-  # Временный клон уже стоит на нужной ревизии — fetch/merge не нужны.
+  if ! git -C "$DOCTRINE_DIR" merge --quiet --ff-only "$TRUSTED_REF"; then
+    warn "Клон $DOCTRINE_DIR разошёлся с актуальной доверенной веткой origin/$BRANCH — fast-forward невозможен."
+    warn "Рецепт: rm -rf $DOCTRINE_DIR и запусти sync заново (сам rm -rf НЕ выполняю — это удаление данных, решать человеку)."
+    exit 12
+  fi
   new_rev="$(git -C "$DOCTRINE_DIR" rev-parse HEAD)"
 fi
 
@@ -207,14 +609,21 @@ fi
 # режиме --check с уже существующим клоном merge не делается (см. выше), и
 # рабочее дерево остаётся на старой ревизии — `cat` подсунул бы старую версию
 # под видом новой. `git show rev:file` не зависит от checkout вообще.
-new_ver="$(git -C "$DOCTRINE_DIR" show "$new_rev:VERSION" 2>/dev/null | tr -d '[:space:]')"
+new_ver="$(git -C "$DOCTRINE_DIR" show "$new_rev:VERSION" 2>/dev/null)"
+new_ver="${new_ver%$'\r'}"
 new_ver="${new_ver:-?}"
 
+status_trusted_revision="$new_rev"
+[ "$new_ver" = "?" ] || status_trusted_version="$new_ver"
+if [ -n "$old_rev" ]; then
+  status_seen_version="$(git -C "$DOCTRINE_DIR" show "$old_rev:VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+fi
+
 # Ревизия, на которой потребитель сверился в прошлый раз.
-if [ -f "$SEEN_FILE" ]; then
-  old_rev="$(tr -d '[:space:]' < "$SEEN_FILE")"
-else
-  old_rev=""
+if [ "$MODE" = "check" ] && [ -z "$old_rev" ]; then
+  warn "Маркер $SEEN_FILE отсутствует — определить непросмотренную дельту нельзя."
+  warn "Запусти sync без --check и закоммить созданный маркер."
+  exit 11
 fi
 
 # --- Нечего показывать ------------------------------------------------------
@@ -224,12 +633,23 @@ if [ -n "$old_rev" ] && [ "$old_rev" = "$new_rev" ]; then
 fi
 
 # --- Есть дельта ------------------------------------------------------------
-if [ -n "$old_rev" ] && git -C "$DOCTRINE_DIR" cat-file -e "$old_rev^{commit}" 2>/dev/null; then
-  old_ver="$(git -C "$DOCTRINE_DIR" show "$old_rev:VERSION" 2>/dev/null | tr -d '[:space:]' || echo '?')"
+comparison_known=0
+if [ -n "$old_rev" ] &&
+   git -C "$DOCTRINE_DIR" cat-file -e "$old_rev^{commit}" 2>/dev/null &&
+   git -C "$DOCTRINE_DIR" merge-base --is-ancestor "$old_rev" "$new_rev" 2>/dev/null; then
+  comparison_known=1
+  old_ver="$(git -C "$DOCTRINE_DIR" show "$old_rev:VERSION" 2>/dev/null || echo '?')"
+  old_ver="${old_ver%$'\r'}"
   changed="$(git -C "$DOCTRINE_DIR" diff --name-only "$old_rev" "$new_rev")"
 else
   old_ver="?"
   changed=""   # первый запуск или маркер указывает на неизвестную ревизию
+fi
+
+if [ -n "$old_rev" ] && [ "$comparison_known" -ne 1 ]; then
+  warn "Ревизия маркера $old_rev отсутствует в актуальной истории доктрины; hard/soft-классификация невозможна."
+  warn "Нужна полная ручная сверка; marker не изменён."
+  exit 15
 fi
 
 bold "Доктрина обновлена: ${old_ver} → ${new_ver}"
@@ -244,10 +664,19 @@ if [ -n "$changed" ]; then
   hard=""
   while IFS= read -r f; do
     [ -z "$f" ] && continue
-    git -C "$DOCTRINE_DIR" cat-file -e "$new_rev:$f" 2>/dev/null || continue
     case "$f" in
       *.md)
-        if is_hard <(git -C "$DOCTRINE_DIR" show "$new_rev:$f" 2>/dev/null); then
+        old_hard=0
+        new_hard=0
+        if git -C "$DOCTRINE_DIR" cat-file -e "$old_rev:$f" 2>/dev/null &&
+           is_hard <(git -C "$DOCTRINE_DIR" show "$old_rev:$f" 2>/dev/null); then
+          old_hard=1
+        fi
+        if git -C "$DOCTRINE_DIR" cat-file -e "$new_rev:$f" 2>/dev/null &&
+           is_hard <(git -C "$DOCTRINE_DIR" show "$new_rev:$f" 2>/dev/null); then
+          new_hard=1
+        fi
+        if [ "$old_hard" -eq 1 ] || [ "$new_hard" -eq 1 ]; then
           hard="${hard}${f}"$'\n'
         fi
         ;;
@@ -298,8 +727,12 @@ if [ "$old_ver" != '?' ] && git -C "$DOCTRINE_DIR" cat-file -e "$new_rev:CHANGEL
 fi
 
 if [ "$MODE" = "check" ]; then
-  warn "Потребитель отстал от доктрины. Запусти sync и сверь затронутое."
-  exit 10
+  if [ -n "${hard:-}" ]; then
+    warn "Потребитель отстал: в дельте есть hard-файлы. Запусти sync и сверь затронутое."
+    exit 10
+  fi
+  warn "Потребитель отстал, но дельта содержит только soft/derived-файлы."
+  exit 14
 fi
 
 echo "$new_rev" > "$SEEN_FILE"

@@ -253,6 +253,22 @@ def test_sibling_with_its_own_config_is_not_scanned(tmp_path):
     assert result.stderr == ""
 
 
+def test_unrelated_installed_sibling_without_config_is_not_scanned(tmp_path):
+    skill_dir = tmp_path / "orchestrate"
+    skill_dir.mkdir()
+    make_skill_dir(skill_dir)
+    unrelated = tmp_path / "orca-cli"
+    unrelated.mkdir()
+    (unrelated / "SKILL.md").write_text(
+        "# Unrelated\nRefers to `worktree.id` from its own domain.\n"
+    )
+
+    result = run_validator(skill_dir)
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+
+
 # A config whose fallback chain routes to a lane that is absent from
 # provider_map — the exact drift (sol-xhigh / grok-4.5 outside the map) that let
 # a critic grade its own vendor's work undetected.

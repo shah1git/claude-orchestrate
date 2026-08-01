@@ -8,6 +8,7 @@ config and telemetry are never touched.
 import json
 import subprocess
 import sys
+import pytest
 from pathlib import Path
 from textwrap import dedent
 
@@ -25,9 +26,10 @@ MINI_CONFIG = dedent("""\
       on_exceed: stop-dispatch-finish-gates-report
     telemetry:
       log: telemetry/routing-log.jsonl
-      entry_values: [full, frontier]
+      entry_values: [full, frontier, sweep]
       entry_requires_shape:
         frontier: сборка
+        sweep: прочёс
       require_entry_on_append: true
       stamp_records_with_config: true
 """)
@@ -50,6 +52,13 @@ def row(**over):
             "class": "skilled", "agent": "builder", "model": "sonnet",
             "verdict": "PASS", "config": "v21+0000000", "tokens": 100,
             "entry": "full"}
+    base.update(over)
+    return {k: v for k, v in base.items() if v is not None}
+
+
+def sweep_row(**over):
+    base = row(entry="sweep", shape="прочёс", ledger_hash="a" * 64,
+               dag_hash="b" * 64)
     base.update(over)
     return {k: v for k, v in base.items() if v is not None}
 
@@ -283,6 +292,45 @@ def test_full_entry_with_investigation_shape_appends(tmp_path):
     assert log_rows(d) == [record]
 
 
+def test_sweep_entry_with_required_shape_and_hashes_appends(tmp_path):
+    d = make_skill_dir(tmp_path)
+    record = sweep_row()
+    p = run(d, json.dumps(record))
+    assert p.returncode == 0, p.stderr
+    assert log_rows(d) == [record]
+
+
+@pytest.mark.parametrize("missing_hash", ["ledger_hash", "dag_hash"])
+def test_sweep_entry_missing_required_hash_is_rejected_without_appending(
+        tmp_path, missing_hash):
+    d = make_skill_dir(tmp_path)
+    p = run(d, json.dumps(sweep_row(**{missing_hash: None})))
+    assert p.returncode == 1
+    assert missing_hash in p.stderr
+    assert log_rows(d) == []
+
+
+@pytest.mark.parametrize(
+    ("malformed_hash", "value"),
+    [("ledger_hash", "A" * 64), ("dag_hash", "b" * 63)],
+)
+def test_sweep_entry_malformed_hash_is_rejected_without_appending(
+        tmp_path, malformed_hash, value):
+    d = make_skill_dir(tmp_path)
+    p = run(d, json.dumps(sweep_row(**{malformed_hash: value})))
+    assert p.returncode == 1
+    assert malformed_hash in p.stderr
+    assert log_rows(d) == []
+
+
+def test_sweep_entry_with_incorrect_shape_is_rejected_without_appending(tmp_path):
+    d = make_skill_dir(tmp_path)
+    p = run(d, json.dumps(sweep_row(shape="сборка")))
+    assert p.returncode == 1
+    assert "requires shape 'прочёс'" in p.stderr
+    assert log_rows(d) == []
+
+
 def test_omitted_entry_is_rejected_when_config_requires_it(tmp_path):
     # Legacy rows already in the log may lack `entry` (read as `full`), but a
     # record written now can always state its entrance — and the pilot's
@@ -326,7 +374,7 @@ def test_malformed_entry_values_in_config_is_rejected(tmp_path):
     # The guard in validate_record only helps if a drifted config actually
     # trips it: a scalar where the vocabulary belongs must fail loudly, not
     # silently degrade to "every entry is valid".
-    broken = MINI_CONFIG.replace("entry_values: [full, frontier]",
+    broken = MINI_CONFIG.replace("entry_values: [full, frontier, sweep]",
                                  "entry_values: full")
     d = make_skill_dir(tmp_path, config=broken)
     p = run(d, json.dumps(row(entry="full", shape="сборка")))

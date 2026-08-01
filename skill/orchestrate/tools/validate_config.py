@@ -353,9 +353,9 @@ def _resolves(ref: str, config_data: dict) -> bool:
 
 
 def prose_violations(skill_dir: Path, config_data: dict, exceptions: set) -> list:
-    """Resolve every `block.key`-shaped backtick reference in SKILL.md and
-    references/*.md against config_data; unresolved (and not excepted)
-    references are violations."""
+    """Resolve every `block.key`-shaped backtick reference in the orchestration
+    heads, SKILL.md, and references/*.md against config_data; unresolved (and
+    not excepted) references are violations."""
     violations = []
     prose_files = []
     skill_md = skill_dir / "SKILL.md"
@@ -364,14 +364,13 @@ def prose_violations(skill_dir: Path, config_data: dict, exceptions: set) -> lis
     references_dir = skill_dir / "references"
     if references_dir.is_dir():
         prose_files.extend(sorted(references_dir.glob("*.md")))
-    # Sibling entrance skills (ADR-0004): a skill/*/SKILL.md with NO config.yaml
-    # of its own shares this config.yaml as its single source of values, so its
-    # prose is held to the same reference discipline as the main playbook's.
-    # (A sibling that carries its own config.yaml is a separate skill — or a
-    # test fixture — and validates against its own config, not this one.)
-    for sibling in sorted(skill_dir.parent.glob("*/SKILL.md")):
-        if (sibling.resolve() != skill_md.resolve()
-                and not (sibling.parent / "config.yaml").exists()):
+    # Only the public entrances that share this control-plane config belong in
+    # this check. The installed shared registry also contains unrelated
+    # third-party skills, so scanning every sibling would make the validator
+    # depend on prose outside this project.
+    for sibling_name in ("orchestrate-frontier", "orchestrate-sweep"):
+        sibling = skill_dir.parent / sibling_name / "SKILL.md"
+        if sibling.is_file() and not (sibling.parent / "config.yaml").exists():
             prose_files.append(sibling)
 
     for path in prose_files:

@@ -1,0 +1,16 @@
+async:
+  enabled: false
+display:
+  showTokenUsage: true
+task:
+  batch: true
+  enableEffort: true
+  maxRecursionDepth: 1
+  showResolvedModelBadge: true
+  maxConcurrency: 6
+  isolation:
+    mode: auto
+    apply: false
+    merge: patch
+retry:
+  modelFallback: false

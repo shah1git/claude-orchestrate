@@ -1,309 +1,130 @@
-# Delegation: ticket templates and per-model phrasing
+# Delegation: sealed OMP ticket contract
 
-Source of truth for how the orchestrator writes task tickets. Grounded in Anthropic's
-published guidance: "How we built our multi-agent research system" (delegation anatomy,
-effort scaling), "Prompting best practices" (explicitness, context/motivation, examples,
-format control), and the per-model prompting pages for the generations named in the
-"verified for" banner of the cheat-sheet below.
+This is the operational reference for tickets submitted through `pocock_prepare`.
+It specifies ticket content and the observable execution contract. Routing, agent
+identity, model resolution, retry eligibility, isolation mechanics, output schema,
+and acceptance are owned by the native OMP control plane; a ticket must not try to
+select or override them.
 
 ## The ticket, field by field
 
-| Field | What good looks like | Typical failure without it |
+| Field | Required content | Failure prevented |
 |---|---|---|
-| OBJECTIVE | One sentence, outcome-shaped: "A passing test suite for `src/pricing/` covering the discount edge cases listed below." | Worker optimizes for activity, not outcome |
-| CONTEXT | Why the task matters, who consumes the result, how it fits the plan. Claude generalizes correctly from the *reason*: "the result feeds a security review, so completeness beats speed." | Worker makes locally reasonable, globally wrong tradeoffs |
-| INPUTS | Exact paths, symbols, line ranges, URLs, and relevant findings from other workers, restated (workers never see your conversation). | Worker re-derives or, worse, guesses your context |
-| OUTPUT | Exact deliverable format: structure, section names, table columns, language. If machine-consumed, show a literal example. | Unparseable or inconsistent deliverables |
-| TOOLS | Which tools to use and the *trigger conditions*: "if the answer depends on current information, search the web before answering rather than answering from memory." | Under-use of tools (esp. Opus) or endless searching |
-| BOUNDARIES | Out-of-scope list, files that must not change, stop conditions ("if the fix requires touching the schema, stop and report instead"). | Scope creep, duplicate work across workers, unrequested refactors |
-| ACCEPTANCE | Gradeable criteria (see quality.md). These are handed verbatim to `critic`. | Nothing to verify against; "done" becomes a vibe |
+| OBJECTIVE | One observable outcome, stated in one sentence. | Activity is mistaken for completion. |
+| CONTEXT | Why the result matters and who consumes it. | A locally plausible result violates the larger plan. |
+| INPUTS | Exact paths, symbols, records, URLs, and upstream artifacts. | The isolated worker guesses or repeats discovery. |
+| OUTPUT | The durable deliverable and its required shape. | A correct result arrives in an unusable form. |
+| TOOLS | Capabilities genuinely needed by this ticket. | The worker searches indefinitely or cannot verify its work. |
+| BOUNDARIES | Explicit non-goals, writable paths, and stop conditions. | Scope creep or overlapping writes. |
+| ACCEPTANCE | Objective checks that can fail on a plausible defect. | “Done” becomes an unsupported assertion. |
 
-Two workers must never share an OBJECTIVE or overlap on INPUTS-they-modify. Vague or
-overlapping delegation is the #1 documented multi-agent failure (duplicated work, gaps).
+## Required execution metadata
 
-**Delivery by deliverable shape (SKILL.md Step 3, v2.16 — corrects v2.15).** A Claude
-Agent-tool subagent cannot deliver by writing a report file (the harness blocks it) and
-its background relay is lossy, so how a worker delivers depends on WHAT it produces:
-- **code / files** (builder): the deliverable is the worktree diff — the lead grades it
-  on disk; background is fine, the report is only narration.
-- **a report / verdict with no on-disk artifact** (critic, architect, report-only recon):
-  dispatch **synchronously** so the final text is the tool result (the relay can't drop a
-  synchronous return). Scout was always this case; it now covers every report-only agent.
-- **cross-provider lane** (run-lane): keeps the artifact-file path via `--out` /
-  `RUN-LANE-ARTIFACT-PATH` (run-lane writes it, not a subagent — the harness block does
-  not apply). OUTPUT for a cross-lane ticket names that file, outside the working tree.
+Alongside the seven textual fields, submit the following metadata. Use the tracker
+identifier as `ticketId` (or `id`) where available so that attempts remain
+traceable.
 
-**Seeding tickets from the clarification ledger.** When Step 0.5 ran a grill, its ledger is
-the source for these fields: sharpened TERMS become the exact vocabulary in
-OBJECTIVE/CONTEXT (so isolated workers share one meaning of "account"/"cancellation");
-resolved FORKS become BOUNDARIES; the confirmed SUCCESS condition decomposes into per-ticket
-ACCEPTANCE; a CODE contradiction found in the grill becomes an INPUT (the file:line). Copy a
-canonicalized term verbatim — never paraphrase a term the grill already pinned.
+| Field | Required form |
+|---|---|
+| `signals` | Non-empty array of truthful classification strings. |
+| `write` | Boolean. |
+| `writablePaths` | Unique normalized POSIX repository-relative file paths, or directory prefixes ending in `/`. A writer (`write: true`) declares at least one; a read-only ticket declares `[]`. |
+| `verification` | An array of command objects: `[{argv: ["…"], cwd: ".", timeoutSeconds: N}]`. `argv` is a non-empty string array and is run directly, not through a shell; `cwd` is `.` or an existing normalized repository-relative directory; `timeoutSeconds` is a positive integer. |
+| `ui_live` | `true` only when the acceptance requires live host browser or xdev proof. |
+| `ui_evidence` | Required exactly when `ui_live: true`, and then exactly `{target: "…", criterion: "…"}`; forbidden otherwise. |
 
-**Pass references between dependent tickets, not transcripts.** When ticket B builds on
-ticket A's output, B's INPUTS carry *references* — file paths, the diff on disk, a report
-file — plus at most a three-line statement of what A established; never a paste of A's
-full report. Every re-narration is a lossy re-compression by a different narrator (the
-game-of-telephone failure; the omp case study's DAG solves it the same way — downstream
-stages receive links, not transcripts). Disk artifacts also stay provenance-checkable
-(quality.md research rubric) and remain authoritative when a narration drifts. Existing
-rules are instances of this one: "pass the first diff as INPUT to the second" (SKILL.md
-Step 3), per-ticket diff snapshots, Codex diff-from-disk.
+`writablePaths` is a permission boundary, not a hint: it cannot use absolute paths,
+`.`/`..`, backslashes, duplicate entries, or repository metadata. A file entry
+permits that file only; a trailing-slash entry permits that directory subtree.
 
-**State the source-outranks-ticket rule in every ticket that names a source.** The four
-Claude agents carry it in their standing definitions (`agents/*.md`): a document named in
-INPUTS — a spec, an ADR, a documented contract — outranks the ticket, and a worker who
-finds the two contradicting stops, builds neither side, and reports both statements with
-their locations rather than picking a winner. **Cross-provider workers never see those
-definitions** — a Codex, Kimi, Grok, or Gemini lane gets exactly the text you write — so
-for those the rule has to travel *in the ticket*, one line in BOUNDARIES:
+Use the exact executable invocation as verification—for example,
+`{"argv":["python3","-m","pytest","tests/test_rate_limit.py"],"cwd":".","timeoutSeconds":60}`—
+not a shell pipeline, a prose instruction, or a command that depends on an
+interactive session. The runtime enforces the configured timeout cap. Empty
+`verification` is valid only when no deterministic command can exercise the result.
 
-```
-BOUNDARIES: ... The documents named in INPUTS outrank this ticket. If an instruction here
-contradicts one of them — two statements that cannot both be true, not silence, not a
-strained reading, not this ticket merely narrowing its source — stop work on the part it
-affects, implement neither side, and report both statements with their locations. Deliver
-whatever the conflict does not touch. (On a review ticket: report the conflict as a
-finding rather than grading around it.)
-```
+The ticket may declare `max_diff_lines_override` only when the approved ticket
+justifies a larger limit. The ordinary per-ticket (per-attempt) ceiling and all
+other pre-gate limits are configured in [`gates.pre_gate`](../config.yaml), rather
+than copied into a ticket.
 
-**Which copy is canonical.** The *meaning* is maintained in `agents/*.md`; the BOUNDARIES
-line is a payload carried to environments where those definitions do not exist. Edit the
-agent definitions first and bring this line along in the same change — two copies exist
-only because there is no shared surface, and they are worth keeping only in lockstep.
+Do not add a route, lane, agent, model, reviewer, verdict, retry instruction, or
+output schema. Those values are sealed after the control plane classifies the
+ticket.
 
-This closes the seam the lead's own hand introduces: a ticket criterion that contradicts
-the spec it was cut from is a defect no acceptance criterion catches, because the criterion
-*is* the defect, and the worker holding both texts is the cheapest reader who can see it
-(2026-07-19: a ticket declared a telemetry field optional while the spec required it on
-every record; the worker complied faithfully and the gate paid a review round for it).
+## Completeness rules
 
-**No hedge words in a ticket.** "probably / likely / apparently / should be / I think / may"
-in a ticket marks unresolved recon, not a spec. Resolve each before dispatch — send a
-`scout`, read the file, or make the decision yourself — or promote it to an explicit line
-("Assumption: X holds; if it does not, stop and report"). A load-bearing hedge is a ticket
-defect: the isolated worker cannot tell your uncertainty from a requirement.
+**One ticket is one vertical slice.** It may touch several layers when that is
+required for an independently demonstrable result. Two tickets must not share an
+OBJECTIVE or overlap on files they modify in the same wave.
 
-## Per-model phrasing cheat-sheet
+**Resolve uncertainty before dispatch.** Words such as “probably”, “likely”,
+“should”, or “maybe” mark an unresolved decision. Replace them with a verified
+fact, an explicit approved assumption with a stop condition, or a clarification.
 
-> **Verified for: Fable 5 (lead · architect · final escalation rung) ·
-> Opus 4.8 · Sonnet 5 · Haiku 4.5** — checked 2026-07-08. The agents' frontmatter binds
-> each worker via a floating alias (`fable`, `opus`, `sonnet`, `haiku`), which always
-> resolves to the newest generation of its family — a
-> new release is picked up with no edit anywhere. The *behavioral* notes below, however,
-> were verified against the specific generations named above and do **not** float: when
-> an alias starts resolving to a newer generation, re-verify each claim against
-> Anthropic's model-specific prompting pages (platform.claude.com/docs) and update this
-> banner. Haiku 4.5 has no dedicated prompting page — its section derives from the
-> general best practices plus its official positioning ("near-frontier performance",
-> "sub-agent tasks") in choosing-a-model.
+**Named sources outrank the ticket.** Put this rule in BOUNDARIES whenever INPUTS
+names a specification, ADR, or documented contract:
 
-### `scout` — Haiku
-
-Two band rules established by experiment #1 (issue #1, 2026-07-23) before anything about
-ticket style:
-
-- **Synchronous dispatch only** (`run_in_background: false`). Scout's toolset is
-  Read/Grep/Glob — no SendMessage, no Write. In background/teammate mode its final
-  report is structurally undeliverable: the run completes, the text is lost (observed
-  twice on the same ticket). Its report exists only as the synchronous tool result.
-- **Narrow scope only.** One subsystem, explicit patterns, a checkable key. On a broad
-  multi-subsystem inventory scout returned a confident false negative ("directory not
-  found" for a directory that exists) while reporting zero gaps — route wide sweeps to
-  `codex-recon` (or to built-in `Explore` only with an explicit `model:` override, per the
-  off-matrix rule in SKILL.md Step 2), and keep scout where its answer can be
-  spot-checked cheaply.
-
-Haiku is fast and cheap but does not fill gaps in your instructions. Write the ticket as
-if for a capable executor with zero tolerance for ambiguity:
-
-- **Enumerate the steps** (1, 2, 3…) when order or completeness matters.
-- **Give literal search patterns and paths**: "Grep for `LegacyHttpClient` under `src/`,
-  include only `*.ts`", not "find CRM references".
-- **Show one literal example of the expected output row/entry** — examples are the most
-  reliable way to steer format.
-- **Install the escape hatch, verbatim**: "If the instructions do not match what you find,
-  or the task requires a judgment call, stop and return `NEEDS_CLARIFICATION:` followed
-  by what you actually saw. Do not guess. An honest empty result ('found 0 matches') is a
-  success, not a failure."
-- **Keep it to eyes, not head.** Scout verbs are *find / list / measure / quote / count /
-  cross-check / extract / classify-by-a-rule-you-give-it* — never *choose / decide /
-  recommend / rank / conclude* where the pick needs judgment. Applying an explicit
-  classification rule the ticket provides is mechanical (do it); a judgment choice among N
-  goes back as "all N with their attributes" for the lead to decide. Encode the boundary in
-  the ticket so it is explicit, not implied.
-- **A completeness claim needs two angles.** For any inventory / usage-map / "find all
-  X" ticket, the ticket itself must specify at least two *independent* sweep angles —
-  e.g. grep the API caller AND grep the UI control; the import path AND the symbol
-  name — plus a reconciliation step: items found by one angle but not the other are
-  listed explicitly, never silently merged. Scout's report format already requires
-  `SEARCHES RUN`; grade against it. A `GAPS: none` from a single-angle sweep is an
-  unverified coverage claim, not evidence of completeness — the lead treats it as
-  unverified before building a plan on it (2026-07-11 picker incident: 4 of 9 sites
-  missed by a one-angle sweep the plan then trusted; §8, incident 4).
-- **Write inventories as search-then-collect, not walk-and-count** (v23, config
-  `routing.classes.mechanical.inventory_method`). Cheap tiers do not hold a running count
-  in their head while walking files — Haiku scored 0.868 and Luna 0.921 on a 38-item sweep
-  that required it. The same Haiku scored a perfect 1.0/1.0 on a **450-item** key when the
-  items came out of one search and the work was transcribing its results. Size was never
-  the variable; method was. So: name the patterns and paths in the ticket (scout's rule 1
-  already binds it to them), and let the items fall out of the sweep. Routing up a tier is
-  for inventories that genuinely cannot be written this way — **rewrite the ticket before
-  you spend the tier**.
-- Keep tickets small: one question or one sweep per ticket. Ten small scout tickets in
-  parallel beat one broad one — **down to a floor**: every delegation carries fixed
-  overhead (spawn, context injection, report), so below some brief size splitting costs
-  more than it saves. Granularity has an optimum, not a monotone "smaller is better";
-  the telemetry's per-class cost fields (quality.md §7) are how you find it.
-
-### `builder` — Sonnet
-
-Sonnet follows instructions **literally** and will not silently generalize an
-instruction from one item to another, nor infer requests you didn't make:
-
-- **State scope explicitly**: "apply this to *every* endpoint in `routes/`, not just the
-  first one you edit."
-- **Full spec in the first message.** Progressive drip-feeding of requirements measurably
-  degrades token efficiency and results; the ticket must be complete.
-- **When the ticket implements business logic against a spec, name the pre-agreed seams
-  and prescribe `/tdd` on them.** Carry the seams straight from the spec — never let the
-  builder pick its own. Say it explicitly: "Implement via the `tdd` skill (Skill tool) on
-  these seams: <list>. Red before green, one seam at a time; typecheck regularly, run the
-  full suite once at the end." Mechanical tickets (docs, config, pure refactors) don't
-  need this — it's for new or changed behavior only.
-- It is *more* agentic than earlier Sonnets — it will run self-verification loops and
-  reach for tools readily. Channel that: "run the test suite yourself and include the
-  output" is cheap to ask and high-value.
-- Include the anti-overengineering and anti-reward-hacking lines from its agent
-  definition only if you observe drift — they are already in its system prompt.
-
-### `architect` — Fable
-
-Fable is the lead-tier model: it performs best when given the **goal, not the steps** —
-an over-scripted procedure actively hurts it. Write the architect ticket as a contract,
-not a script:
-
-- **State the goal, constraints, and explicit scope** ("assess all six modules listed
-  below", not "the risky modules") and what "done" looks like — then stop: let it plan
-  its own procedure. De-prescription is the point of routing design work to Fable.
-- **Put trigger conditions on capabilities** where grounding or currency matters:
-  "search the web if the answer depends on current information"; "never speculate about
-  code you have not opened — read the file first."
-- **Grant micro-autonomy** to prevent it pausing to ask: "for minor choices, pick a
-  reasonable option and note it; ask only for scope changes."
-
-### `critic` — Opus
-
-Opus follows instructions **literally** — exactly like Sonnet, it does not generalize an
-instruction from one item to another and does not infer requests you didn't make. Give it
-a complete, explicitly-scoped spec, then autonomy over the *how*:
-
-- **Full task spec up front.** State the deliverable, the acceptance criteria verbatim,
-  and explicit scope; let it plan its own verification procedure.
-- **Put trigger conditions on capabilities**: it tends to favor reasoning over tool
-  calls, so say *when* to re-run tests, *when* to read files ("never speculate about code
-  you have not opened — read the file first").
-- For review-type work, demand **coverage first**: "report every issue you find,
-  including uncertain and low-severity ones, with a confidence level and severity each —
-  a separate step will filter." Conservative-reporting instructions silently suppress
-  its (excellent) recall.
-- **Scope classifies; adjudication filters.** The finding-scope axis (quality.md §3a)
-  never licenses the critic to report less — keep the coverage demand above verbatim;
-  the lead's adjudication (§3b) is the filter. Include the decision-context pack in the
-  ticket's INPUTS for any target-repo code review.
-- Fable's only appearance in the critic role is the **final escalation rung**: if `critic`
-  still fails at Opus, the last ladder step (`routing.escalation.tiers`,
-  `routing.overrides.fable_ceiling_uses`) respawns it with `model: fable` — not a standing
-  dual-lens gate (that mechanism no longer exists, ADR-0002; the gate's non-Claude angle is
-  the Standards lens, cross-provider.md Use 1). Phrase that one ticket Fable-style: goal, not
-  steps, same as the architect section above.
-
-## Worked examples
-
-### Scout ticket
-
-```
-OBJECTIVE: Inventory every place the legacy LegacyHttpClient client is referenced in /opt/acme-shop.
-CONTEXT: We are planning its replacement with the new typed API client; the architect needs an
-  exact usage map to size the migration. Completeness matters more than speed.
-INPUTS: Repository root /opt/acme-shop. Search terms: "LegacyHttpClient", "legacyHttpClient", "legacy_http".
-TOOLS: Grep for the sweeps, Read for classification context. (Scout has no shell access.)
-STEPS: 1) Grep each term case-insensitively across src/. 2) Second angle: Grep the
-  import path "lib/legacy-http" across src/ — a file importing it that matched no term
-  in step 1 is a hit too. 3) For each hit record file, line, and enclosing
-  function/component name (Read the surrounding lines). 4) Classify each hit:
-  api-call | type-import | comment | config. 5) Reconcile the angles: list every file
-  found by only one of them.
-OUTPUT: A markdown table: | file | line | symbol | class |. One row per hit, sorted by file.
-  Example row: | src/lib/crm.ts | 42 | syncOrder() | api-call |
-  After the table, one line per single-angle-only file (or "reconciliation: both angles agree").
-BOUNDARIES: Read-only. Do not propose fixes. Do not search outside /opt/acme-shop.
-ACCEPTANCE: Every term searched (show the search patterns run); both angles run and
-  reconciled, single-angle-only files listed; zero-hit terms reported as zero; table
-  parses; classifications only from the four allowed values.
-If the repo layout does not match these instructions, return NEEDS_CLARIFICATION with what
-you actually saw. Do not guess. "0 matches" is a valid, successful answer.
+```text
+The documents named in INPUTS outrank this ticket. If two statements cannot both
+be true, implement neither side of the conflict; return NEEDS_CLARIFICATION with
+both statements and their locations. Complete only the unaffected work.
 ```
 
-### Builder ticket
+Silence, a narrower scope, or an inconvenient instruction is not a contradiction.
 
-```
-OBJECTIVE: Implement rate limiting on the two public POST endpoints in src/api/routes.ts
-  per the approved plan below.
-CONTEXT: Part of the hardening pass the user requested; architect's plan is authoritative.
-  This will be adversarially verified against the acceptance criteria, so verify before
-  reporting.
-INPUTS: Plan: <paste architect's relevant section verbatim>. Files: src/api/routes.ts,
-  src/middleware/. Existing middleware pattern to imitate: src/middleware/auth.ts.
-  Pre-agreed seams (from the spec): the `POST /orders` handler and the
-  `POST /orders/:id/cancel` handler — test each through its HTTP boundary, not the
-  internal rate-limit counter.
-TOOLS: Read the files named above before editing. Implement via the `tdd` skill (Skill
-  tool) on the seams listed above — red before green, one seam at a time. Typecheck
-  regularly as you go, after each seam (`npm run typecheck`); run the full suite once, at
-  the end (`npm test`), and include the verbatim output.
-OUTPUT: Edited code + a summary listing each file changed and why, plus the verbatim tail
-  of the test run.
-BOUNDARIES: Apply to BOTH endpoints (this instruction covers every endpoint listed, not
-  just the first). Do not touch the schema, do not add config options beyond the plan, no
-  refactoring outside the named files. If the plan conflicts with the code you find, stop
-  and report the conflict instead of improvising. The documents named in INPUTS outrank
-  this ticket: where an instruction here contradicts the plan or the spec's seams — two
-  statements that cannot both be true, not silence and not a strained reading — stop on
-  the affected part, implement neither side, report both statements with their locations,
-  and deliver whatever the conflict does not touch.
-ACCEPTANCE: `npm test` and `npm run typecheck` pass (output shown); both endpoints
-  covered by a new test each; no files outside src/api/ and src/middleware/ modified;
-  matches the plan's chosen algorithm.
+**Pass references, not transcripts.** A dependent ticket names the upstream
+artifact, changed files, and at most a short statement of the established fact.
+The artifact on disk remains authoritative.
+
+**Acceptance must be adversarially gradeable.** Prefer invariants and executable
+checks:
+
+```text
+OBJECTIVE: Add rate limiting to the two public POST handlers.
+CONTEXT: The public API must reject bursts before downstream writes occur.
+INPUTS: src/api/routes.ts; docs/rate-limit-policy.md.
+OUTPUT: Production implementation and focused regression tests.
+TOOLS: read, grep, edit, bash.
+BOUNDARIES: Do not change persistence schema or unrelated endpoints. The
+documents named in INPUTS outrank this ticket; report any contradiction.
+ACCEPTANCE: Both handlers return 429 after the documented limit; requests below
+the limit retain their previous responses; the named focused test command exits 0.
 ```
 
-### Critic ticket
+A criterion that would remain green after breaking the behavior is not evidence
+and must be rewritten before publication.
 
-```
-OBJECTIVE: Verify the deliverable below against its acceptance criteria. Try to refute it.
-INPUTS: <the deliverable — diff, report, or plan> + ACCEPTANCE: <criteria verbatim from
-  the producing ticket> + decision-context pack (target-repo code only; quality.md §3a —
-  assembled by scout, never by the producer).
-TOOLS: Re-run the deterministic checks yourself (tests, typecheck); read the touched
-  files; do not trust the producer's claimed outputs.
-OUTPUT: The verdict schema from quality.md — per-criterion PASS/FAIL with evidence,
-  findings ranked by severity with confidence, overall verdict.
-BOUNDARIES: Judge only against the stated criteria and correctness. Report gaps, not
-  style preferences. Flag only issues that affect correctness or the stated requirements;
-  everything else is a note, not a finding.
-```
+## Native delivery, application, and rejection
 
-## Parallelization rules
+A sealed producer runs in native OMP task isolation. The sealed OMP profile keeps
+global `task.isolation.apply=false` and `task.isolation.merge=patch`: the producer
+returns a patch and only the strict structured result requested by the sealed task.
+A successful writer result names every changed repository file in `changedFiles`;
+a read-only result names none. Producer patches are never auto-applied.
 
-- Independent tickets → **one message, multiple Agent calls** (they run concurrently).
-- Mind the delegation floor cost: each worker pays fixed overhead before doing any work.
-  Merging two tiny tickets into one bounded brief is often cheaper than spawning twice —
-  split for independence and clarity, not for smallness itself.
-- 3–5 concurrent workers is the healthy default; more only for uniform sweeps (then
-  prefer a Workflow pipeline — see SKILL.md).
-- Sequential only when output B genuinely consumes output A (design → build → verify).
-- Do not have workers message each other or share files as a coordination channel; all
-  coordination flows through you. (This binds the one-shot and Workflow channels. The
-  experimental team channel sanctions exactly two worker↔worker patterns — structured
-  hypothesis debate and a one-round interface handshake, cc the lead — defined in
-  references/teams.md; everything else there still flows through the lead.)
+Before any repository mutation, the runtime validates every producer patch
+individually: it must parse, remain within `writablePaths`, and have a normalized
+`changedFiles` set exactly equal to the files observed in that patch. Deletes,
+renames, copies, and symbolic-link operations are forbidden. The runtime then
+checks the combined wave patch and applies it centrally and atomically; it never
+accepts a whole-wave diff as attribution for an individual producer.
+
+`pocock_pregate` runs each declared `verification` command by direct `argv`
+execution, applies the configured per-ticket (per-attempt) diff ceiling, and
+checks the combined diff. A `ui_live` ticket also receives an attempt-bound challenge token:
+the host must record successful `open` and then `exercise` evidence against that
+same token, target, and criterion through `browser` or `xdev`. Worker assertions,
+screenshots without the challenge, and evidence from another attempt do not
+satisfy it.
+
+Any invalid patch, scope or `changedFiles` mismatch, failed verification, diff
+ceiling breach, missing UI proof, or rejected quality gate rejects the affected
+attempt or wave. The runtime rolls back centrally applied patches before repair or
+blocking; do not manually merge, preserve, or replay producer changes. Retries are
+authorized only by the current state card and use a fresh attempt.
+
+After a passing pre-gate, the runtime dispatches exactly the fixed Standards, Spec,
+and Critic lenses. Their reports are adjudicated centrally; the Critic is the sole
+PASS/FAIL verdict, and acceptance additionally requires no surviving blocking
+Standards or Spec finding.

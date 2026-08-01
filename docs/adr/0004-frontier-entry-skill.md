@@ -1,9 +1,14 @@
 # ADR-0004 — Фронтирный вход: отдельный тонкий скилл `/orchestrate-frontier`
 
+> **Актуализация имён (2026-08-01):** публичные головы переименованы в `/orchestrate`
+> и `/orchestrate-frontier`; их каталоги — `skill/orchestrate/` и
+> `skill/orchestrate-frontier/`. Ранее они временно именовались `/pocock-run` и `/pocock-frontier`.
+> Это переименование интерфейса, решение ADR не менялось.
+
 - **Статус:** принято
 - **Дата:** 2026-07-19
 - **Решил:** владелец репозитория (сессия обсуждения 2026-07-19)
-- **Затрагивает:** новый `skill/orchestrate-frontier/SKILL.md`;
+- **Затрагивает:** `skill/orchestrate-frontier/SKILL.md`;
   `skill/orchestrate/SKILL.md` (указатель в «The build spine»);
   `references/quality.md` §7 (поле `entry`); `install.sh`;
   `tools/validate_config.py` (охват соседних скиллов)

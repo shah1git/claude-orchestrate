@@ -1,11 +1,12 @@
-# Cross-provider: non-Claude workers (Codex, Gemini/Antigravity, Grok, Kimi)
+# Historical reference: retired external provider lanes
 
-Source of truth for the cross-provider layer. Portability floor: with **no cross-provider
-surface present**, every routing decision resolves to a Claude worker and the run completes
-normally — the skill degrades to self-contained Claude-only. When surfaces ARE present,
-non-Claude workers are **regular members of the routing pool**, routed by the lead's judgment
-under the standing mandate below — not an exception layer. Judgment-driven, never silent:
-every non-Claude route carries a named reason into telemetry.
+> **NON-OPERATIONAL SINCE ADR-0009 (2026-08-01).** This file preserves the
+> invocation research behind pre-v35 runs. It is not a dispatch guide. Active
+> `/orchestrate` and `/orchestrate-frontier` use only native OMP `task`, role aliases,
+> and `.omp/agents`; no instruction below may be followed by an active run.
+
+The remaining text is an unchanged historical record of the former cross-provider
+layer.
 
 > **ONE INVOCATION MODEL (v26, owner 2026-07-22): every external lane is invoked by its own
 > VENDOR CONSOLE UTILITY (CLI).** There is no bridge and no MCP server in the lane path any
