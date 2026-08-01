@@ -697,6 +697,63 @@ def test_executed_input_and_model_fallback_are_not_accepted(tmp_path, cwd, confi
     assert state["attempts"][assignment["attemptId"]]["tokens"] == 7
 
 
+
+def test_failed_task_preserves_transport_error_in_attempt_and_report(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    sealed = seal(cwd, state_dir, prepare(cwd, state_dir, admit_frontier(cwd, state_dir, response), config), "producer")
+    state = authoritative(cwd, state_dir, sealed["card"]["runId"])
+    assignment = state["attempts"][sealed["attemptIds"][0]]
+    result = normalized_result(tmp_path, assignment)
+    transport_error = "EBUSY: resource busy or locked, rmdir '/tmp/omp-overlay'"
+    result.update(
+        {
+            "observedResolvedModel": None,
+            "exitCode": None,
+            "aborted": False,
+            "error": transport_error,
+        }
+    )
+
+    settled = runtime.command_record_result(
+        cwd,
+        state_dir,
+        {
+            **reference(sealed["card"]),
+            "dispatchId": sealed["dispatchId"],
+            "toolCallId": "producer-transport-error-tool",
+            "input": sealed["taskInput"],
+            "details": {"results": [result]},
+            "content": {},
+            "isError": True,
+        },
+        config,
+    )
+
+    persisted = authoritative(cwd, state_dir, settled["card"]["runId"])
+    attempt = persisted["attempts"][assignment["attemptId"]]
+    assert attempt["availabilityEvidence"] == {
+        "declaredModel": assignment["declaredModel"],
+        "observedModel": None,
+        "fallback": False,
+        "error": transport_error,
+        "exitCode": None,
+        "aborted": False,
+        "isError": True,
+        "reason": transport_error,
+    }
+
+    report = runtime.command_report(cwd, state_dir, {"runId": settled["card"]["runId"]})["report"]
+    assert report["participants"][0]["failureReason"] == transport_error
+    assert report["failures"] == [
+        {
+            "attemptId": assignment["attemptId"],
+            "ticketId": assignment["ticketId"],
+            "status": "availability_failed",
+            "outcome": "FAILED_AVAILABILITY",
+            "reason": transport_error,
+        }
+    ]
+
 def test_ui_evidence_failure_spends_two_quality_attempts_then_blocks(tmp_path, cwd, config):
     ticket = mechanical_ticket(ui_live=True)
     state_dir, response = start(tmp_path, cwd, config, "frontier")

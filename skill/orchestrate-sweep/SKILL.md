@@ -105,3 +105,7 @@ attempt by role or lens and write its actually used `observedModel`; when it is 
 show `n/a` with the declared model and witness rather than claiming that model ran.
 Preserve every `n/a`; show token aggregates only where coverage is complete. Never
 recompute or estimate missing Lead or Watchdog Advisor usage.
+Show raw status plus outcome for every attempt. For every non-null participant
+`failureReason`, include the exact reason in that row's Outcome. If the report's
+`failures` array contains a reason not represented by a participant row, render a
+separate failures block; a raw status without its witnessed cause is incomplete.

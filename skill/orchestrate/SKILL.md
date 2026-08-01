@@ -169,3 +169,7 @@ instead of claiming the declared model ran. Report fallback/mismatch witnesses, 
 status plus outcome, one row per attempt, duration/requests when witnessed, and token
 aggregates only where coverage is complete. Preserve every `n/a`; never recompute tokens
 from provider billing fields or infer missing Lead/Watchdog Advisor usage.
+For every non-null participant `failureReason`, include the exact reason in that row's
+Outcome. If the report's `failures` array contains a reason not represented by a
+participant row, render a separate failures block; a raw status without its witnessed
+cause is incomplete.

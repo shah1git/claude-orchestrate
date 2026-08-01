@@ -292,17 +292,23 @@ are not a ticket count.
 Render one row per attempt, grouped by role or lens, with dispatch order preserved inside
 each group:
 
-| Role / lens | Ticket | Attempt | Agent | Lane | Declared model | Model actually used | Time / requests | Tokens | Outcome |
+| Role / lens | Ticket | Attempt | Agent | Lane | Declared model | Model actually used | Time / requests | Tokens | Outcome / failure reason |
 |---|---|---|---|---|---|---|---|---|---|
 | builder | T1 | P1T1A1 | pocock-builder-task | @task | openai-codex/gpt-5.6-terra | openai-codex/gpt-5.6-terra | 1m 40s / 12 | 61 133 | ACCEPTED |
 | builder | T1 | P1T1A2 (retry) | pocock-builder-slow | @slow | anthropic/claude-fable-5 | anthropic/claude-fable-5 | 2m 10s / 18 | 78 520 | ACCEPTED |
 | Standards | T1 | L1Standards | pocock-reviewer-smol | @smol | google-antigravity/gemini-3.6-flash | n/a (`DECLARED_ONLY`) | n/a | n/a | PENDING |
+| builder | T2 | P1T2A1 | pocock-builder-task | @task | openai-codex/gpt-5.6-terra | n/a (`DECLARED_ONLY`) | 27s / 0 | n/a | `availability_failed` / `FAILED_AVAILABILITY` — `EBUSY: resource busy or locked` |
 
 Use `observedModel` for “Model actually used”; never present `declaredModel` as observed.
 When no observed witness exists, show `n/a` plus the report's witness
 (`DECLARED_ONLY`). Keep retries as separate rows rather than summing or hiding them.
 Tokens and requests come only from the immutable `pocock_report`. A surface that returns
 no figure gets `n/a` — never an invented number.
+For every attempt, show both raw `status` and normalized `outcome`. When participant
+`failureReason` is non-null, append that exact witnessed cause in the same row. If the
+report's `failures` array contains any reason not represented by a participant row, add
+a separate failures block. A failure status without its available cause is not an
+informative ledger.
 
 **Block 2 — session analytics.** The aggregate metrics:
 

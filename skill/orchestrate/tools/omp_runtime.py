@@ -516,6 +516,7 @@ def participant(attempt: dict[str, Any], kind: str) -> dict[str, Any]:
         "tokens": displayed_tokens(attempt.get("tokens")),
         "durationMs": exact_nonnegative_integer(attempt.get("durationMs")),
         "requests": exact_nonnegative_integer(attempt.get("requests")),
+        "failureReason": attempt_failure_reason(attempt),
     }
 
 
@@ -2267,26 +2268,35 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
             attempt["modelFallback"] = model_fallback
             if tokens is not None:
                 observed_tokens += tokens
-            if request.get("isError") is True or model_fallback is True or model_base(observed_model) != model_base(declared_model):
-                reason = f"model/transport availability substitution for {expected_id}"
+            is_error = request.get("isError") is True
+            task_error = nullable_text(raw_result.get("error"))
+            aborted = raw_result.get("aborted") is True
+            exit_code = raw_result.get("exitCode")
+            model_substituted = model_fallback is True or model_base(observed_model) != model_base(declared_model)
+            reason = None
+            if is_error or model_substituted:
+                reason = task_error
+                if reason is None:
+                    reason = (
+                        f"model/transport availability substitution for {expected_id}"
+                        if model_substituted
+                        else f"task tool reported an error for {expected_id}"
+                    )
+            elif aborted or exit_code not in (None, 0):
+                reason = task_error or f"worker did not settle successfully for {expected_id}"
+
+            if reason is not None:
                 availability_failures.append(reason)
                 attempt["status"] = "availability_failed"
+                attempt["failureReason"] = reason
                 attempt["availabilityEvidence"] = {
                     "declaredModel": declared_model,
                     "observedModel": observed_model,
                     "fallback": model_fallback,
-                    "reason": reason,
-                }
-                failed_attempt_ids.append(expected_id)
-                continue
-            if raw_result.get("aborted") is True or raw_result.get("exitCode") not in (None, 0):
-                reason = f"worker did not settle successfully for {expected_id}"
-                availability_failures.append(reason)
-                attempt["status"] = "availability_failed"
-                attempt["availabilityEvidence"] = {
-                    "declaredModel": declared_model,
-                    "observedModel": observed_model,
-                    "fallback": model_fallback,
+                    "error": task_error,
+                    "exitCode": exit_code,
+                    "aborted": aborted,
+                    "isError": is_error,
                     "reason": reason,
                 }
                 failed_attempt_ids.append(expected_id)
