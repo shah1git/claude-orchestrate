@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import pocockControl, { isDispatchPlaceholder, uiEvidenceBinding } from "./index";
+import pocockControl, { isDispatchPlaceholder, pinRuntimeForSession, uiEvidenceBinding } from "./index";
 
 const context = "Pocock sealed dispatch";
 const task = "Pocock sealed dispatch placeholder";
@@ -18,6 +18,55 @@ describe("isDispatchPlaceholder", () => {
 		expect(isDispatchPlaceholder({ context, tasks: [{ task, agent: "scout" }] })).toBe(false);
 		expect(isDispatchPlaceholder({ context, tasks: [{ task, agent: "task", effort: "high" }] })).toBe(false);
 	});
+});
+
+describe("runtime pin lifecycle", () => {
+	test("a new OMP session can pin updated runtime bytes without weakening the original session", () => {
+		const firstSession = `runtime-pin-first-${Date.now()}`;
+		const secondSession = `runtime-pin-second-${Date.now()}`;
+		const original = { path: "/opt/pocock/omp_runtime.py", sha256: "a".repeat(64) };
+		const updated = { path: original.path, sha256: "b".repeat(64) };
+
+		pinRuntimeForSession(firstSession, original);
+		pinRuntimeForSession(firstSession, original);
+		expect(() => pinRuntimeForSession(firstSession, updated)).toThrow(/same OMP session pinned/);
+
+		pinRuntimeForSession(secondSession, updated);
+		expect(() => pinRuntimeForSession(firstSession, updated)).toThrow(/same OMP session pinned/);
+	});
+});
+
+test("a runtime-mismatched mirror can be replaced by a new run", async () => {
+	const manifestFingerprint = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+	const harness = adapterHarness((command, request) => {
+		if (command === "status") {
+			return {
+				card: {
+					...card("old-run", 4, "ready"),
+					manifestFingerprint,
+					nextActions: [],
+					blockedReason: "effective Pocock runtime differs",
+					runtimeMismatch: { expected: "old", observed: "new" },
+				},
+			};
+		}
+		if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+		if (command === "start") return { card: { ...card("new-run", 0, "frontier_admission"), manifestFingerprint } };
+		throw new Error(`Unexpected core command ${command}: ${JSON.stringify(request)}`);
+	});
+
+	const status = await harness.status("status-mismatched", { runId: "old-run" }, undefined, undefined, harness.context);
+	expect(status.isError).not.toBe(true);
+	const entered = await harness.enter(
+		"enter-after-mismatch",
+		{ entry: "frontier", objective: "Restart from durable provenance" },
+		undefined,
+		undefined,
+		harness.context,
+	);
+
+	expect(entered.isError).not.toBe(true);
+	expect(harness.requests.findLast(request => request.command === "start")?.request.entry).toBe("frontier");
 });
 
 type CoreRequest = {
@@ -149,6 +198,7 @@ function adapterHarness(respond?: CoreResponder) {
 		prepare: tools.get("pocock_prepare")!.execute,
 		transition: tools.get("pocock_transition")!.execute,
 		report: tools.get("pocock_report")!.execute,
+		status: tools.get("pocock_status")!.execute,
 		sessionStart: hooks.get("session_start")!,
 		toolCall: hooks.get("tool_call")!,
 		toolResult: hooks.get("tool_result")!,

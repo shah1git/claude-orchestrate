@@ -27,6 +27,10 @@ If a runtime call fails, the state hash disagrees, or the card gives a `blockedR
 stop dispatching and surface the block. To inspect or resume an existing run, use
 `pocock_status` with its `runId` and continue only from the returned card. The adapter
 hydrates the session mirror itself.
+If `pocock_status` returns `runtimeMismatch` or the core reports `runtime_changed`,
+use that run only for `status`/`report`. Do not claim that a fresh session can resume
+the same run. Open a new OMP session so it can pin the installed runtime, then start a
+new run through the appropriate public head from the durable approved provenance.
 
 ## Admission choice
 

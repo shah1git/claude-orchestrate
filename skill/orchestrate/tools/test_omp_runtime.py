@@ -659,6 +659,32 @@ def test_stale_revision_and_corrupt_state_fail_closed(tmp_path, cwd, config):
     assert error.value.code == "state_corrupt"
 
 
+def test_runtime_drift_blocks_hydration_and_mutation_but_not_status(tmp_path, cwd, config, monkeypatch):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    card = response["card"]
+    pinned = authoritative(cwd, state_dir, card["runId"])["runtimeFingerprint"]
+    changed = "f" * 64 if pinned != "f" * 64 else "e" * 64
+    monkeypatch.setattr(runtime, "runtime_fingerprint", lambda: changed)
+
+    with pytest.raises(runtime.RuntimeFailure) as hydration_error:
+        runtime.command_hydrate(cwd, state_dir, reference(card))
+    assert hydration_error.value.code == "runtime_changed"
+    assert hydration_error.value.details == {"expected": pinned, "observed": changed}
+
+    with pytest.raises(runtime.RuntimeFailure) as mutation_error:
+        runtime.command_transition(cwd, state_dir, {**reference(card), "action": "cancel"})
+    assert mutation_error.value.code == "runtime_changed"
+    status = runtime.command_status(cwd, state_dir, {"runId": card["runId"]})
+    assert status["card"]["phase"] == card["phase"]
+    assert status["card"]["nextActions"] == []
+    assert status["card"]["blockedReason"] == (
+        "effective Pocock runtime differs from the runtime that created this run; "
+        "inspect it with status/report and start a new run"
+    )
+    assert status["card"]["runtimeMismatch"] == {"expected": pinned, "observed": changed}
+
+
 def test_known_vendor_uses_same_native_agent_contract_without_attestation(tmp_path, cwd, config):
     state_dir, response = start(tmp_path, cwd, config, "frontier", models=model_manifest(smol_vendor="xAI"))
     response = prepare(cwd, state_dir, admit_frontier(cwd, state_dir, response), config)

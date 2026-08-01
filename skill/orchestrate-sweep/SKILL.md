@@ -35,6 +35,10 @@ in the next mutating request. Invoke only an action in `nextActions`. On a faile
 witness disagreement, state-hash mismatch, or `blockedReason`, stop dispatching and surface
 the block. Use `pocock_status` to resume a run and continue only from its returned card.
 Never call the runtime CLI directly or issue a worker `task` outside the sealed dispatch.
+If `pocock_status` returns `runtimeMismatch` or the core reports `runtime_changed`,
+use that run only for `status`/`report`. Do not claim that a fresh session can resume
+the same run. Open a new OMP session so it can pin the installed runtime, then enter a
+new sweep and repeat the owner-witness admission against the unchanged sealed ledger.
 
 ## Sweep admission
 

@@ -26,7 +26,8 @@ const DISPATCH_PHASES: Readonly<Record<string, "producer" | "lenses">> = {
 	lens_dispatch_pending: "lenses",
 };
 
-let pinnedRuntime: { path: string; sha256: string } | undefined;
+type RuntimePin = { path: string; sha256: string };
+const pinnedRuntimes = new Map<string, RuntimePin>();
 type JsonRecord = Record<string, unknown>;
 
 type RuntimeContext = {
@@ -273,7 +274,21 @@ function runtimeCandidates(): string[] {
 	];
 }
 
-function discoverRuntime(): string {
+export function pinRuntimeForSession(sessionId: string, observed: RuntimePin): void {
+	const pinned = pinnedRuntimes.get(sessionId);
+	if (!pinned) {
+		pinnedRuntimes.set(sessionId, observed);
+		return;
+	}
+	if (pinned.path === observed.path && pinned.sha256 === observed.sha256) return;
+	throw new PocockError(
+		`Pocock runtime changed after the same OMP session pinned it: ${pinned.path}; ` +
+			`expected sha256=${pinned.sha256}, observed sha256=${observed.sha256}. ` +
+			"Open a new OMP session to adopt the updated runtime; start a new Pocock run if the core reports runtime_changed.",
+	);
+}
+
+function discoverRuntime(sessionId: string): string {
 	const candidates = runtimeCandidates();
 	const override = process.env.POCOCK_RUNTIME?.trim();
 	let selected: string | undefined;
@@ -292,13 +307,7 @@ function discoverRuntime(): string {
 	if (!selected) throw new PocockError(`Pocock runtime was not found. Candidates: ${candidates.join(", ")}`);
 
 	const sha256 = createHash("sha256").update(readFileSync(selected)).digest("hex");
-	if (!pinnedRuntime) {
-		pinnedRuntime = { path: selected, sha256 };
-	} else if (pinnedRuntime.path !== selected || pinnedRuntime.sha256 !== sha256) {
-		throw new PocockError(
-			`Pocock runtime changed after this extension session pinned it: ${pinnedRuntime.path}`,
-		);
-	}
+	pinRuntimeForSession(sessionId, { path: selected, sha256 });
 	return selected;
 }
 
@@ -803,7 +812,7 @@ async function invokeCore(
 	request: JsonRecord,
 	signal?: AbortSignal,
 ): Promise<JsonRecord> {
-	const runtime = discoverRuntime();
+	const runtime = discoverRuntime(context.sessionManager.getSessionId());
 	const requestDirectory = mkdtempSync(join(tmpdir(), "pocock-core-"));
 	const requestPath = join(requestDirectory, "request.json");
 	try {
@@ -932,7 +941,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 				const response = await serialize(async () => {
 					const runtime = asRuntimeContext(context);
 					const current = activeFor(runtime);
-					if (current && !isTerminal(current.card)) {
+					if (current && !isTerminal(current.card) && !isRecord(current.card.runtimeMismatch)) {
 						throw new PocockError(
 							`Pocock run ${current.card.runId} is still active in phase ${current.card.phase}; resume or cancel it before entering another run`,
 						);

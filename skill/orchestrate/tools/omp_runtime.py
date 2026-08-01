@@ -56,6 +56,10 @@ TERMINAL_PHASES = {"completed", "cancelled"}
 CLASS_ORDER = {"mechanical": 0, "skilled": 1, "judgment": 2}
 CLASS_ROLE = {"mechanical": "scout", "skilled": "builder", "judgment": "architect"}
 EFFORT = {"mechanical": "lo", "skilled": "med", "judgment": "hi"}
+RUNTIME_CHANGED_MESSAGE = (
+    "effective Pocock runtime differs from the runtime that created this run; "
+    "inspect it with status/report and start a new run"
+)
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{5,127}$")
 PATCH_FORBIDDEN_PREFIXES = (".git",)
 DEFAULT_PATCH_BYTES_MAX = 16 * 1024 * 1024
@@ -267,6 +271,22 @@ def with_lock(lock_path: Path):
     return handle
 
 
+
+def run_runtime_mismatch(state: dict[str, Any]) -> dict[str, str | None] | None:
+    expected = nullable_text(state.get("runtimeFingerprint"))
+    observed = runtime_fingerprint()
+    return None if expected == observed else {"expected": expected, "observed": observed}
+
+
+def require_run_runtime(state: dict[str, Any]) -> None:
+    mismatch = run_runtime_mismatch(state)
+    fail(
+        mismatch is not None,
+        "runtime_changed",
+        RUNTIME_CHANGED_MESSAGE,
+        **(mismatch or {}),
+    )
+
 def mutate(
     cwd: Path,
     explicit_state_dir: str | None,
@@ -277,6 +297,7 @@ def mutate(
     state_path, lock_path = state_paths(cwd, explicit_state_dir, run_id)
     with with_lock(lock_path):
         state = read_state(state_path)
+        require_run_runtime(state)
         revision = request.get("revision")
         fail(
             not isinstance(revision, int) or revision != state.get("revision"),
@@ -2942,7 +2963,13 @@ def command_status(cwd: Path, explicit_state_dir: str | None, request: dict[str,
     state_path, lock_path = state_paths(cwd, explicit_state_dir, run_id)
     with with_lock(lock_path):
         state = read_state(state_path)
-    return output(state)
+        mismatch = run_runtime_mismatch(state)
+    response = output(state)
+    if mismatch is not None:
+        response["card"]["nextActions"] = []
+        response["card"]["blockedReason"] = RUNTIME_CHANGED_MESSAGE
+        response["card"]["runtimeMismatch"] = mismatch
+    return response
 
 
 def command_hydrate(cwd: Path, explicit_state_dir: str | None, request: dict[str, Any]) -> dict[str, Any]:
@@ -2950,6 +2977,7 @@ def command_hydrate(cwd: Path, explicit_state_dir: str | None, request: dict[str
     state_path, lock_path = state_paths(cwd, explicit_state_dir, run_id)
     with with_lock(lock_path):
         state = read_state(state_path)
+        require_run_runtime(state)
     fail(request.get("revision") != state["revision"] or request.get("stateHash") != state["stateHash"], "state_mismatch", "OMP session mirror does not match authoritative run state", currentRevision=state["revision"], currentStateHash=state["stateHash"])
     return output(state)
 

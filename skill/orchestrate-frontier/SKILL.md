@@ -29,6 +29,10 @@ call returns a state card; carry its `runId`, newest `revision`, and `stateHash`
 into the next mutating runtime request. Invoke only an action named in that card's
 `nextActions`. A failed call, witness disagreement, or `blockedReason` stops dispatching.
 Use `pocock_status` to resume an existing run and continue only from the card it returns.
+If `pocock_status` returns `runtimeMismatch` or the core reports `runtime_changed`,
+use that run only for `status`/`report`. Do not claim that a fresh session can resume
+the same run. Open a new OMP session so it can pin the installed runtime, then enter a
+new frontier run from the same durable approved provenance.
 
 ## Frontier admission
 
