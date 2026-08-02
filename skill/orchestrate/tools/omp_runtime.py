@@ -58,7 +58,7 @@ CLASS_ROLE = {"mechanical": "scout", "skilled": "builder", "judgment": "architec
 EFFORT = {"mechanical": "lo", "skilled": "med", "judgment": "hi"}
 RUNTIME_CHANGED_MESSAGE = (
     "effective Pocock runtime differs from the runtime that created this run; "
-    "inspect it with status/report and start a new run"
+    "inspect it with status and start a new run"
 )
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{5,127}$")
 PATCH_FORBIDDEN_PREFIXES = (".git",)
@@ -471,26 +471,6 @@ def displayed_tokens(value: Any) -> int | str:
     return tokens if tokens is not None else "n/a"
 
 
-def attempt_outcome(status: str | None) -> str:
-    return {
-        "accepted": "ACCEPTED",
-        "recorded": "ACCEPTED",
-        "availability_failed": "FAILED_AVAILABILITY",
-        "pregate_failed": "FAILED_PRE_GATE",
-        "clarification_failed": "FAILED_PRE_GATE",
-        "review_failed": "FAILED_REVIEW",
-    }.get(status, "PENDING")
-
-
-def attempt_failure_kind(status: str | None) -> str | None:
-    return {
-        "availability_failed": "availability",
-        "pregate_failed": "pre_gate",
-        "clarification_failed": "pre_gate",
-        "review_failed": "review",
-    }.get(status)
-
-
 def attempt_model_witness(attempt: dict[str, Any]) -> str:
     observed = nullable_text(attempt.get("observedModel"))
     declared = nullable_text(attempt.get("declaredModel"))
@@ -504,61 +484,25 @@ def attempt_model_witness(attempt: dict[str, Any]) -> str:
     return "OBSERVED_MISMATCH"
 
 
-def participant(attempt: dict[str, Any], kind: str) -> dict[str, Any]:
-    status = nullable_text(attempt.get("status"))
-    declared_agent = nullable_text(attempt.get("declaredAgent")) or nullable_text(attempt.get("agent"))
+def compact_actor(attempt: dict[str, Any], kind: str) -> dict[str, Any]:
     ordinal = (
         attempt.get("attemptOrdinal", attempt.get("qualityAttempt"))
         if kind == "producer"
         else attempt.get("reviewAttemptOrdinal", attempt.get("attemptOrdinal"))
     )
-    fallback = attempt.get("modelFallback")
     return {
         "dispatchName": nullable_text(attempt.get("dispatchName")),
         "attemptId": nullable_text(attempt.get("attemptId")),
         "ticketId": nullable_text(attempt.get("ticketId")),
-        "kind": kind,
         "role": nullable_text(attempt.get("role")),
         "lens": nullable_text(attempt.get("lens")),
         "attemptOrdinal": exact_nonnegative_integer(ordinal),
-        "lane": nullable_text(attempt.get("lane")),
         "laneAlias": nullable_text(attempt.get("laneAlias")),
-        "rank": exact_nonnegative_integer(attempt.get("rank")),
-        "declaredAgent": declared_agent,
         "declaredModel": nullable_text(attempt.get("declaredModel")),
-        "observedAgent": nullable_text(attempt.get("observedAgent")),
-        "observedAgentSource": nullable_text(attempt.get("observedAgentSource")),
         "observedModel": nullable_text(attempt.get("observedModel")),
-        "modelFallback": fallback if isinstance(fallback, bool) else None,
         "modelWitness": attempt_model_witness(attempt),
-        "status": status,
-        "outcome": attempt_outcome(status),
-        "failureKind": attempt_failure_kind(status),
+        "status": nullable_text(attempt.get("status")),
         "tokens": displayed_tokens(attempt.get("tokens")),
-        "durationMs": exact_nonnegative_integer(attempt.get("durationMs")),
-        "requests": exact_nonnegative_integer(attempt.get("requests")),
-        "failureReason": attempt_failure_reason(attempt),
-    }
-
-
-def compact_actor(attempt: dict[str, Any], kind: str) -> dict[str, Any]:
-    row = participant(attempt, kind)
-    return {
-        field: row[field]
-        for field in (
-            "dispatchName",
-            "attemptId",
-            "ticketId",
-            "role",
-            "lens",
-            "attemptOrdinal",
-            "laneAlias",
-            "declaredModel",
-            "observedModel",
-            "modelWitness",
-            "status",
-            "tokens",
-        )
     }
 
 
@@ -580,106 +524,6 @@ def dispatch_card(state: dict[str, Any]) -> dict[str, Any] | None:
         "kind": pending["kind"],
         "status": nullable_text(pending.get("status")),
         "actors": actors,
-    }
-
-
-def attempt_failure_reason(attempt: dict[str, Any]) -> str | None:
-    direct = nullable_text(attempt.get("failureReason")) or nullable_text(attempt.get("abandonReason"))
-    if direct is not None:
-        return direct
-    evidence = attempt.get("availabilityEvidence")
-    return nullable_text(evidence.get("reason")) if isinstance(evidence, dict) else None
-
-
-def aggregate_participants(rows: list[dict[str, Any]]) -> dict[str, int | None]:
-    tokens = [exact_nonnegative_integer(row.get("tokens")) for row in rows]
-    witnessed = [value for value in tokens if value is not None]
-    return {
-        "attempts": len(rows),
-        "tokenWitnessedAttempts": len(witnessed),
-        "tokens": sum(witnessed) if len(witnessed) == len(rows) else None,
-    }
-
-
-def report_group_key(value: Any) -> str:
-    return nullable_text(value) or "n/a"
-
-
-def grouped_participant_aggregates(
-    rows: list[dict[str, Any]],
-    key_for: Callable[[dict[str, Any]], str],
-) -> dict[str, dict[str, int | None]]:
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for row in rows:
-        groups.setdefault(key_for(row), []).append(row)
-    return {key: aggregate_participants(group) for key, group in groups.items()}
-
-
-def count_participant_values(rows: list[dict[str, Any]], field: str) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for row in rows:
-        key = report_group_key(row.get(field))
-        counts[key] = counts.get(key, 0) + 1
-    return counts
-
-
-def report(state: dict[str, Any]) -> dict[str, Any]:
-    records: list[tuple[dict[str, Any], dict[str, Any]]] = []
-    for kind, field in (("producer", "attempts"), ("lens", "lensAttempts")):
-        collection = state.get(field)
-        if not isinstance(collection, dict):
-            continue
-        for attempt in collection.values():
-            if isinstance(attempt, dict):
-                records.append((attempt, participant(attempt, kind)))
-
-    participants = [row for _attempt, row in records]
-    token_values = [exact_nonnegative_integer(row.get("tokens")) for row in participants]
-    witnessed_tokens = [value for value in token_values if value is not None]
-    task_attempt_tokens = {
-        row["attemptId"]: exact_nonnegative_integer(row.get("tokens"))
-        for row in participants
-        if isinstance(row.get("attemptId"), str)
-    }
-    lead = copy.deepcopy(state.get("lead")) if isinstance(state.get("lead"), dict) else {}
-    lead["tokens"] = None
-    lead["coverageScope"] = "task_attempts_only"
-
-    return {
-        "schemaVersion": 1,
-        "runId": state.get("runId"),
-        "entry": state.get("entry"),
-        "phase": state.get("phase"),
-        "objective": state.get("objective"),
-        "unit": "input+output+cacheWrite; cacheRead excluded",
-        "lead": lead,
-        "participants": participants,
-        "coverage": {
-            "taskAttempts": len(participants),
-            "totalKnownTokens": sum(witnessed_tokens) if len(witnessed_tokens) == len(participants) else None,
-            "tokenWitnessedAttempts": len(witnessed_tokens),
-            "tokenCoverageComplete": len(witnessed_tokens) == len(participants),
-        },
-        "taskAttemptTokens": task_attempt_tokens,
-        "byRole": grouped_participant_aggregates(participants, lambda row: report_group_key(row.get("role"))),
-        "byLane": grouped_participant_aggregates(participants, lambda row: report_group_key(row.get("lane"))),
-        "byModel": grouped_participant_aggregates(
-            participants,
-            lambda row: report_group_key(row.get("observedModel") if row.get("observedModel") is not None else row.get("declaredModel")),
-        ),
-        "statuses": count_participant_values(participants, "status"),
-        "outcomes": count_participant_values(participants, "outcome"),
-        "failures": [
-            {
-                "attemptId": row["attemptId"],
-                "ticketId": row["ticketId"],
-                "status": row["status"],
-                "outcome": row["outcome"],
-                "reason": attempt_failure_reason(attempt),
-            }
-            for attempt, row in records
-            if row["failureKind"] is not None
-        ],
     }
 
 
@@ -759,7 +603,7 @@ def validate_effective_omp_settings(cwd: Path) -> None:
         "task.isolation.apply": False,
         "task.isolation.merge": "patch",
         "task.maxRecursionDepth": 1,
-        "retry.modelFallback": False,
+        "retry.modelFallback": True,
     }
     mismatches = []
     for key, value in expected.items():
@@ -888,7 +732,7 @@ def command_start(cwd: Path, explicit_state_dir: str | None, request: dict[str, 
     objective = require_text(request.get("objective"), "objective")
     session_id = require_text(request.get("sessionId"), "sessionId")
     manifest_fingerprint = require_text(request.get("manifestFingerprint"), "manifestFingerprint")
-    lead = require_mapping(request.get("lead"), "lead")
+    fail("lead" in request, "invalid_request", "lead is no longer accepted")
     models = require_mapping(request.get("models"), "models")
     fail(not models, "model_manifest_invalid", "OMP supplied no resolved Pocock lane models")
 
@@ -900,11 +744,7 @@ def command_start(cwd: Path, explicit_state_dir: str | None, request: dict[str, 
         for field in ("role", "provider", "resolvedModel", "vendor", "family"):
             require_text(witness.get(field), f"models.{lane}.{field}")
         fail(normalize_vendor(witness["vendor"]) not in known, "model_manifest_invalid", f"lane {lane} has an unknown vendor")
-        fail(witness.get("resolvedModelIsFallback") is True, "model_manifest_invalid", "a role manifest cannot begin on a fallback model")
 
-    lead_witness = {key: lead.get(key) for key in ("provider", "id", "resolvedModel", "vendor", "family")}
-    for field, value in lead_witness.items():
-        require_text(value, f"lead.{field}")
 
     run_id = f"pocock-{int(time.time())}-{uuid.uuid4().hex[:12]}"
     state_path, lock_path = state_paths(cwd, explicit_state_dir, run_id)
@@ -920,7 +760,6 @@ def command_start(cwd: Path, explicit_state_dir: str | None, request: dict[str, 
             "objective": objective,
             "cwd": str(cwd.resolve()),
             "sessionId": session_id,
-            "lead": lead_witness,
             "models": models,
             "manifestFingerprint": manifest_fingerprint,
             "configFingerprint": config_fingerprint(config),
@@ -1873,8 +1712,6 @@ def command_prepare(cwd: Path, explicit_state_dir: str | None, request: dict[str
                 "family": selected["witness"]["family"],
                 "status": "prepared",
                 "tokens": None,
-                "durationMs": None,
-                "requests": None,
                 "observedAgent": None,
                 "observedAgentSource": None,
                 "observedModel": None,
@@ -2363,8 +2200,6 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
             fail(model_base(declared_model) != model_base(attempt["declaredModel"]), "model_mismatch", f"declared model differs from sealed model for {expected_id}")
             tokens = usage_tokens(raw_result)
             attempt["tokens"] = tokens
-            attempt["durationMs"] = exact_nonnegative_integer(raw_result.get("durationMs"))
-            attempt["requests"] = exact_nonnegative_integer(raw_result.get("requests"))
             attempt["observedAgent"] = nullable_text(observed_agent)
             attempt["observedAgentSource"] = nullable_text(observed_agent_source)
             attempt["observedModel"] = nullable_text(observed_model)
@@ -2375,16 +2210,9 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
             task_error = nullable_text(raw_result.get("error"))
             aborted = raw_result.get("aborted") is True
             exit_code = raw_result.get("exitCode")
-            model_substituted = model_fallback is True or model_base(observed_model) != model_base(declared_model)
             reason = None
-            if is_error or model_substituted or task_error is not None:
-                reason = task_error
-                if reason is None:
-                    reason = (
-                        f"model/transport availability substitution for {expected_id}"
-                        if model_substituted
-                        else f"task tool reported an error for {expected_id}"
-                    )
+            if is_error or task_error is not None:
+                reason = task_error or f"task tool reported an error for {expected_id}"
             elif aborted or exit_code not in (None, 0):
                 reason = task_error or f"worker did not settle successfully for {expected_id}"
 
@@ -2836,8 +2664,6 @@ def command_prepare_lenses(cwd: Path, explicit_state_dir: str | None, request: d
                     "family": selected["witness"]["family"],
                     "status": "prepared",
                     "tokens": None,
-                    "durationMs": None,
-                    "requests": None,
                     "observedAgent": None,
                     "observedAgentSource": None,
                     "observedModel": None,
@@ -3032,12 +2858,6 @@ def command_accept(cwd: Path, explicit_state_dir: str | None, request: dict[str,
     return output(state, telemetry=telemetry_events)
 
 
-def command_report(cwd: Path, explicit_state_dir: str | None, request: dict[str, Any]) -> dict[str, Any]:
-    run_id = validate_run_id(request.get("runId"))
-    state_path, lock_path = state_paths(cwd, explicit_state_dir, run_id)
-    with with_lock(lock_path):
-        state = read_state(state_path)
-    return {"report": report(state)}
 
 
 def command_status(cwd: Path, explicit_state_dir: str | None, request: dict[str, Any]) -> dict[str, Any]:
@@ -3098,7 +2918,6 @@ def build_parser() -> argparse.ArgumentParser:
         "adjudicate",
         "accept",
         "status",
-        "report",
         "hydrate",
     ))
     request_group = parser.add_mutually_exclusive_group(required=True)
@@ -3136,7 +2955,6 @@ def main(argv: list[str] | None = None) -> int:
             "adjudicate": lambda: command_adjudicate(cwd, args.state_dir, request),
             "accept": lambda: command_accept(cwd, args.state_dir, request, config),
             "status": lambda: command_status(cwd, args.state_dir, request),
-            "report": lambda: command_report(cwd, args.state_dir, request),
             "hydrate": lambda: command_hydrate(cwd, args.state_dir, request),
         }
         result = handlers[args.command]()

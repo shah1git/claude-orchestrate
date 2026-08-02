@@ -13,4 +13,4 @@ task:
     apply: false
     merge: patch
 retry:
-  modelFallback: false
+  modelFallback: true

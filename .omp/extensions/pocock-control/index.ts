@@ -39,7 +39,6 @@ type RuntimeContext = {
 		getBranch(): unknown[];
 	};
 	models: {
-		current(): unknown;
 		resolve(spec: string): unknown;
 		family(model: unknown): string;
 	};
@@ -102,7 +101,6 @@ interface ActiveRun {
 	laneModels: Record<string, LaneModel>;
 	agents: Map<string, DeclaredAgent>;
 	manifestFingerprint: string;
-	participationReportRead: boolean;
 	dispatch?: SealedDispatch;
 }
 
@@ -635,8 +633,6 @@ function normalizedTaskResult(
 		patchPath: stringOrNull(result.patchPath),
 		branchName: stringOrNull(result.branchName),
 	};
-	if (Object.hasOwn(result, "durationMs")) normalized.durationMs = result.durationMs;
-	if (Object.hasOwn(result, "requests")) normalized.requests = result.requests;
 	return normalized;
 }
 
@@ -700,9 +696,6 @@ function renderDispatchStatus(status: string): string {
 	}
 }
 
-function renderModelWitness(witness: string): string {
-	return witness;
-}
 
 function renderDispatchActor(actor: JsonRecord): string[] {
 	const dispatchName = displayValue(actor.dispatchName);
@@ -718,7 +711,7 @@ function renderDispatchActor(actor: JsonRecord): string[] {
 	const tokens = displayValue(actor.tokens);
 	return [
 		`${dispatchName} → ticket ${ticketId} · role ${role} · lens ${lens} · attempt ${attemptOrdinal} · lane ${laneAlias}`,
-		`  declared ${declaredModel} · observed ${observedModel} · witness ${renderModelWitness(modelWitness)}`
+		`  declared ${declaredModel} · observed ${observedModel} · witness ${modelWitness}`
 			+ ` · status ${renderDispatchStatus(status)} · tokens ${tokens}`,
 	];
 }
@@ -800,7 +793,6 @@ function commitCard(
 		agents: options.agents ?? previous?.agents ?? new Map(),
 		manifestFingerprint: options.manifestFingerprint ?? previous?.manifestFingerprint ?? card.manifestFingerprint,
 		dispatch: reset ? undefined : previous?.dispatch,
-		participationReportRead: previous?.card.runId === card.runId && previous.participationReportRead,
 	};
 	updateDispatchWidget(pi, context, card);
 	vetoReason = undefined;
@@ -918,20 +910,10 @@ export default function pocockControl(pi: ExtensionAPI): void {
 	pi.on("session_stop", (event, context) => {
 		const runtime = asRuntimeContext(context);
 		const run = activeFor(runtime);
-		if (!run || vetoReason || event.stop_hook_active) return;
+		if (!run || vetoReason || event.stop_hook_active || isTerminal(run.card)) return;
 		const nudgeKey = `${event.session_id}:${event.turn_id}`;
 		if (lastStopNudge === nudgeKey) return;
 		lastStopNudge = nudgeKey;
-		if (isTerminal(run.card)) {
-			if (run.participationReportRead) return;
-			return {
-				continue: true,
-				additionalContext:
-					`Pocock run ${run.card.runId} is terminal in phase ${run.card.phase}, but its participation report ` +
-					"was not read in this OMP session. Call pocock_report exactly once for this run and use the immutable " +
-					"report as the participation appendix to the final answer.",
-			};
-		}
 		return {
 			continue: true,
 			additionalContext:
@@ -960,9 +942,6 @@ export default function pocockControl(pi: ExtensionAPI): void {
 					}
 					const manifest = await observeManifest(pi, runtime, signal);
 					const laneModels = manifest.laneModels;
-					const leadModel = runtime.models.current();
-					if (!leadModel) throw new PocockError("OMP has no current lead model for pocock_enter");
-					const lead = observeModel(leadModel, runtime.models);
 					const start = await invokeCore(
 						pi,
 						runtime,
@@ -972,7 +951,6 @@ export default function pocockControl(pi: ExtensionAPI): void {
 							entry: params.entry,
 							objective: params.objective,
 							sessionId: runtime.sessionManager.getSessionId(),
-							lead,
 							models: laneModels,
 							manifestFingerprint: manifest.manifestFingerprint,
 						},
@@ -1143,26 +1121,6 @@ export default function pocockControl(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerTool({
-		name: "pocock_report",
-		label: "Pocock report",
-		description: "Read the immutable participation report for a current or historical Pocock run.",
-		parameters: z.object({ runId: z.string().min(1).optional() }),
-		async execute(_toolCallId, params, signal, _onUpdate, context) {
-			try {
-				const runtime = asRuntimeContext(context);
-				const current = activeFor(runtime);
-				const runId = params.runId ?? current?.card.runId ?? locateMirror(runtime).card?.runId;
-				if (!runId) throw new PocockError("pocock_report requires a runId when no mirrored run is active");
-				const response = await invokeCore(pi, runtime, "report", { runId }, signal);
-				if (!isRecord(response.report)) throw new PocockError("Pocock core report did not return a report object");
-				if (current?.card.runId === runId) current.participationReportRead = true;
-				return toolSuccess({ report: response.report });
-			} catch (error) {
-				return toolFailure(error);
-			}
-		},
-	});
 
 	pi.registerTool({
 		name: "pocock_status",

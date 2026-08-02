@@ -43,7 +43,7 @@ Repository OMP defaults and task invariants:
   task.isolation.merge: patch
   task.maxRecursionDepth: 1
   task.maxConcurrency: 6
-  retry.modelFallback: false
+  retry.modelFallback: true
 EOF
 }
 
@@ -80,7 +80,8 @@ require_omp_sources() {
 # invoked from any repository, so their control-plane invariants cannot depend
 # on this checkout's project-local .omp/config.yml. OMP owns its global
 # configuration writer; using it preserves unrelated user settings while making
-# batch transport, isolation, and no-fallback semantics effective elsewhere.
+# batch transport and isolation settings effective elsewhere while enabling
+# fallback model resolution.
 configure_omp_runtime() {
   command -v omp >/dev/null 2>&1 || {
     echo "OMP CLI is required for the native Pocock contour" >&2
@@ -97,7 +98,7 @@ configure_omp_runtime() {
   omp config set task.isolation.merge patch >/dev/null
   omp config set task.maxRecursionDepth 1 >/dev/null
   omp config set task.maxConcurrency 6 >/dev/null
-  omp config set retry.modelFallback false >/dev/null
+  omp config set retry.modelFallback true >/dev/null
   echo "configured OMP native task invariants in ${OMP_BASE_DIR}/config.yml"
 }
 

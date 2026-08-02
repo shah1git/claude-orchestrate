@@ -66,7 +66,9 @@ test("a runtime-mismatched mirror can be replaced by a new run", async () => {
 	);
 
 	expect(entered.isError).not.toBe(true);
-	expect(harness.requests.findLast(request => request.command === "start")?.request.entry).toBe("frontier");
+	const start = harness.requests.findLast(request => request.command === "start");
+	expect(start?.request).toMatchObject({ entry: "frontier" });
+	expect(start?.request).not.toHaveProperty("lead");
 });
 
 type CoreRequest = {
@@ -140,7 +142,6 @@ function adapterHarness(respond?: CoreResponder) {
 			getBranch: () => [],
 		},
 		models: {
-			current: () => ({ provider: "openai", id: "gpt-5" }),
 			resolve: () => ({ provider: "openai", id: "gpt-5" }),
 			family: () => "gpt-5",
 		},
@@ -197,7 +198,6 @@ function adapterHarness(respond?: CoreResponder) {
 		enter: tools.get("pocock_enter")!.execute,
 		prepare: tools.get("pocock_prepare")!.execute,
 		transition: tools.get("pocock_transition")!.execute,
-		report: tools.get("pocock_report")!.execute,
 		status: tools.get("pocock_status")!.execute,
 		sessionStart: hooks.get("session_start")!,
 		toolCall: hooks.get("tool_call")!,
@@ -251,7 +251,7 @@ describe("Sweep adapter requests", () => {
 	});
 });
 
-describe("Pocock participation observability", () => {
+describe("Pocock live dispatch observability", () => {
 	test("projects opaque participation actors only into the dispatch widget", async () => {
 		const actor = {
 			dispatchName: "P/L • opaque-name",
@@ -404,7 +404,7 @@ describe("Pocock participation observability", () => {
 		expect(harness.widgets.findLast(value => value.name === "pocock-dispatch")?.content).toBeUndefined();
 	});
 
-	test("preserves own zero task timing and request fields while leaving absent fields absent", async () => {
+	test("preserves task agent and model witnesses", async () => {
 		const sealedTaskInput = {
 			context: "sealed result transport",
 			tasks: [
@@ -448,7 +448,14 @@ describe("Pocock participation observability", () => {
 				input: sealedTaskInput,
 				details: {
 					results: [
-						{ output: "first", durationMs: 0, requests: 0 },
+						{
+							output: "first",
+							agent: "producer-1",
+							agentSource: "omp",
+							resolvedModel: "anthropic/claude-4",
+							resolvedModelIsFallback: true,
+							tokens: 0,
+						},
 						{ output: "second" },
 					],
 				},
@@ -459,98 +466,53 @@ describe("Pocock participation observability", () => {
 
 		const record = harness.requests.findLast(value => value.command === "record-task-result")?.request;
 		const results = ((record?.details as Record<string, unknown>).results as Array<Record<string, unknown>>);
-		expect(results[0]).toMatchObject({ attemptId: "attempt-1", durationMs: 0, requests: 0 });
-		expect(results[1]).not.toHaveProperty("durationMs");
-		expect(results[1]).not.toHaveProperty("requests");
-	});
-
-	test("reads reports from active, mirrored, and explicit runs without mutation or manifest inspection", async () => {
-		const harness = adapterHarness((command, request) => {
-			if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
-			if (command === "start") return card("active-run", 0, "producer_dispatch_pending");
-			if (command === "report") return { report: { runId: request.runId, participation: [] } };
-			throw new Error(`Unexpected core command ${command}`);
+		expect(results[0]).toMatchObject({
+			attemptId: "attempt-1",
+			declaredAgent: "task",
+			declaredModel: null,
+			observedAgent: "producer-1",
+			observedAgentSource: "omp",
+			observedResolvedModel: "anthropic/claude-4",
+			resolvedModelIsFallback: true,
+			tokens: 0,
 		});
-
-		await harness.enter("enter-report", { entry: "full", objective: "Read report" }, undefined, undefined, harness.context);
-		const entryCount = harness.entries.length;
-		const metadataCount = harness.requests.filter(value => value.command === "metadata").length;
-		const active = await harness.report("report-active", {}, undefined, undefined, harness.context);
-		const mirroredContext = {
-			...harness.context,
-			sessionManager: {
-				getSessionId: () => "mirror-session",
-				getBranch: () => [{
-					type: "custom",
-					customType: "pocock-state",
-					data: card("mirrored-run", 4, "producer_dispatch_pending"),
-				}],
-			},
-		};
-		const mirrored = await harness.report("report-mirrored", {}, undefined, undefined, mirroredContext);
-		const historical = await harness.report("report-historical", { runId: "historical-run" }, undefined, undefined, harness.context);
-
-		expect(active.details).toEqual({ report: { runId: "active-run", participation: [] } });
-		expect(mirrored.details).toEqual({ report: { runId: "mirrored-run", participation: [] } });
-		expect(historical.details).toEqual({ report: { runId: "historical-run", participation: [] } });
-		expect(harness.requests.filter(value => value.command === "report").map(value => value.request)).toEqual([
-			{ runId: "active-run" },
-			{ runId: "mirrored-run" },
-			{ runId: "historical-run" },
-		]);
-		expect(harness.entries).toHaveLength(entryCount);
-		expect(harness.requests.filter(value => value.command === "metadata")).toHaveLength(metadataCount);
 	});
 
-	test("keeps a terminal run alive until its participation report is read in the current session", async () => {
-		const runId = "terminal-report-run";
-		const harness = adapterHarness((command, request) => {
+	test("gates nonterminal sessions but allows terminal sessions to stop", async () => {
+		const runId = "stop-run";
+		const harness = adapterHarness(command => {
 			if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
 			if (command === "start") return card(runId, 0, "ready");
 			if (command === "transition") return card(runId, 1, "completed");
-			if (command === "report") return { report: { runId: request.runId, participants: [] } };
 			throw new Error(`Unexpected core command ${command}`);
 		});
 
-		await harness.enter("enter-terminal-report", { entry: "full", objective: "Deliver report" }, undefined, undefined, harness.context);
+		await harness.enter("enter-stop", { entry: "full", objective: "Finish cleanly" }, undefined, undefined, harness.context);
+		const pending = await harness.sessionStop(
+			{ session_id: "stop-session", turn_id: "nonterminal", stop_hook_active: false },
+			harness.context,
+		);
+		expect(pending).toEqual({
+			continue: true,
+			additionalContext: expect.stringContaining("still nonterminal"),
+		});
+
 		await harness.transition(
-			"complete-terminal-report",
+			"complete-stop",
 			{ runId, revision: 0, stateHash: `${runId}-0-hash`, action: "complete" },
 			undefined,
 			undefined,
 			harness.context,
 		);
-
-		const missing = await harness.sessionStop(
-			{ session_id: "terminal-report-session", turn_id: "before-report", stop_hook_active: false },
+		const requestCount = harness.requests.length;
+		const terminal = await harness.sessionStop(
+			{ session_id: "stop-session", turn_id: "terminal", stop_hook_active: false },
 			harness.context,
 		);
-		expect(missing).toEqual({
-			continue: true,
-			additionalContext: expect.stringContaining("pocock_report"),
-		});
-
-		await harness.report("read-terminal-report", { runId }, undefined, undefined, harness.context);
-		const delivered = await harness.sessionStop(
-			{ session_id: "terminal-report-session", turn_id: "after-report", stop_hook_active: false },
-			harness.context,
-		);
-		expect(delivered).toBeUndefined();
+		expect(terminal).toBeUndefined();
+		expect(harness.requests).toHaveLength(requestCount);
 	});
 
-	test("surfaces core report errors through normal toolFailure", async () => {
-		const harness = adapterHarness(command => (
-			command === "report" ? new Error("report core unavailable") : { omp: { lanes: { producer: { alias: "producer" } } } }
-		));
-
-		const result = await harness.report("report-failure", { runId: "historical-run" }, undefined, undefined, harness.context);
-
-		expect(result).toMatchObject({
-			isError: true,
-			details: { error: "report core unavailable" },
-		});
-		expect(result.content).toEqual([{ type: "text", text: "report core unavailable" }]);
-	});
 });
 
 describe("uiEvidenceBinding", () => {

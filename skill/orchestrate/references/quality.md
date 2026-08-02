@@ -277,63 +277,24 @@ have the judge reason first, then emit the verdict; a reviewer told to find gaps
 always find some — hence the calibration line in critic's prompt ("only gaps that affect
 correctness or the stated requirements; the rest are notes").
 
-## 5. Session scorecard — worker ledger + analytics
+## 5. Final ledger — tickets and acceptance evidence
 
-The orchestrator's final report closes with two blocks, rendered in the user's language
-(standing user directive, 2026-07-09: per-agent results, «красиво и информативно»).
-The per-return completion cards (SKILL.md Step 5) are the running commentary; the ledger
-is the end-of-run aggregation — both, not either.
+The final answer includes a ledger by ticket, rendered in the user's language. It accounts
+for deliverables and acceptance, not an execution-history export:
 
-**Block 1 — worker ledger.** Start with this definition in the user's language:
-an **attempt** is one runtime-sealed OMP Task dispatch. Every producer execution, every
-Standards / Spec / Critic lens dispatch, and every retry is a separate attempt; attempts
-are not a ticket count.
+| Ticket | Delivered outcome | Final acceptance state | Factual acceptance evidence |
+|---|---|---|---|
+| T1 | concise description of the delivered result | ACCEPTED / FAILED / BLOCKED | sealed verification result; accepted UI evidence when required; or the exact unresolved blocker |
 
-Render one row per attempt, grouped by role or lens, with dispatch order preserved inside
-each group:
+Include every ticket in the run. For each, record the delivered outcome, its final
+acceptance state, and only the factual evidence that supports that state. Never invent
+evidence or replace a failed or missing check with a participant's assertion.
 
-| Role / lens | Ticket | Attempt | Agent | Lane | Declared model | Model actually used | Time / requests | Tokens | Outcome / failure reason |
-|---|---|---|---|---|---|---|---|---|---|
-| builder | T1 | P1T1A1 | pocock-builder-task | @task | openai-codex/gpt-5.6-terra | openai-codex/gpt-5.6-terra | 1m 40s / 12 | 61 133 | ACCEPTED |
-| builder | T1 | P1T1A2 (retry) | pocock-builder-slow | @slow | anthropic/claude-fable-5 | anthropic/claude-fable-5 | 2m 10s / 18 | 78 520 | ACCEPTED |
-| Standards | T1 | L1Standards | pocock-reviewer-smol | @smol | google-antigravity/gemini-3.6-flash | n/a (`DECLARED_ONLY`) | n/a | n/a | PENDING |
-| builder | T2 | P1T2A1 | pocock-builder-task | @task | openai-codex/gpt-5.6-terra | n/a (`DECLARED_ONLY`) | 27s / 0 | n/a | `availability_failed` / `FAILED_AVAILABILITY` — `EBUSY: resource busy or locked` |
-
-Use `observedModel` for “Model actually used”; never present `declaredModel` as observed.
-When no observed witness exists, show `n/a` plus the report's witness
-(`DECLARED_ONLY`). Keep retries as separate rows rather than summing or hiding them.
-Tokens and requests come only from the immutable `pocock_report`. A surface that returns
-no figure gets `n/a` — never an invented number.
-For every attempt, show both raw `status` and normalized `outcome`. When participant
-`failureReason` is non-null, append that exact witnessed cause in the same row. If the
-report's `failures` array contains any reason not represented by a participant row, add
-a separate failures block. A failure status without its available cause is not an
-informative ledger.
-
-**Block 2 — session analytics.** The aggregate metrics:
-
-| Metric | Value |
-|---|---|
-| Subtasks delegated (by agent) | e.g. 2 scout / 3 builder / 1 architect |
-| Passed verification first try | n/m |
-| Retried after FAIL | n (with one-line reasons) |
-| Escalated (tier raised or taken over) | n |
-| Verification coverage | verified deliverables / deliverables shipped into the result |
-| Deterministic evidence present | yes/no per code deliverable |
-| Token cost by tier | e.g. fable 480k (58%) / opus 210k (25%) / sonnet 95k (12%) / haiku 40k (5%) |
-| Provider split | e.g. anthropic 82% / openai 12% / google 6% — the quota-spread mandate made visible |
-| Parallelism gain | sum of worker durations vs. wall-clock, when ≥ 2 workers ran concurrently |
-
-Close the block with one to three sentences of *interpretation*, not merely numbers —
-only observations the ledger's own data supports (the §4 connective-tissue rule applies
-to analytics prose too): which class burned the most quota and whether its tier earned
-it; whether retries cluster on one agent type (a ticket-quality signal — §7 thresholds);
-how much Claude quota the cross-provider share offloaded.
-
-Standing targets: verification coverage = 100% for production code; first-try pass at or
-above the config.yaml `thresholds.first_try_pass_min` floor (persistently lower means
-tickets are underspecified — fix the tickets, not the workers); escalations are a routing
-signal (recurring scout escalations = you are giving Haiku judgment work).
+Do not turn this ledger into an execution-history export: it does not require or enumerate
+individual attempts, roles, agents, declared or observed models, fallback witnesses,
+tokens, durations, requests, provider splits, or session analytics. `observedModel`,
+`modelFallback`, the agent witness, and witnessed token usage remain runtime operational
+telemetry on the live card and settlement, not a public-report contract.
 
 ## 6. Honest failure protocol
 

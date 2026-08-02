@@ -82,9 +82,11 @@ OMP:
 
 Файлы [`.omp/agents/pocock-*.md`](.omp/agents/) связывают класс работы с ролью и
 объявляют допустимые инструменты. Конкретную модель каждой роли выбирает профиль OMP.
-Смена GPT, Gemini, Claude, Grok или другой модели не требует переписывать скиллы.
-Перед каждым прогоном адаптер разрешает роли через OMP и сохраняет свидетеля
-`provider/id/family`; fallback или незаявленная подмена модели отклоняется.
+Эффективный профиль разрешает fallback (`retry.modelFallback: true`), поэтому OMP может
+разрешить для роли другую модель. Адаптер передаёт `observedModel`
+(`provider/id/family`) и `modelFallback`, а runtime сохраняет их в live-карточке и
+settlement как оперативную телеметрию; fallback или несовпадение с объявленной моделью
+сами по себе не отклоняют попытку и не влияют на гейты приёмки.
 
 Маршрут выводится из сигналов тикета:
 
@@ -110,8 +112,8 @@ runId · revision · stateHash · configFingerprint · manifestFingerprint · ph
 Полное состояние хранится в `$XDG_STATE_HOME/pocock-omp` (по умолчанию
 `~/.local/state/pocock-omp`) отдельно для каждого рабочего каталога. Карточка
 аутентифицирована HMAC-ключом с правами `0600` и закрепляет снимок
-runtime/config/manifests. Устаревшая ревизия, неверный witness, повреждённый
-файл, неизвестная модель, незапечатанный `task`, неверный результат или
+runtime/config/manifests. Устаревшая ревизия, повреждённый файл, подделанное
+свидетельство, незапечатанный `task`, неверный результат или
 повторный вызов переводят протокол в отказ, а не в догадку.
 
 OMP-сессия хранит только зеркало карточки `pocock-state`. После возобновления сессии
@@ -126,7 +128,7 @@ submodule, должны иметь разрешимый `HEAD`. Исправны
 Пин runtime имеет две области жизни. Адаптер закрепляет байты отдельно для каждой
 OMP-сессии, поэтому новая сессия может увидеть штатно установленное обновление.
 Карточка закрепляет `runtimeFingerprint` на весь прогон: после изменения runtime
-старый прогон доступен только через `status`/`report`, получает пустой
+старый прогон доступен только через `status`, получает пустой
 `nextActions` и не возобновляется. Работа продолжается новым прогоном из того же
 долговечного провенанса.
 
@@ -200,7 +202,7 @@ task.isolation.apply: false
 task.isolation.merge: patch
 task.maxRecursionDepth: 1
 task.maxConcurrency: 6
-retry.modelFallback: false
+retry.modelFallback: true
 ```
 
 Эти значения закрепляют patch-capture как общий режим OMP в этом контуре:
@@ -266,8 +268,10 @@ bash scripts/verify-install.sh --offline
 ### 与模型解耦
 
 路由只使用 OMP 角色 `@smol`、`@task`、`@advisor`、`@slow`。具体模型由 OMP
-配置决定；技能中没有固定的 GPT、Gemini、Claude 或 Grok 名称。适配器在运行时记录
-实际 `provider/id/family`，拒绝 fallback 或未声明的替换。
+配置决定；技能中没有固定的 GPT、Gemini、Claude 或 Grok 名称。有效 OMP 配置启用
+`retry.modelFallback: true`，允许 OMP 为角色解析不同模型。适配器将实际
+`provider/id/family`、`observedModel` 和 `modelFallback` 记录为运行时遥测；
+fallback 或与声明模型不一致本身不会拒绝一次尝试，也不影响验收门。
 
 ### 状态、隔离与质量门
 
@@ -320,10 +324,12 @@ Native batched OMP `task` is the only worker transport.
 ### Model-independent routing
 
 Routing targets OMP roles `@smol`, `@task`, `@advisor`, and `@slow`; the OMP profile
-selects the concrete model behind each role. Agent definitions in
-[`.omp/agents/`](.omp/agents/) declare capabilities and tool allowlists. The adapter
-records the model actually resolved by OMP and refuses fallback or undeclared
-substitution.
+selects the concrete model behind each role. The effective profile enables
+`retry.modelFallback: true`, so OMP may resolve a different model for a role. Agent
+definitions in [`.omp/agents/`](.omp/agents/) declare capabilities and tool allowlists.
+The adapter passes the resolved `provider/id/family`, `observedModel`, and
+`modelFallback` to the runtime for live-card and settlement operational telemetry; a
+fallback or declared-model mismatch alone neither rejects an attempt nor affects acceptance gates.
 
 ### Durable state, isolation, and gates
 

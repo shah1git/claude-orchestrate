@@ -188,7 +188,7 @@ verify_omp_config() {
   if yaml_task_isolation_value merge patch "${file}"; then ok "task.isolation.merge: patch"; else bad "task.isolation.merge должен быть patch"; fi
   if yaml_section_value task maxRecursionDepth 1 "${file}"; then ok "task.maxRecursionDepth: 1"; else bad "task.maxRecursionDepth должен быть 1"; fi
   if yaml_section_value task maxConcurrency 6 "${file}"; then ok "task.maxConcurrency: 6"; else bad "task.maxConcurrency должен быть 6"; fi
-  if yaml_section_value retry modelFallback false "${file}"; then ok "retry.modelFallback: false"; else bad "retry.modelFallback должен быть false"; fi
+  if yaml_section_value retry modelFallback true "${file}"; then ok "retry.modelFallback: true"; else bad "retry.modelFallback должен быть true"; fi
 }
 
 verify_effective_omp_config() {
@@ -359,7 +359,7 @@ cat <<'EOF'
     task.isolation.mode: auto (дефолт); явный изолирующий backend тоже допустим
     task.isolation.apply: false; task.isolation.merge: patch
     task.maxRecursionDepth: 1; task.maxConcurrency: 6
-    retry.modelFallback: false
+    retry.modelFallback: true
 EOF
 
 for name in orchestrate orchestrate-frontier orchestrate-sweep; do

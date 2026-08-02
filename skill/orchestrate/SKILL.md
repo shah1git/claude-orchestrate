@@ -28,7 +28,7 @@ stop dispatching and surface the block. To inspect or resume an existing run, us
 `pocock_status` with its `runId` and continue only from the returned card. The adapter
 hydrates the session mirror itself.
 If `pocock_status` returns `runtimeMismatch` or the core reports `runtime_changed`,
-use that run only for `status`/`report`. Do not claim that a fresh session can resume
+use that run only for `status`. Do not claim that a fresh session can resume
 the same run. Open a new OMP session so it can pin the installed runtime, then start a
 new run through the appropriate public head from the durable approved provenance.
 
@@ -163,19 +163,11 @@ Synthesize only after the runtime authorizes `begin_synthesis`, then request `co
 from the resulting card. A nonterminal run is never completed merely because a session
 ends.
 
-Before a session presents the final answer for any terminal run, call
-`pocock_report` exactly once in that same OMP session, even if another session
-already read it. Use its immutable report as the participation appendix to the
-final answer. Before the ledger, define **attempt** in
-the user's language: one runtime-sealed OMP Task dispatch; every producer execution,
-Standards / Spec / Critic lens dispatch, and retry is a separate attempt, not another
-ticket. Group ledger rows by role or lens and write the model actually used in that role
-from `observedModel`; if it is absent, show `n/a` with the declared model and witness
-instead of claiming the declared model ran. Report fallback/mismatch witnesses, raw
-status plus outcome, one row per attempt, duration/requests when witnessed, and token
-aggregates only where coverage is complete. Preserve every `n/a`; never recompute tokens
-from provider billing fields or infer missing Lead/Watchdog Advisor usage.
-For every non-null participant `failureReason`, include the exact reason in that row's
-Outcome. If the report's `failures` array contains a reason not represented by a
-participant row, render a separate failures block; a raw status without its witnessed
-cause is incomplete.
+For every terminal run, present the final ledger by ticket in the user's language.
+For each ticket, state the delivered outcome, its final acceptance state, and the factual
+acceptance evidence: the applicable sealed verification result, accepted UI evidence where
+required, and any unresolved blocker or failure. This ledger is an account of deliverables
+and acceptance, not an execution-history export: do not require or list individual attempts,
+roles, agents, declared or observed models, fallback witnesses, tokens, durations, or requests.
+`observedModel` and `modelFallback` remain operational telemetry on the live card and settlement, not a
+final-answer requirement. Never manufacture evidence.

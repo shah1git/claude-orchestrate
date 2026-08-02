@@ -28,7 +28,7 @@ PROVENANCE = {
 }
 
 
-def model_manifest(*, smol_vendor: str = "Google") -> dict[str, dict[str, object]]:
+def model_manifest(*, smol_vendor: str = "Google", fallback: bool = False) -> dict[str, dict[str, object]]:
     definitions = {
         "smol": ("@smol", "google", "gemini-fixture", smol_vendor, "gemini"),
         "task": ("@task", "openai", "gpt-fixture", "OpenAI", "gpt"),
@@ -44,7 +44,7 @@ def model_manifest(*, smol_vendor: str = "Google") -> dict[str, dict[str, object
             "resolvedModel": f"{provider}/{model}",
             "vendor": vendor,
             "family": family,
-            "resolvedModelIsFallback": False,
+            "resolvedModelIsFallback": fallback,
         }
         for lane, (role, provider, model, vendor, family) in definitions.items()
     }
@@ -71,13 +71,6 @@ def start(tmp_path: Path, cwd: Path, config: dict, entry: str, *, models: dict |
             "entry": entry,
             "objective": f"{entry} fixture objective",
             "sessionId": "fixture-session",
-            "lead": {
-                "provider": "openai",
-                "id": "lead-fixture",
-                "resolvedModel": "openai/lead-fixture",
-                "vendor": "OpenAI",
-                "family": "gpt",
-            },
             "manifestFingerprint": "fixture-agent-manifests",
             "models": models or model_manifest(),
         },
@@ -283,7 +276,6 @@ def settle_producer(
     sealed: dict,
     config: dict,
     *,
-    fallback: bool = False,
     include_patch: bool = True,
 ) -> dict:
     state = authoritative(cwd, state_dir, sealed["card"]["runId"])
@@ -291,7 +283,7 @@ def settle_producer(
     content = {}
     for attempt_id in sealed["attemptIds"]:
         assignment = state["attempts"][attempt_id]
-        results.append(normalized_result(tmp_path, assignment, fallback=fallback, include_patch=include_patch))
+        results.append(normalized_result(tmp_path, assignment, include_patch=include_patch))
         content[attempt_id] = producer_result()
     card = sealed["card"]
     return runtime.command_record_result(
@@ -363,14 +355,17 @@ def settle_lenses(
     critic_verdict: str = "PASS",
     standards_blocking: bool = False,
     critic_fail_ticket: str | None = None,
-    fallback: bool = False,
+    availability_error: str | None = None,
 ) -> dict:
     state = authoritative(cwd, state_dir, sealed["card"]["runId"])
     results = []
     content = {}
     for attempt_id in sealed["attemptIds"]:
         assignment = state["lensAttempts"][attempt_id]
-        results.append(normalized_result(tmp_path, assignment, fallback=fallback))
+        result = normalized_result(tmp_path, assignment)
+        if availability_error is not None:
+            result["error"] = availability_error
+        results.append(result)
         findings = []
         if standards_blocking and assignment["lens"] == "Standards":
             findings.append({
@@ -436,6 +431,24 @@ def test_load_request_accepts_file_transport_and_rejects_dual_sources(tmp_path):
     assert runtime.load_request(None, str(request_path)) == {"runId": "run-1"}
     with pytest.raises(runtime.RuntimeFailure) as error:
         runtime.load_request("{}", str(request_path))
+    assert error.value.code == "invalid_request"
+
+
+def test_start_rejects_legacy_lead_witness(tmp_path, cwd, config):
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.command_start(
+            cwd,
+            str(tmp_path / "state"),
+            {
+                "entry": "frontier",
+                "objective": "fixture objective",
+                "sessionId": "fixture-session",
+                "manifestFingerprint": "fixture-agent-manifests",
+                "models": model_manifest(),
+                "lead": {},
+            },
+            config,
+        )
     assert error.value.code == "invalid_request"
 
 
@@ -680,7 +693,7 @@ def test_runtime_drift_blocks_hydration_and_mutation_but_not_status(tmp_path, cw
     assert status["card"]["nextActions"] == []
     assert status["card"]["blockedReason"] == (
         "effective Pocock runtime differs from the runtime that created this run; "
-        "inspect it with status/report and start a new run"
+        "inspect it with status and start a new run"
     )
     assert status["card"]["runtimeMismatch"] == {"expected": pinned, "observed": changed}
 
@@ -695,12 +708,12 @@ def test_known_vendor_uses_same_native_agent_contract_without_attestation(tmp_pa
     assert seal(cwd, state_dir, response, "producer")["card"]["phase"] == "producer_running"
 
 
-def test_executed_input_and_model_fallback_are_not_accepted(tmp_path, cwd, config):
-    state_dir, response = start(tmp_path, cwd, config, "frontier")
+def test_executed_input_is_rejected_and_fallback_result_preserves_live_witness(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier", models=model_manifest(fallback=True))
     sealed = seal(cwd, state_dir, prepare(cwd, state_dir, admit_frontier(cwd, state_dir, response), config), "producer")
     state = authoritative(cwd, state_dir, sealed["card"]["runId"])
     assignment = state["attempts"][sealed["attemptIds"][0]]
-    result = normalized_result(tmp_path, assignment, fallback=True)
+    result = normalized_result(tmp_path, assignment, fallback=True, suffix="-fallback")
     request = {
         **reference(sealed["card"]),
         "dispatchId": sealed["dispatchId"],
@@ -715,16 +728,28 @@ def test_executed_input_and_model_fallback_are_not_accepted(tmp_path, cwd, confi
     assert error.value.code == "seal_mismatch"
 
     request["input"] = sealed["taskInput"]
-    response = runtime.command_record_result(cwd, state_dir, request, config)
-    assert response["card"]["phase"] == "repair_pending"
-    assert "substitution" in response["card"]["blockedReason"]
-    state = authoritative(cwd, state_dir, response["card"]["runId"])
-    assert state["tokensSpent"] == 7
-    assert state["attempts"][assignment["attemptId"]]["tokens"] == 7
+    settled = runtime.command_record_result(cwd, state_dir, request, config)
+    assert settled["card"]["phase"] == "pregate_pending"
+    persisted = authoritative(cwd, state_dir, settled["card"]["runId"])
+    attempt = persisted["attempts"][assignment["attemptId"]]
+    assert persisted["models"][assignment["lane"]]["resolvedModelIsFallback"] is True
+    assert "lead" not in persisted
+    assert persisted["tokensSpent"] == 7
+    assert (
+        attempt["observedAgent"],
+        attempt["observedAgentSource"],
+        attempt["observedModel"],
+        attempt["modelFallback"],
+    ) == (assignment["agent"], "user", result["observedResolvedModel"], True)
+    assert "durationMs" not in attempt
+    assert "requests" not in attempt
+    actor = settled["card"]["dispatch"]["actors"][0]
+    assert actor["observedModel"] == result["observedResolvedModel"]
+    assert actor["modelWitness"] == "OBSERVED_FALLBACK"
 
 
 
-def test_failed_task_preserves_transport_error_in_attempt_and_report(tmp_path, cwd, config):
+def test_failed_task_preserves_transport_error_in_attempt(tmp_path, cwd, config):
     state_dir, response = start(tmp_path, cwd, config, "frontier")
     sealed = seal(cwd, state_dir, prepare(cwd, state_dir, admit_frontier(cwd, state_dir, response), config), "producer")
     state = authoritative(cwd, state_dir, sealed["card"]["runId"])
@@ -757,6 +782,8 @@ def test_failed_task_preserves_transport_error_in_attempt_and_report(tmp_path, c
 
     persisted = authoritative(cwd, state_dir, settled["card"]["runId"])
     attempt = persisted["attempts"][assignment["attemptId"]]
+    assert attempt["status"] == "availability_failed"
+    assert attempt["failureReason"] == transport_error
     assert attempt["availabilityEvidence"] == {
         "declaredModel": assignment["declaredModel"],
         "observedModel": None,
@@ -768,17 +795,6 @@ def test_failed_task_preserves_transport_error_in_attempt_and_report(tmp_path, c
         "reason": transport_error,
     }
 
-    report = runtime.command_report(cwd, state_dir, {"runId": settled["card"]["runId"]})["report"]
-    assert report["participants"][0]["failureReason"] == transport_error
-    assert report["failures"] == [
-        {
-            "attemptId": assignment["attemptId"],
-            "ticketId": assignment["ticketId"],
-            "status": "availability_failed",
-            "outcome": "FAILED_AVAILABILITY",
-            "reason": transport_error,
-        }
-    ]
 
 
 def test_success_exit_with_patch_capture_error_preserves_exact_failure(tmp_path, cwd, config):
@@ -810,9 +826,7 @@ def test_success_exit_with_patch_capture_error_preserves_exact_failure(tmp_path,
     assert attempt["status"] == "availability_failed"
     assert attempt["failureReason"] == capture_error
     assert attempt["availabilityEvidence"]["reason"] == capture_error
-    report = runtime.command_report(cwd, state_dir, {"runId": settled["card"]["runId"]})["report"]
-    assert report["participants"][0]["failureReason"] == capture_error
-    assert report["failures"][0]["reason"] == capture_error
+
 
 def test_ui_evidence_failure_spends_two_quality_attempts_then_blocks(tmp_path, cwd, config):
     ticket = mechanical_ticket(ui_live=True)
@@ -901,7 +915,7 @@ def test_effective_omp_settings_are_fail_closed(monkeypatch, tmp_path):
         "task.isolation.merge": "patch",
         "task.maxRecursionDepth": 1,
         "task.maxConcurrency": 6,
-        "retry.modelFallback": False,
+        "retry.modelFallback": True,
     }
 
     def result(values):
@@ -927,7 +941,7 @@ def test_effective_omp_settings_are_fail_closed(monkeypatch, tmp_path):
     for incompatible, mismatch_key in (
         ({**required, "task.isolation.apply": True}, "task.isolation.apply"),
         ({**required, "task.isolation.merge": "apply"}, "task.isolation.merge"),
-        ({**required, "retry.modelFallback": True}, "retry.modelFallback"),
+        ({**required, "retry.modelFallback": False}, "retry.modelFallback"),
     ):
         monkeypatch.setattr(runtime.subprocess, "run", lambda *args, values=incompatible, **kwargs: result(values))
         with pytest.raises(runtime.RuntimeFailure) as error:
@@ -1086,7 +1100,10 @@ def test_lens_availability_retries_the_lens_wave_without_rerunning_producer(tmp_
     content = {}
     for index, attempt_id in enumerate(sealed_lenses["attemptIds"]):
         assignment = state["lensAttempts"][attempt_id]
-        results.append(normalized_result(tmp_path, assignment, fallback=index == 0))
+        result = normalized_result(tmp_path, assignment)
+        if index == 0:
+            result["error"] = "EBUSY: fixture lens transport unavailable"
+        results.append(result)
         content[attempt_id] = {
             "lens": assignment["lens"],
             "attemptId": assignment["producerAttemptId"],
@@ -1320,11 +1337,25 @@ def test_lens_availability_exhaustion_rolls_back_only_current_wave(tmp_path, con
     )
     response = pregate(repo, state_dir, response, config)
     second_lenses = seal(repo, state_dir, prepare_lenses(repo, state_dir, response, config), "lenses")
-    response = settle_lenses(tmp_path, repo, state_dir, second_lenses, config, fallback=True)
+    response = settle_lenses(
+        tmp_path,
+        repo,
+        state_dir,
+        second_lenses,
+        config,
+        availability_error="EBUSY: fixture lens transport unavailable",
+    )
     assert response["card"]["phase"] == "lens_prepare_pending"
 
     second_lenses = seal(repo, state_dir, prepare_lenses(repo, state_dir, response, config), "lenses")
-    response = settle_lenses(tmp_path, repo, state_dir, second_lenses, config, fallback=True)
+    response = settle_lenses(
+        tmp_path,
+        repo,
+        state_dir,
+        second_lenses,
+        config,
+        availability_error="EBUSY: fixture lens transport unavailable",
+    )
 
     assert response["card"]["phase"] == "blocked"
     assert (repo / "first.txt").read_text(encoding="utf-8") == "old\naccepted\n"
@@ -1824,96 +1855,6 @@ def test_dispatch_card_exposes_one_opaque_pending_actor_without_renaming_sealed_
 
     sealed = seal(cwd, state_dir, status, "producer")
     assert sealed["taskInput"]["tasks"][0]["name"] == input_name
-
-
-def test_settled_attempt_report_preserves_observation_and_is_read_only(tmp_path, cwd, config):
-    state_dir, response = start(tmp_path, cwd, config, "frontier")
-    response = prepare(cwd, state_dir, admit_frontier(cwd, state_dir, response), config)
-    sealed = seal(cwd, state_dir, response, "producer")
-    state = authoritative(cwd, state_dir, sealed["card"]["runId"])
-    assignment = state["attempts"][sealed["attemptIds"][0]]
-    result = normalized_result(tmp_path, assignment)
-    result.update(
-        {
-            "usage": {"input": 2, "output": 3, "cacheWrite": 5, "cacheRead": 89},
-            "tokens": 999,
-            "durationMs": 120,
-            "requests": 2,
-        }
-    )
-    settled = runtime.command_record_result(
-        cwd,
-        state_dir,
-        {
-            **reference(sealed["card"]),
-            "dispatchId": sealed["dispatchId"],
-            "toolCallId": "producer-observability-tool",
-            "input": sealed["taskInput"],
-            "details": {"results": [result]},
-            "content": {assignment["attemptId"]: producer_result()},
-            "isError": False,
-        },
-        config,
-    )
-    persisted = authoritative(cwd, state_dir, settled["card"]["runId"])
-    attempt = persisted["attempts"][assignment["attemptId"]]
-    assert (attempt["durationMs"], attempt["requests"]) == (120, 2)
-    assert (
-        attempt["observedAgent"],
-        attempt["observedAgentSource"],
-        attempt["observedModel"],
-    ) == (assignment["agent"], "user", assignment["declaredModel"] + ":medium")
-    revision_and_hash = (persisted["revision"], persisted["stateHash"])
-
-    report = runtime.command_report(cwd, state_dir, {"runId": settled["card"]["runId"]})["report"]
-
-    assert report["taskAttemptTokens"] == {assignment["attemptId"]: 10}
-    assert report["coverage"] == {
-        "taskAttempts": 1,
-        "totalKnownTokens": 10,
-        "tokenWitnessedAttempts": 1,
-        "tokenCoverageComplete": True,
-    }
-    aggregate = {"attempts": 1, "tokenWitnessedAttempts": 1, "tokens": 10}
-    assert report["byRole"] == {assignment["role"]: aggregate}
-    assert report["byLane"] == {assignment["lane"]: aggregate}
-    assert report["byModel"] == {attempt["observedModel"]: aggregate}
-    assert report["statuses"] == {"completed": 1}
-    assert report["outcomes"] == {"PENDING": 1}
-    after_report = authoritative(cwd, state_dir, settled["card"]["runId"])
-    assert (after_report["revision"], after_report["stateHash"]) == revision_and_hash
-
-
-def test_report_marks_missing_usage_as_na_and_nulls_token_aggregates(tmp_path, cwd, config):
-    state_dir, response = start(tmp_path, cwd, config, "frontier")
-    response = prepare(cwd, state_dir, admit_frontier(cwd, state_dir, response), config)
-    sealed = seal(cwd, state_dir, response, "producer")
-    state = authoritative(cwd, state_dir, sealed["card"]["runId"])
-    assignment = state["attempts"][sealed["attemptIds"][0]]
-    result = normalized_result(tmp_path, assignment)
-    result.update({"tokens": 0, "usage": None})
-    settled = runtime.command_record_result(
-        cwd,
-        state_dir,
-        {
-            **reference(sealed["card"]),
-            "dispatchId": sealed["dispatchId"],
-            "toolCallId": "producer-missing-usage-tool",
-            "input": sealed["taskInput"],
-            "details": {"results": [result]},
-            "content": {assignment["attemptId"]: producer_result()},
-            "isError": False,
-        },
-        config,
-    )
-
-    report = runtime.command_report(cwd, state_dir, {"runId": settled["card"]["runId"]})["report"]
-
-    assert report["participants"][0]["tokens"] == "n/a"
-    assert report["coverage"]["totalKnownTokens"] is None
-    assert report["byRole"][assignment["role"]]["tokens"] is None
-    assert report["byLane"][assignment["lane"]]["tokens"] is None
-    assert report["byModel"][report["participants"][0]["observedModel"]]["tokens"] is None
 
 
 def test_successful_lenses_become_accepted_only_at_adjudication(tmp_path, cwd, config):
