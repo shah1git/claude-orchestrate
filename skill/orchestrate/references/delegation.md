@@ -12,7 +12,7 @@ select or override them.
 |---|---|---|
 | OBJECTIVE | One observable outcome, stated in one sentence. | Activity is mistaken for completion. |
 | CONTEXT | Why the result matters and who consumes it. | A locally plausible result violates the larger plan. |
-| INPUTS | Exact paths, symbols, records, URLs, and upstream artifacts. | The isolated worker guesses or repeats discovery. |
+| INPUTS | Complete inline contracts, resolvable repository paths with qualified symbols or records, full URLs, fully qualified issue URIs, and accepted upstream artifacts. | The isolated worker guesses, repeats discovery, or relies on an unavailable conversation. |
 | OUTPUT | The durable deliverable and its required shape. | A correct result arrives in an unusable form. |
 | TOOLS | Capabilities genuinely needed by this ticket. | The worker searches indefinitely or cannot verify its work. |
 | BOUNDARIES | Explicit non-goals, writable paths, and stop conditions. | Scope creep or overlapping writes. |
@@ -52,6 +52,26 @@ Do not add a route, lane, agent, model, reviewer, verdict, retry instruction, or
 output schema. Those values are sealed after the control plane classifies the
 ticket.
 
+## Sealed INPUTS and dependencies
+
+`INPUTS` must resolve without tracker shorthand or conversation context. It may contain
+a complete contract embedded in the ticket, a resolvable repository-relative path, a full
+URL, or a fully qualified `issue://owner/repo/N` URI. A bare tracker reference such as
+`#123` or `Issue #123` is forbidden: it does not identify a
+repository and cannot be sealed for an isolated worker. The core rejects such a reference
+with `incomplete_tracker_reference`; a sealed-input binding failure aborts the
+command rather than dispatching against an inferred source.
+
+The ban is limited to incomplete tracker references. It does not prohibit a commit hash,
+a Markdown anchor such as `docs/guide.md#section-2`, a source-language token such as
+`#define` or `C#`, a full URL, a fully qualified issue URI, or the name of a repository
+fixture.
+
+Dependencies bind accepted outputs, not instructions to rediscover context. A dependent
+ticket names the accepted upstream artifact by its repository path or durable URI and the
+established interface or fact it consumes. Never make a dependency say to read a tracker,
+an issue discussion, IRC, chat history, or another ticket's prose.
+
 ## Completeness rules
 
 **One ticket is one vertical slice.** It may touch several layers when that is
@@ -73,9 +93,9 @@ both statements and their locations. Complete only the unaffected work.
 
 Silence, a narrower scope, or an inconvenient instruction is not a contradiction.
 
-**Pass references, not transcripts.** A dependent ticket names the upstream
-artifact, changed files, and at most a short statement of the established fact.
-The artifact on disk remains authoritative.
+**Pass accepted outputs, not transcripts.** A dependent ticket names the accepted
+upstream artifact and the established fact it consumes. The artifact on disk or at its
+durable URI remains authoritative; a tracker, IRC, or chat instruction is not a dependency.
 
 **Acceptance must be adversarially gradeable.** Prefer invariants and executable
 checks:
@@ -118,13 +138,17 @@ same token, target, and criterion through `browser` or `xdev`. Worker assertions
 screenshots without the challenge, and evidence from another attempt do not
 satisfy it.
 
-Any invalid patch, scope or `changedFiles` mismatch, failed verification, diff
-ceiling breach, missing UI proof, or rejected quality gate rejects the affected
-attempt or wave. The runtime rolls back centrally applied patches before repair or
-blocking; do not manually merge, preserve, or replay producer changes. Retries are
-authorized only by the current state card and use a fresh attempt.
+Any dispatch, state, or sealed-INPUT binding failure aborts the command. A failure the
+core can safely attribute to one producer attempt rejects that attempt without discarding
+its neighbours. A settled native task is one-shot: never wait for or revive it through
+Hub. A retry is a new sealed attempt authorized only by the current state card.
 
-After a passing pre-gate, the runtime dispatches exactly the fixed Standards, Spec,
-and Critic lenses. Their reports are adjudicated centrally; the Critic is the sole
-PASS/FAIL verdict, and acceptance additionally requires no surviving blocking
-Standards or Spec finding.
+After pre-gate, the core dispatches one **wave-level** fixed gate over exactly the
+pre-gate-passed producer attempts. Wave producers share their sealed vendor/family; the
+exactly three distinct Standards, Spec, and Critic reviewers are independent from every
+producer. Each lens returns
+`{lens, summary, reports:[{attemptId, summary, findings, verdict}]}`, with one report for
+every passed producer attempt. Standards and Spec emit `NO_VERDICT` per report; Critic
+emits `PASS` or `FAIL`. A lens execution or schema failure retries only that failed lens.
+Central adjudication preserves accepted producer tickets, and acceptance additionally
+requires no surviving blocking Standards or Spec finding.

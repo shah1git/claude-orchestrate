@@ -71,7 +71,7 @@ def start(tmp_path: Path, cwd: Path, config: dict, entry: str, *, models: dict |
             "entry": entry,
             "objective": f"{entry} fixture objective",
             "sessionId": "fixture-session",
-            "manifestFingerprint": "fixture-agent-manifests",
+            "manifestFingerprint": runtime.trusted_manifest_fingerprint(cwd, config),
             "models": models or model_manifest(),
         },
         config,
@@ -366,20 +366,33 @@ def settle_lenses(
         if availability_error is not None:
             result["error"] = availability_error
         results.append(result)
-        findings = []
-        if standards_blocking and assignment["lens"] == "Standards":
-            findings.append({
-                "scope": "introduced",
-                "severity": "high",
-                "blocking": True,
-                "evidence": "fixture blocking standard violation",
+        reports = []
+        for producer_attempt_id in assignment["producerAttemptIds"]:
+            producer = state["attempts"][producer_attempt_id]
+            findings = []
+            if standards_blocking and assignment["lens"] == "Standards":
+                findings.append({
+                    "scope": "introduced",
+                    "severity": "high",
+                    "blocking": True,
+                    "evidence": "fixture blocking standard violation",
+                })
+            reports.append({
+                "attemptId": producer_attempt_id,
+                "summary": "Fixture review complete",
+                "findings": findings,
+                "verdict": (
+                    "FAIL"
+                    if assignment["lens"] == "Critic" and producer["ticketId"] == critic_fail_ticket
+                    else critic_verdict
+                )
+                if assignment["lens"] == "Critic"
+                else "NO_VERDICT",
             })
         content[attempt_id] = {
             "lens": assignment["lens"],
-            "attemptId": assignment["producerAttemptId"],
             "summary": "Fixture review complete",
-            "findings": findings,
-            "verdict": ("FAIL" if assignment["lens"] == "Critic" and assignment["ticketId"] == critic_fail_ticket else critic_verdict) if assignment["lens"] == "Critic" else "NO_VERDICT",
+            "reports": reports,
         }
     card = sealed["card"]
     return runtime.command_record_result(
@@ -443,13 +456,192 @@ def test_start_rejects_legacy_lead_witness(tmp_path, cwd, config):
                 "entry": "frontier",
                 "objective": "fixture objective",
                 "sessionId": "fixture-session",
-                "manifestFingerprint": "fixture-agent-manifests",
+                "manifestFingerprint": runtime.trusted_manifest_fingerprint(cwd, config),
                 "models": model_manifest(),
                 "lead": {},
             },
             config,
         )
     assert error.value.code == "invalid_request"
+
+
+def test_start_rejects_a_second_nonterminal_run_for_the_same_repository(tmp_path, cwd, config):
+    state_dir, first = start(tmp_path, cwd, config, "frontier")
+
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.command_start(
+            cwd,
+            state_dir,
+            {
+                "entry": "frontier",
+                "objective": "second fixture objective",
+                "sessionId": "fixture-session-2",
+                "manifestFingerprint": runtime.trusted_manifest_fingerprint(cwd, config),
+                "models": model_manifest(),
+            },
+            config,
+        )
+
+    assert error.value.code == "active_run_exists"
+    assert error.value.details == {
+        "runId": first["card"]["runId"],
+        "phase": "frontier_admission",
+    }
+
+
+def test_status_without_run_id_finds_the_single_active_run(tmp_path, cwd, config):
+    state_dir, started = start(tmp_path, cwd, config, "frontier")
+
+    observed = runtime.command_status(cwd, state_dir, {})
+
+    assert observed["card"] == started["card"]
+
+
+def test_status_without_run_id_reports_when_no_active_run(tmp_path, cwd):
+    observed = runtime.command_status(cwd, str(tmp_path / "empty-state"), {})
+
+    assert observed == {"active": False}
+
+
+def test_start_supersedes_only_a_runtime_mismatched_active_run(tmp_path, cwd, config, monkeypatch):
+    state_dir, first = start(tmp_path, cwd, config, "frontier")
+    monkeypatch.setattr(runtime, "runtime_fingerprint", lambda: "replacement-runtime")
+
+    _, replacement = start(tmp_path, cwd, config, "frontier")
+
+    retired = authoritative(cwd, state_dir, first["card"]["runId"])
+    assert retired["phase"] == "cancelled"
+    assert retired["cancelReason"] == "superseded after runtime mismatch"
+    assert retired["supersededBy"] == replacement["card"]["runId"]
+    retired_card = runtime.command_status(cwd, state_dir, {"runId": first["card"]["runId"]})["card"]
+    assert retired_card["cancelReason"] == "superseded after runtime mismatch"
+    assert retired_card["supersededBy"] == replacement["card"]["runId"]
+    assert runtime.command_status(cwd, state_dir, {})["card"] == replacement["card"]
+
+
+def test_start_supersedes_a_manifest_only_mismatched_active_run(tmp_path, cwd, config, monkeypatch):
+    observed_manifest = {"value": "fixture-agent-manifests"}
+    monkeypatch.setattr(
+        runtime,
+        "trusted_manifest_fingerprint",
+        lambda _cwd, _config: observed_manifest["value"],
+    )
+    state_dir, first = start(tmp_path, cwd, config, "frontier")
+    observed_manifest["value"] = "replacement-agent-manifests"
+    observed = runtime.command_status(
+        cwd,
+        state_dir,
+        {"manifestFingerprint": "replacement-agent-manifests"},
+        config,
+    )
+    assert observed["card"]["runtimeMismatch"] == {
+        "expectedManifestFingerprint": "fixture-agent-manifests",
+        "observedManifestFingerprint": "replacement-agent-manifests",
+    }
+
+    replacement = runtime.command_start(
+        cwd,
+        state_dir,
+        {
+            "entry": "frontier",
+            "objective": "replacement fixture objective",
+            "sessionId": "replacement-session",
+            "manifestFingerprint": "replacement-agent-manifests",
+            "models": model_manifest(),
+        },
+        config,
+    )
+
+    retired = authoritative(cwd, state_dir, first["card"]["runId"])
+    assert retired["phase"] == "cancelled"
+    assert retired["supersededBy"] == replacement["card"]["runId"]
+
+
+def test_start_rejects_a_forged_manifest_witness(tmp_path, cwd, config):
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.command_start(
+            cwd,
+            str(tmp_path / "state"),
+            {
+                "entry": "frontier",
+                "objective": "forged manifest fixture",
+                "sessionId": "fixture-session",
+                "manifestFingerprint": "attacker-selected-manifest",
+                "models": model_manifest(),
+            },
+            config,
+        )
+
+    assert error.value.code == "manifest_witness_mismatch"
+    assert error.value.details["observed"] == "attacker-selected-manifest"
+
+
+
+def test_runtime_replacement_recovers_after_activation_write_failure(tmp_path, cwd, config, monkeypatch):
+    state_dir, first = start(tmp_path, cwd, config, "frontier")
+    monkeypatch.setattr(runtime, "runtime_fingerprint", lambda: "replacement-runtime")
+    old_state_path, _old_lock_path = runtime.state_paths(cwd, state_dir, first["card"]["runId"])
+    real_write_state = runtime.write_state
+
+    def fail_replacement_activation(path, state):
+        if (
+            path != old_state_path
+            and state.get("phase") == "frontier_admission"
+            and state.get("revision") == 1
+        ):
+            raise OSError("simulated replacement activation failure")
+        real_write_state(path, state)
+
+    monkeypatch.setattr(runtime, "write_state", fail_replacement_activation)
+    with pytest.raises(OSError, match="simulated replacement activation failure"):
+        runtime.command_start(
+            cwd,
+            state_dir,
+            {
+                "entry": "frontier",
+                "objective": "recoverable replacement objective",
+                "sessionId": "replacement-session",
+                "manifestFingerprint": runtime.trusted_manifest_fingerprint(cwd, config),
+                "models": model_manifest(),
+            },
+            config,
+        )
+
+    retired = authoritative(cwd, state_dir, first["card"]["runId"])
+    replacement_run_id = retired["supersededBy"]
+    staged = authoritative(cwd, state_dir, replacement_run_id)
+    assert retired["phase"] == "cancelled"
+    assert staged["phase"] == runtime.REPLACEMENT_STAGING_PHASE
+
+    monkeypatch.setattr(runtime, "write_state", real_write_state)
+    observed = runtime.command_status(cwd, state_dir, {})
+    assert observed["card"]["runId"] == replacement_run_id
+    assert observed["card"]["phase"] == "frontier_admission"
+    assert observed["card"]["revision"] == 1
+    transaction = runtime.replacement_transaction_path(cwd, state_dir, replacement_run_id)
+    assert json.loads(transaction.read_text(encoding="utf-8"))["status"] == "committed"
+
+def test_prepare_rejects_incomplete_tracker_inputs_but_allows_resolved_references(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    shorthand = mechanical_ticket()
+    shorthand["INPUTS"] = "Approved tracker reference #123"
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        prepare(cwd, state_dir, response, config, shorthand)
+    assert error.value.code == "incomplete_tracker_reference"
+
+    for index, reference_value in enumerate((
+        "https://github.com/owner/repo/issues/123",
+        "issue://owner/repo/123",
+        "skill/orchestrate/tools/omp_runtime.py",
+    )):
+        allowed_dir = tmp_path / f"allowed-{index}"
+        allowed_state_dir, allowed_response = start(allowed_dir, cwd, config, "frontier")
+        allowed_response = admit_frontier(cwd, allowed_state_dir, allowed_response)
+        ticket = mechanical_ticket()
+        ticket["INPUTS"] = reference_value
+        prepared = prepare(cwd, allowed_state_dir, allowed_response, config, ticket)
+        assert prepared["card"]["phase"] == "producer_dispatch_pending"
 
 
 def test_copy_reinstall_preserves_live_telemetry(tmp_path):
@@ -670,6 +862,16 @@ def test_stale_revision_and_corrupt_state_fail_closed(tmp_path, cwd, config):
     with pytest.raises(runtime.RuntimeFailure) as error:
         runtime.command_status(cwd, state_dir, {"runId": response["card"]["runId"]})
     assert error.value.code == "state_corrupt"
+
+    with pytest.raises(runtime.RuntimeFailure) as start_error:
+        start(tmp_path, cwd, config, "frontier")
+    assert start_error.value.code == "state_corrupt"
+
+    value["stateHash"] = runtime.digest(runtime.public_snapshot(value))
+    state_path.write_text(json.dumps(value), encoding="utf-8")
+    with pytest.raises(runtime.RuntimeFailure) as authentication_error:
+        start(tmp_path, cwd, config, "frontier")
+    assert authentication_error.value.code == "state_auth_failed"
 
 
 def test_runtime_drift_blocks_hydration_and_mutation_but_not_status(tmp_path, cwd, config, monkeypatch):
@@ -1074,7 +1276,7 @@ def test_ui_evidence_is_attempt_bound_and_ui_tickets_cannot_share_a_wave(tmp_pat
     assert any("assert(" in record for record in ui_check["records"])
 
 
-def test_pregate_charges_only_the_attempt_whose_command_failed(tmp_path, cwd, config):
+def test_pregate_keeps_passed_candidates_and_retries_only_failed_tickets(tmp_path, cwd, config):
     first = ticket_named("T1")
     first["verification"] = [{"argv": ["python3", "-c", "raise SystemExit(1)"], "cwd": ".", "timeoutSeconds": 10}]
     second = ticket_named("T2")
@@ -1085,31 +1287,93 @@ def test_pregate_charges_only_the_attempt_whose_command_failed(tmp_path, cwd, co
     response = pregate(cwd, state_dir, settle_producer(tmp_path, cwd, state_dir, sealed, config), config)
     state = authoritative(cwd, state_dir, response["card"]["runId"])
 
+    assert response["card"]["phase"] == "lens_prepare_pending"
     assert state["qualityFailures"] == {"T1": 1}
+    assert state["pregate"]["status"] == "PARTIAL"
+    assert state["retryTicketIds"] == ["T1"]
     statuses = {attempt["ticketId"]: attempt["status"] for attempt in state["attempts"].values()}
     assert statuses == {"T1": "pregate_failed", "T2": "completed"}
-    response = transition(cwd, state_dir, response, "retry", {"diagnosis": "effort"})
-    assert authoritative(cwd, state_dir, response["card"]["runId"])["authorizedNextTickets"] == ["T1", "T2"]
+    assert state["pregate"]["passedAttemptIds"] == [next(
+        attempt_id
+        for attempt_id, attempt in state["attempts"].items()
+        if attempt["ticketId"] == "T2"
+    )]
+    prepared_lenses = prepare_lenses(cwd, state_dir, response, config)
+    assert len(prepared_lenses["card"]["dispatch"]["actors"]) == 3
 
 
-def test_lens_availability_retries_the_lens_wave_without_rerunning_producer(tmp_path, cwd, config):
+def test_initial_wave_lenses_use_exactly_three_distinct_independent_lanes(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    response = prepare_tickets(cwd, state_dir, response, config, [ticket_named("T1"), ticket_named("T2")])
+    response = seal(cwd, state_dir, response, "producer")
+    response = pregate(cwd, state_dir, settle_producer(tmp_path, cwd, state_dir, response, config), config)
+    prepared = prepare_lenses(cwd, state_dir, response, config)
+    state = authoritative(cwd, state_dir, prepared["card"]["runId"])
+    assignments = [state["lensAttempts"][attempt_id] for attempt_id in state["pendingDispatch"]["attemptIds"]]
+    wave = state["waves"][-1]
+    producer_ids = state["pregate"]["passedAttemptIds"]
+    producer_vendor = wave["producerVendor"]
+    producer_family = wave["producerFamily"]
+
+    assert len(assignments) == 3
+    assert {assignment["lens"] for assignment in assignments} == {"Standards", "Spec", "Critic"}
+    assert len({assignment["lane"] for assignment in assignments}) == 3
+    assert all(assignment["producerAttemptIds"] == producer_ids for assignment in assignments)
+    assert all(
+        assignment["vendor"].lower() != producer_vendor
+        and assignment["family"].lower() != producer_family
+        for assignment in assignments
+    )
+    standards = next(assignment for assignment in assignments if assignment["lens"] == "Standards")
+    critic = next(assignment for assignment in assignments if assignment["lens"] == "Critic")
+    assert standards["vendor"].lower() != "anthropic"
+    assert standards["family"].lower() != "claude"
+    assert critic["rank"] >= config["omp"]["lenses"]["critic_min_rank"]
+    assert prepared["card"]["dispatch"]["kind"] == "lenses"
+    assert len(prepared["card"]["dispatch"]["actors"]) == 3
+
+
+def test_prepare_rejects_a_mixed_producer_vendor_family_wave_before_dispatch(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    architect_ticket = ticket_named("T2")
+    architect_ticket["class"] = "judgment"
+
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        prepare_tickets(cwd, state_dir, response, config, [ticket_named("T1"), architect_ticket])
+
+    assert error.value.code == "producer_wave_not_homogeneous"
+    state = authoritative(cwd, state_dir, response["card"]["runId"])
+    assert state["attempts"] == {}
+    assert state.get("pendingDispatch") is None
+
+
+def test_lens_settlement_retries_only_the_failed_wave_lens(tmp_path, cwd, config):
     state_dir, response = start(tmp_path, cwd, config, "frontier")
     response = admit_frontier(cwd, state_dir, response)
     sealed_lenses, state = reach_adjudication(tmp_path, cwd, state_dir, response, config)
+    failed_lens = state["lensAttempts"][sealed_lenses["attemptIds"][0]]["lens"]
     results = []
     content = {}
-    for index, attempt_id in enumerate(sealed_lenses["attemptIds"]):
+    for attempt_id in sealed_lenses["attemptIds"]:
         assignment = state["lensAttempts"][attempt_id]
         result = normalized_result(tmp_path, assignment)
-        if index == 0:
+        if assignment["lens"] == failed_lens:
             result["error"] = "EBUSY: fixture lens transport unavailable"
         results.append(result)
         content[attempt_id] = {
             "lens": assignment["lens"],
-            "attemptId": assignment["producerAttemptId"],
             "summary": "Fixture review complete",
-            "findings": [],
-            "verdict": "PASS" if assignment["lens"] == "Critic" else "NO_VERDICT",
+            "reports": [
+                {
+                    "attemptId": producer_attempt_id,
+                    "summary": "Fixture review complete",
+                    "findings": [],
+                    "verdict": "PASS" if assignment["lens"] == "Critic" else "NO_VERDICT",
+                }
+                for producer_attempt_id in assignment["producerAttemptIds"]
+            ],
         }
     response = runtime.command_record_result(
         cwd,
@@ -1127,14 +1391,26 @@ def test_lens_availability_retries_the_lens_wave_without_rerunning_producer(tmp_
     )
     assert response["card"]["phase"] == "lens_prepare_pending"
     state = authoritative(cwd, state_dir, response["card"]["runId"])
-    assert state["lensAvailabilityFailures"] == {"T1": 1}
+    assert state["retryLensNames"] == [failed_lens]
+    assert {attempt["status"] for attempt in state["lensAttempts"].values()} == {
+        "availability_failed",
+        "completed",
+    }
 
-    response = prepare_lenses(cwd, state_dir, response, config)
-    state = authoritative(cwd, state_dir, response["card"]["runId"])
-    assert all(item["isolated"] is True and "apply" not in item for item in state["pendingDispatch"]["taskInput"]["tasks"])
+    prepared_retry = prepare_lenses(cwd, state_dir, response, config)
+    assert prepared_retry["card"]["dispatch"]["kind"] == "lenses"
+    assert len(prepared_retry["card"]["dispatch"]["actors"]) == 1
+    retry_state = authoritative(cwd, state_dir, prepared_retry["card"]["runId"])
+    assert retry_state["pendingDispatch"]["lensNames"] == [failed_lens]
+    assert len(set(retry_state["waves"][-1]["reviewerLanes"].values())) == 3
+    retry_sealed = seal(cwd, state_dir, prepared_retry, "lenses")
+    response = settle_lenses(tmp_path, cwd, state_dir, retry_sealed, config)
+    assert response["card"]["phase"] == "adjudication_pending"
+    response = runtime.command_adjudicate(cwd, state_dir, reference(response["card"]))
+    assert response["card"]["phase"] == "accepted"
 
 
-def test_adjudication_charges_and_retries_only_the_failed_producer(tmp_path, cwd, config):
+def test_partial_adjudication_accepts_passing_subset_and_preserves_failed_retry(tmp_path, cwd, config, monkeypatch):
     state_dir, response = start(tmp_path, cwd, config, "frontier")
     response = admit_frontier(cwd, state_dir, response)
     response = prepare_tickets(cwd, state_dir, response, config, [ticket_named("T1"), ticket_named("T2")])
@@ -1146,11 +1422,36 @@ def test_adjudication_charges_and_retries_only_the_failed_producer(tmp_path, cwd
     response = runtime.command_adjudicate(cwd, state_dir, reference(response["card"]))
     state = authoritative(cwd, state_dir, response["card"]["runId"])
 
+    assert response["card"]["phase"] == "accepted"
+    assert state["adjudication"]["status"] == "PARTIAL"
     assert state["qualityFailures"] == {"T1": 1}
     producer_statuses = {attempt["ticketId"]: attempt["status"] for attempt in state["attempts"].values()}
     assert producer_statuses == {"T1": "review_failed", "T2": "accepted"}
     assert state["retryTicketIds"] == ["T1"]
-    response = transition(cwd, state_dir, response, "retry", {"diagnosis": "capability"})
+
+    monkeypatch.setattr(runtime, "telemetry_exists", lambda *_args: False)
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "appended\n", ""),
+    )
+    response = runtime.command_accept(cwd, state_dir, reference(response["card"]), config)
+    persisted = authoritative(cwd, state_dir, response["card"]["runId"])
+    assert persisted["attempts"][state["adjudication"]["acceptedAttemptIds"][0]]["status"] == "recorded"
+    assert persisted["retryTicketIds"] == ["T1"]
+
+    response = transition(
+        cwd,
+        state_dir,
+        response,
+        "continue_wave",
+        {
+            "remainingTicketIds": ["T1"],
+            "nextTicketIds": ["T1"],
+            "blockedTicketIds": [],
+            "evidence": "tracker retains only the failed ticket",
+        },
+    )
     response = prepare(cwd, state_dir, response, config, ticket_named("T1"))
     assert response["card"]["phase"] == "producer_dispatch_pending"
 
@@ -1222,6 +1523,57 @@ def test_writer_patch_is_validated_applied_and_rolled_back_after_review_failure(
     response = runtime.command_adjudicate(repo, state_dir, reference(response["card"]))
     assert response["card"]["phase"] == "repair_pending"
     assert (repo / "target.txt").read_text(encoding="utf-8") == "old\n"
+
+
+def test_partial_review_rolls_back_only_failed_patch_and_keeps_accepted_patch(tmp_path, config, monkeypatch):
+    repo = init_git_repo(tmp_path / "repo", {"accepted.txt": "old\n", "rejected.txt": "old\n"})
+    state_dir, response = start(tmp_path, repo, config, "frontier")
+    response = admit_frontier(repo, state_dir, response)
+    tickets = [
+        writer_ticket("T1", "accepted.txt"),
+        writer_ticket("T2", "rejected.txt"),
+    ]
+    sealed = seal(repo, state_dir, prepare_tickets(repo, state_dir, response, config, tickets), "producer")
+    response = settle_producer_patches(
+        tmp_path,
+        repo,
+        state_dir,
+        sealed,
+        config,
+        {
+            "T1": (add_line_patch("accepted.txt", "old", ["accepted"]), ["accepted.txt"]),
+            "T2": (add_line_patch("rejected.txt", "old", ["rejected"]), ["rejected.txt"]),
+        },
+    )
+    response = pregate(repo, state_dir, response, config)
+    sealed_lenses = seal(repo, state_dir, prepare_lenses(repo, state_dir, response, config), "lenses")
+    response = settle_lenses(tmp_path, repo, state_dir, sealed_lenses, config, critic_fail_ticket="T2")
+    response = runtime.command_adjudicate(repo, state_dir, reference(response["card"]))
+
+    assert response["card"]["phase"] == "accepted"
+    state = authoritative(repo, state_dir, response["card"]["runId"])
+    assert state["adjudication"]["status"] == "PARTIAL"
+    assert {attempt["ticketId"]: attempt["status"] for attempt in state["attempts"].values()} == {
+        "T1": "accepted",
+        "T2": "review_failed",
+    }
+    assert state["retryTicketIds"] == ["T2"]
+    assert (repo / "accepted.txt").read_text(encoding="utf-8") == "old\naccepted\n"
+    assert (repo / "rejected.txt").read_text(encoding="utf-8") == "old\n"
+
+    monkeypatch.setattr(runtime, "telemetry_exists", lambda *_args: False)
+    original_run = runtime.subprocess.run
+
+    def run_with_telemetry_stub(argv, *args, **kwargs):
+        if len(argv) > 1 and argv[1] == str(runtime.TELEMETRY_TOOL):
+            return subprocess.CompletedProcess(argv, 0, "appended\n", "")
+        return original_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(runtime.subprocess, "run", run_with_telemetry_stub)
+    response = runtime.command_accept(repo, state_dir, reference(response["card"]), config)
+    assert response["card"]["phase"] == "accepted"
+    assert (repo / "accepted.txt").read_text(encoding="utf-8") == "old\naccepted\n"
+    assert (repo / "rejected.txt").read_text(encoding="utf-8") == "old\n"
 
 
 def test_cancel_preserves_recorded_patches_from_prior_waves(tmp_path, config, monkeypatch):
@@ -1389,36 +1741,57 @@ def test_lens_availability_exhaustion_rolls_back_only_current_wave(tmp_path, con
         ),
     ),
 )
-def test_invalid_or_unauthorized_patch_never_reaches_working_tree(tmp_path, config, patch, changed_files, code):
+def test_invalid_or_unauthorized_patch_is_recorded_without_reaching_working_tree(tmp_path, config, patch, changed_files, code):
     repo = init_git_repo(tmp_path / "repo", {"target.txt": "old\n", "outside.txt": "old\n"})
     state_dir, response = start(tmp_path, repo, config, "frontier")
     response = admit_frontier(repo, state_dir, response)
     sealed = seal(repo, state_dir, prepare(repo, state_dir, response, config, writer_ticket("T1", "target.txt")), "producer")
-    with pytest.raises(runtime.RuntimeFailure) as error:
-        settle_producer_patches(tmp_path, repo, state_dir, sealed, config, {"T1": (patch, changed_files)})
-    assert error.value.code == code
+    response = settle_producer_patches(tmp_path, repo, state_dir, sealed, config, {"T1": (patch, changed_files)})
+    state = authoritative(repo, state_dir, response["card"]["runId"])
+
+    attempt = state["attempts"][sealed["attemptIds"][0]]
+    assert response["card"]["phase"] == "repair_pending"
+    assert attempt["status"] == "result_invalid"
+    assert attempt["failureCode"] == code
+    assert state["retryTicketIds"] == ["T1"]
     assert (repo / "target.txt").read_text(encoding="utf-8") == "old\n"
     assert (repo / "outside.txt").read_text(encoding="utf-8") == "old\n"
 
 
-def test_conflicting_batch_is_rejected_atomically(tmp_path, config):
+def test_partial_producer_settlement_applies_only_the_valid_sibling_patch(tmp_path, config):
     repo = init_git_repo(tmp_path / "repo", {"a.txt": "old-a\n", "b.txt": "old-b\n"})
     state_dir, response = start(tmp_path, repo, config, "frontier")
     response = admit_frontier(repo, state_dir, response)
     tickets = [writer_ticket("T1", "a.txt"), writer_ticket("T2", "b.txt")]
     sealed = seal(repo, state_dir, prepare_tickets(repo, state_dir, response, config, tickets), "producer")
-    patches = {
-        "T1": (add_line_patch("a.txt", "old-a", ["new-a"]), ["a.txt"]),
-        "T2": (add_line_patch("b.txt", "wrong-context", ["new-b"]), ["b.txt"]),
-    }
-    with pytest.raises(runtime.RuntimeFailure) as error:
-        settle_producer_patches(tmp_path, repo, state_dir, sealed, config, patches)
-    assert error.value.code == "patch_conflict"
-    assert (repo / "a.txt").read_text(encoding="utf-8") == "old-a\n"
+    response = settle_producer_patches(
+        tmp_path,
+        repo,
+        state_dir,
+        sealed,
+        config,
+        {
+            "T1": (add_line_patch("a.txt", "old-a", ["new-a"]), ["a.txt"]),
+            "T2": (add_line_patch("b.txt", "wrong-context", ["new-b"]), ["b.txt"]),
+        },
+    )
+    state = authoritative(repo, state_dir, response["card"]["runId"])
+    attempts = {attempt["ticketId"]: attempt for attempt in state["attempts"].values()}
+
+    assert response["card"]["phase"] == "pregate_pending"
+    assert attempts["T1"]["status"] == "completed"
+    assert attempts["T2"]["status"] == "result_invalid"
+    assert attempts["T2"]["failureCode"] == "patch_conflict"
+    assert attempts["T2"]["artifact"]["bytes"] > 0
+    assert attempts["T2"]["patchArtifact"]["bytes"] > 0
+    assert attempts["T2"]["reportedChangedFiles"] == ["b.txt"]
+    assert state["retryTicketIds"] == ["T2"]
+    assert state["waves"][-1]["candidateAttemptIds"] == [attempts["T1"]["attemptId"]]
+    assert (repo / "a.txt").read_text(encoding="utf-8") == "old-a\nnew-a\n"
     assert (repo / "b.txt").read_text(encoding="utf-8") == "old-b\n"
 
 
-def test_diff_ceiling_is_per_ticket_and_failed_wave_is_rolled_back(tmp_path, config):
+def test_pregate_selectively_rolls_back_only_failed_candidate_patch(tmp_path, config):
     repo = init_git_repo(tmp_path / "repo", {"a.txt": "old-a\n", "b.txt": "old-b\n"})
     config["gates"]["pre_gate"]["max_diff_lines"] = 1
     state_dir, response = start(tmp_path, repo, config, "frontier")
@@ -1438,9 +1811,12 @@ def test_diff_ceiling_is_per_ticket_and_failed_wave_is_rolled_back(tmp_path, con
     )
     response = pregate(repo, state_dir, response, config)
     state = authoritative(repo, state_dir, response["card"]["runId"])
-    assert response["card"]["phase"] == "repair_pending"
+
+    assert response["card"]["phase"] == "lens_prepare_pending"
+    assert state["pregate"]["status"] == "PARTIAL"
     assert state["qualityFailures"] == {"T2": 1}
-    assert (repo / "a.txt").read_text(encoding="utf-8") == "old-a\n"
+    assert state["retryTicketIds"] == ["T2"]
+    assert (repo / "a.txt").read_text(encoding="utf-8") == "old-a\nnew-a\n"
     assert (repo / "b.txt").read_text(encoding="utf-8") == "old-b\n"
 
 
@@ -1509,6 +1885,54 @@ def test_patch_application_journal_recovers_after_state_write_failure(tmp_path, 
     assert (repo / "target.txt").read_text(encoding="utf-8") == "old\nnew\n"
 
 
+def test_abandon_dispatch_rolls_back_patch_orphaned_by_state_write_failure(tmp_path, config, monkeypatch):
+    repo = init_git_repo(tmp_path / "repo", {"target.txt": "old\n"})
+    state_dir, response = start(tmp_path, repo, config, "frontier")
+    response = admit_frontier(repo, state_dir, response)
+    sealed = seal(
+        repo,
+        state_dir,
+        prepare(repo, state_dir, response, config, writer_ticket("T1", "target.txt")),
+        "producer",
+    )
+    patches = {"T1": (add_line_patch("target.txt", "old", ["new"]), ["target.txt"])}
+
+    real_write_state = runtime.write_state
+    monkeypatch.setattr(
+        runtime,
+        "write_state",
+        lambda *_args: (_ for _ in ()).throw(OSError("simulated state write failure")),
+    )
+    with pytest.raises(OSError, match="simulated state write failure"):
+        settle_producer_patches(tmp_path, repo, state_dir, sealed, config, patches)
+    assert (repo / "target.txt").read_text(encoding="utf-8") == "old\nnew\n"
+
+    monkeypatch.setattr(runtime, "write_state", real_write_state)
+    observed = runtime.command_status(repo, state_dir, {"runId": sealed["card"]["runId"]})
+    abandoned = runtime.command_transition(
+        repo,
+        state_dir,
+        {
+            **reference(observed["card"]),
+            "action": "abandon_dispatch",
+            "payload": {
+                "confirmedLostSettlement": True,
+                "reason": "adapter lost the failed settlement",
+            },
+        },
+    )
+
+    assert abandoned["card"]["phase"] == "repair_pending"
+    assert (repo / "target.txt").read_text(encoding="utf-8") == "old\n"
+    journals = list(
+        (runtime.state_paths(repo, state_dir, sealed["card"]["runId"])[0].with_suffix(".artifacts")).glob(
+            "wave-*.apply.json"
+        )
+    )
+    assert len(journals) == 1
+    assert json.loads(journals[0].read_text(encoding="utf-8"))["status"] == "rolled_back"
+
+
 def test_patch_rollback_journal_recovers_after_state_write_failure(tmp_path, config, monkeypatch):
     repo = init_git_repo(tmp_path / "repo", {"target.txt": "old\n"})
     config["gates"]["pre_gate"]["max_diff_lines"] = 0
@@ -1534,6 +1958,64 @@ def test_patch_rollback_journal_recovers_after_state_write_failure(tmp_path, con
     response = pregate(repo, state_dir, response, config)
     assert response["card"]["phase"] == "repair_pending"
     assert (repo / "target.txt").read_text(encoding="utf-8") == "old\n"
+
+
+def test_replacement_recovers_mixed_patch_state_after_partial_pregate_write_failure(
+    tmp_path,
+    config,
+    monkeypatch,
+):
+    repo = init_git_repo(tmp_path / "repo", {"failed.txt": "old\n", "passed.txt": "old\n"})
+    failed = writer_ticket(
+        "T1",
+        "failed.txt",
+        verification=[{"argv": ["python3", "-c", "raise SystemExit(1)"], "cwd": ".", "timeoutSeconds": 10}],
+    )
+    passed = writer_ticket(
+        "T2",
+        "passed.txt",
+        verification=[{"argv": ["python3", "-c", "raise SystemExit(0)"], "cwd": ".", "timeoutSeconds": 10}],
+    )
+    state_dir, response = start(tmp_path, repo, config, "frontier")
+    response = admit_frontier(repo, state_dir, response)
+    sealed = seal(repo, state_dir, prepare_tickets(repo, state_dir, response, config, [failed, passed]), "producer")
+    settled = settle_producer_patches(
+        tmp_path,
+        repo,
+        state_dir,
+        sealed,
+        config,
+        {
+            "T1": (add_line_patch("failed.txt", "old", ["failed-new"]), ["failed.txt"]),
+            "T2": (add_line_patch("passed.txt", "old", ["passed-new"]), ["passed.txt"]),
+        },
+    )
+
+    real_write_state = runtime.write_state
+    monkeypatch.setattr(runtime, "write_state", lambda *_args: (_ for _ in ()).throw(OSError("simulated state write failure")))
+    with pytest.raises(OSError, match="simulated state write failure"):
+        pregate(repo, state_dir, settled, config)
+    assert (repo / "failed.txt").read_text(encoding="utf-8") == "old\n"
+    assert (repo / "passed.txt").read_text(encoding="utf-8") == "old\npassed-new\n"
+
+    monkeypatch.setattr(runtime, "write_state", real_write_state)
+    monkeypatch.setattr(runtime, "runtime_fingerprint", lambda: "replacement-runtime")
+    replacement = runtime.command_start(
+        repo,
+        state_dir,
+        {
+            "entry": "frontier",
+            "objective": "replace after mixed rollback state",
+            "sessionId": "replacement-session",
+            "manifestFingerprint": runtime.trusted_manifest_fingerprint(repo, config),
+            "models": model_manifest(),
+        },
+        config,
+    )
+
+    assert replacement["card"]["phase"] == "frontier_admission"
+    assert (repo / "failed.txt").read_text(encoding="utf-8") == "old\n"
+    assert (repo / "passed.txt").read_text(encoding="utf-8") == "old\n"
 
 
 def test_sweep_runs_sealed_two_wave_dag_to_terminal_completion(
@@ -1604,6 +2086,89 @@ def test_sweep_runs_sealed_two_wave_dag_to_terminal_completion(
     assert terminal["phase"] == "completed"
     assert {field: terminal[field] for field in hashes} == hashes
     assert runtime.command_status(cwd, state_dir, {"runId": terminal["runId"]})["card"] == terminal
+
+
+def test_partial_sweep_acceptance_records_only_passing_subset_and_keeps_dag_retry(tmp_path, cwd, config, canonical_sweep_admission, monkeypatch):
+    state_dir, response = start(tmp_path, cwd, config, "sweep")
+    response = transition(cwd, state_dir, response, "admit_sweep", canonical_sweep_admission)
+    response = prepare_sweep(cwd, state_dir, response, config)
+    response = seal(cwd, state_dir, response, "producer")
+    response = settle_producer(tmp_path, cwd, state_dir, response, config)
+    response = pregate(cwd, state_dir, response, config)
+    response = prepare_lenses(cwd, state_dir, response, config)
+    sealed_lenses = seal(cwd, state_dir, response, "lenses")
+    response = settle_lenses(tmp_path, cwd, state_dir, sealed_lenses, config, critic_fail_ticket="T1")
+    response = runtime.command_adjudicate(cwd, state_dir, reference(response["card"]))
+    assert response["card"]["phase"] == "accepted"
+    assert response["card"]["retryTicketIds"] == ["T1"]
+
+    monkeypatch.setattr(runtime, "telemetry_exists", lambda *_args: False)
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "appended\n", ""),
+    )
+    response = runtime.command_accept(cwd, state_dir, reference(response["card"]), config)
+    assert response["card"]["acceptedTicketIds"] == ["T2"]
+    assert response["card"]["remainingTicketIds"] == ["T1", "T3"]
+    assert response["card"]["readyTicketIds"] == ["T1"]
+    assert response["card"]["blockedTicketIds"] == ["T3"]
+
+    response = transition(cwd, state_dir, response, "continue_wave")
+    assert response["card"]["phase"] == "ready"
+    response = prepare_sweep(cwd, state_dir, response, config)
+    next_wave = authoritative(cwd, state_dir, response["card"]["runId"])["waves"][-1]
+    assert next_wave["ticketIds"] == ["T1"]
+
+
+def test_sweep_continue_blocks_when_a_ready_retry_is_exhausted(
+    tmp_path,
+    cwd,
+    config,
+    canonical_sweep_admission,
+    monkeypatch,
+):
+    admission = copy.deepcopy(canonical_sweep_admission)
+    next(ticket for ticket in admission["tickets"] if ticket["ticketId"] == "T3")["dependsOn"] = ["T2"]
+    state_dir, response = start(tmp_path, cwd, config, "sweep")
+    response = transition(cwd, state_dir, response, "admit_sweep", admission)
+
+    def review_wave_with_t1_failure(current):
+        current = prepare_sweep(cwd, state_dir, current, config)
+        current = seal(cwd, state_dir, current, "producer")
+        current = settle_producer(tmp_path, cwd, state_dir, current, config)
+        current = pregate(cwd, state_dir, current, config)
+        current = prepare_lenses(cwd, state_dir, current, config)
+        sealed_lenses = seal(cwd, state_dir, current, "lenses")
+        current = settle_lenses(
+            tmp_path,
+            cwd,
+            state_dir,
+            sealed_lenses,
+            config,
+            critic_fail_ticket="T1",
+        )
+        return runtime.command_adjudicate(cwd, state_dir, reference(current["card"]))
+
+    monkeypatch.setattr(runtime, "telemetry_exists", lambda *_args: False)
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "appended\n", ""),
+    )
+    response = review_wave_with_t1_failure(response)
+    response = runtime.command_accept(cwd, state_dir, reference(response["card"]), config)
+    assert response["card"]["readyTicketIds"] == ["T1", "T3"]
+
+    response = transition(cwd, state_dir, response, "continue_wave")
+    response = review_wave_with_t1_failure(response)
+    response = runtime.command_accept(cwd, state_dir, reference(response["card"]), config)
+    assert response["card"]["acceptedTicketIds"] == ["T2", "T3"]
+    assert response["card"]["remainingTicketIds"] == ["T1"]
+
+    response = transition(cwd, state_dir, response, "continue_wave")
+    assert response["card"]["phase"] == "blocked"
+    assert response["card"]["blockedReason"] == "retry limit reached for: T1"
 
 
 def test_sweep_admission_rejects_extra_authority(tmp_path, cwd, config, canonical_sweep_admission):

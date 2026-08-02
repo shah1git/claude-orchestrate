@@ -1132,21 +1132,27 @@ export default function pocockControl(pi: ExtensionAPI): void {
 				const response = await serialize(async () => {
 					const runtime = asRuntimeContext(context);
 					const current = activeFor(runtime);
-					const runId = params.runId ?? current?.card.runId;
-					if (!runId) throw new PocockError("pocock_status requires a runId when no mirrored run is active");
-					if (current && !isTerminal(current.card) && current.card.runId !== runId) {
+					const runId = params.runId ?? (current && !isTerminal(current.card) ? current.card.runId : undefined);
+					if (current && !isTerminal(current.card) && runId && current.card.runId !== runId) {
 						throw new PocockError(
 							`Pocock run ${current.card.runId} is still active; pocock_status cannot replace its mirror with ${runId}`,
 						);
 					}
-					const result = await invokeCore(pi, runtime, "status", { runId }, signal);
-					const card = requireCard(result, "status");
 					const manifest = await observeManifest(pi, runtime, signal);
-					if (manifest.manifestFingerprint !== card.manifestFingerprint) {
+					const request = runId
+						? { runId, manifestFingerprint: manifest.manifestFingerprint }
+						: { manifestFingerprint: manifest.manifestFingerprint };
+					const result = await invokeCore(pi, runtime, "status", request, signal);
+					if (!runId && result.active === false) return result;
+					const card = requireCard(result, "status");
+					if (
+						manifest.manifestFingerprint !== card.manifestFingerprint
+						&& !isRecord(card.runtimeMismatch)
+					) {
 						throw new PocockError("Installed Pocock agent manifests differ from the run's pinned manifest");
 					}
 					commitCard(pi, runtime, card, {
-						expectedRunId: runId,
+						expectedRunId: runId ?? card.runId,
 						laneModels: manifest.laneModels,
 						agents: manifest.agents,
 						manifestFingerprint: manifest.manifestFingerprint,
@@ -1162,6 +1168,25 @@ export default function pocockControl(pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_call", async (event, context) => {
+		const runtime = asRuntimeContext(context);
+		if (event.toolName === "hub") {
+			return serialize(async () => {
+				const run = activeFor(runtime);
+				if (vetoReason) {
+					return {
+						block: true,
+						reason: `Pocock is fail-closed after an unsettled sealed task: ${vetoReason}`,
+					};
+				}
+				if (!run || isTerminal(run.card)) return;
+				return {
+					block: true,
+					reason:
+						"The sealed blocking task is one-shot; completed or settled workers must not be revived or waited through Hub. " +
+						"Continue only through the next authorized Pocock runtime command.",
+				};
+			});
+		}
 		if (event.toolName !== "task") return;
 		return serialize(async () => {
 			const runtime = asRuntimeContext(context);

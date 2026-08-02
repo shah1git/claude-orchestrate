@@ -11,9 +11,10 @@
 #   2. При содержательной правке подними `version` на единицу. Забытый бамп
 #      не страшен: телеметрия штампует записи отпечатком v<version>+<sha256:7>,
 #      и хеш выдаст незабампленную правку.
-#   3. Конкретные модели здесь не пинуются: lanes ссылаются только на роли OMP
-#      `@smol`/`@task`/`@advisor`/`@slow`. Адаптер разрешает роли через живой
-#      model registry, а runtime записывает и проверяет фактический provider/id.
+#   3. Активная нативная политика `omp` ниже не пинует конкретные модели: lanes
+#      ссылаются только на роли OMP `@smol`/`@task`/`@advisor`/`@slow`. Архивные
+#      `cross_provider`/`availability` действуют только для явного воспроизведения
+#      прежнего `run_lane` и не имеют полномочий публичной диспетчеризации.
 #   4. Capability-контракт ролей живёт во фронтматтере `.omp/agents/pocock-*.md`;
 #      `omp.agents` ниже только связывает класс работы с этими именами. Адаптер
 #      хеширует эффективные manifests и отклоняет project-shadow либо дрейф
@@ -25,7 +26,10 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 39
+version: 40
+# v40 (2026-08-02): разбирательство с нерешёнными решениями идёт через полный
+#      Pocock spine; `cross_provider` и `availability` явно помечены как
+#      исторический архив `run_lane`, не как нативная OMP-политика.
 # v39 (2026-08-01, ADR-0011): третья тонкая Голова допускает только
 #      run-local Прочёс. `entry: sweep` запечатывает полный локальный ledger
 #      и DAG; телеметрия несёт их отпечатки. Это отдельная форма входа, не
@@ -393,9 +397,9 @@ shape:
     сборка:                  # assembly — работа разваливается на вертикальные срезы
       criterion: work splits into vertical slices (spec, then tickets with blocking edges)
       sequence: grill (lead-opened, owner-answered) -> spec (to-spec) -> tickets (to-tickets) -> frontier
-    разбирательство:         # investigation — одна нитка, резать нечего
-      criterion: one thread, nothing to cut into slices
-      sequence: straight to work; no spec, no tickets; Step 0.5 clarification rules apply unchanged
+    разбирательство:         # investigation — одна нить, но всё ещё полный Pocock
+      criterion: one thread with unresolved judgment or clarification
+      sequence: record_triage -> record_clarification -> record_plan -> approve_plan -> publish_tickets -> native execution
     прочёс:                  # sweep — закрытый run-local ledger с реальной шириной DAG
       criterion: all ticket acceptance and integration decisions are pre-decided; the complete local DAG has independent work
       sequence: owner witness -> seal local ledger and DAG -> native execution; never publish as a frontier
@@ -648,9 +652,8 @@ gates:
     proportionality_stop: 2.0
 
 # -----------------------------------------------------------------------------
-# Кросс-провайдерные лейны (references/cross-provider.md).
-# Постоянный мандат 2026-07-09: провайдер — решение лида; качество не сдвигается.
-# Модели пиновать только проверенные по каталогу коннектора (правило 3 шапки).
+# Исторический архив совместимости `run_lane` (до v35).
+# Нативная Pocock-диспетчеризация никогда не читает и не выбирает эту политику.
 # -----------------------------------------------------------------------------
 cross_provider:
   enabled: auto-detect             # run-lane detect; нет поверхности -> Claude-дефолты
@@ -1114,14 +1117,13 @@ cross_provider:
     pin_effort_explicitly: required
 
 # -----------------------------------------------------------------------------
-# Замены при НЕДОСТУПНОСТИ модели (SKILL.md Step 2, «Availability fallbacks»).
+# Исторические замены недоступных моделей для прежнего `run_lane`.
+# Это не политика OMP `modelFallback` и она не влияет на нативную приёмку.
 #
 # Недоступность — кончилось окно лимитов, не оплачена подписка, коннектор
-# отсутствует/разлогинен, поверхность отвечает ошибкой — это НЕ провал качества:
-# попытки лестницы эскалации (routing.escalation) она не расходует, и вердикт
-# тикета от неё не портится. Правило направления: замена никогда не опускается
-# ниже пола качества класса — только «вбок» (равный тир другого провайдера)
-# или «вверх» (дороже, но не хуже).
+# отсутствует/разлогинен, поверхность отвечает ошибкой — это НЕ провал качества
+# в исторических запусках: попытки лестницы эскалации (routing.escalation) она
+# не расходует, и вердикт тикета от неё не портится.
 #
 # Чтение цепочки: первый ДОСТУПНЫЙ элемент выигрывает; последний элемент —
 # терминальное поведение, когда недоступно всё:

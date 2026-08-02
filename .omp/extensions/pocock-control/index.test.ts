@@ -71,6 +71,43 @@ test("a runtime-mismatched mirror can be replaced by a new run", async () => {
 	expect(start?.request).not.toHaveProperty("lead");
 });
 
+
+test("status without a mirrored run hydrates the core-owned active run", async () => {
+	const manifestFingerprint = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+	const harness = adapterHarness((command, request) => {
+		if (command === "status") {
+			expect(request).toEqual({ manifestFingerprint });
+			return { card: { ...card("durable-run", 7, "ready"), manifestFingerprint } };
+		}
+		if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+		throw new Error(`Unexpected core command ${command}: ${JSON.stringify(request)}`);
+	});
+
+	const observed = await harness.status("discover-active", {}, undefined, undefined, harness.context);
+
+	expect(observed.isError).not.toBe(true);
+	expect(harness.requests.map(request => request.command)).toEqual(["metadata", "status"]);
+});
+
+
+test("status without a mirrored run reports an empty workspace", async () => {
+	const harness = adapterHarness((command, request) => {
+		if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+		if (command === "status") {
+			expect(request).toEqual({
+				manifestFingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			});
+			return { active: false };
+		}
+		throw new Error(`Unexpected core command ${command}: ${JSON.stringify(request)}`);
+	});
+
+	const observed = await harness.status("discover-empty", {}, undefined, undefined, harness.context);
+
+	expect(observed.isError).not.toBe(true);
+	expect(harness.requests.map(request => request.command)).toEqual(["metadata", "status"]);
+});
+
 type CoreRequest = {
 	command: string;
 	request: Record<string, unknown>;
@@ -513,6 +550,136 @@ describe("Pocock live dispatch observability", () => {
 		expect(harness.requests).toHaveLength(requestCount);
 	});
 
+});
+
+describe("Hub lifecycle guard", () => {
+	test("blocks every Hub operation only for this session's nonterminal Pocock run", async () => {
+		const harness = adapterHarness(command => {
+			if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+			if (command === "start") return card("hub-guard-run", 0, "producer_dispatch_pending");
+			if (command === "transition") return card("hub-guard-run", 1, "completed");
+			throw new Error(`Unexpected core command ${command}`);
+		});
+		const hubCall = (op: string) => harness.toolCall(
+			{ toolName: "hub", toolCallId: `hub-${op}`, input: { op } },
+			harness.context,
+		);
+
+		expect(await hubCall("send")).toBeUndefined();
+
+		await harness.enter("enter-hub-guard", { entry: "full", objective: "Guard Hub lifecycle" }, undefined, undefined, harness.context);
+		for (const op of ["send", "wait", "list"]) {
+			expect(await hubCall(op)).toEqual({
+				block: true,
+				reason: expect.stringContaining("sealed blocking task is one-shot"),
+			});
+		}
+		expect(await hubCall("send")).toEqual({
+			block: true,
+			reason: expect.stringContaining("must not be revived or waited through Hub"),
+		});
+
+		await harness.transition(
+			"complete-hub-guard",
+			{ runId: "hub-guard-run", revision: 0, stateHash: "hub-guard-run-0-hash", action: "complete" },
+			undefined,
+			undefined,
+			harness.context,
+		);
+		expect(await hubCall("wait")).toBeUndefined();
+	});
+
+	test("keeps Hub blocked after malformed task settlement clears the session mirror", async () => {
+		const sealedTaskInput = {
+			context: "sealed result transport",
+			tasks: [{ task: "First", agent: "task" }],
+		};
+		let manifestFingerprint = "";
+		const harness = adapterHarness((command, request) => {
+			if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+			if (command === "start") {
+				manifestFingerprint = String(request.manifestFingerprint);
+				return { ...card("hub-fail-closed", 0, "producer_dispatch_pending"), manifestFingerprint };
+			}
+			if (command === "seal-task") {
+				return {
+					...card("hub-fail-closed", 1, "producer_running"),
+					manifestFingerprint,
+					dispatchId: "dispatch-fail-closed",
+					attemptIds: ["attempt-1"],
+					taskInput: sealedTaskInput,
+				};
+			}
+			throw new Error(`Unexpected core command ${command}`);
+		});
+		await harness.enter(
+			"enter-hub-fail-closed",
+			{ entry: "full", objective: "Guard malformed settlement" },
+			undefined,
+			undefined,
+			harness.context,
+		);
+		await harness.toolCall(
+			{ toolName: "task", toolCallId: "dispatch-fail-closed-call", input: { context, tasks: [{ task }] } },
+			harness.context,
+		);
+		const malformed = await harness.toolResult(
+			{
+				toolName: "task",
+				toolCallId: "dispatch-fail-closed-call",
+				input: sealedTaskInput,
+				isError: false,
+			},
+			harness.context,
+		);
+		const guarded = await harness.toolCall(
+			{ toolName: "hub", toolCallId: "hub-after-fail-closed", input: { op: "wait" } },
+			harness.context,
+		);
+
+		expect(malformed?.isError).toBe(true);
+		expect(guarded).toEqual({
+			block: true,
+			reason: expect.stringContaining("fail-closed after an unsettled sealed task"),
+		});
+	});
+
+	test("status without runId replaces a terminal mirror with the core-owned active run", async () => {
+		const harness = adapterHarness((command, request) => {
+			if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+			if (command === "start") return card("finished-run", 0, "ready");
+			if (command === "transition") return card("finished-run", 1, "completed");
+			if (command === "status") {
+				expect(request).toEqual({
+					manifestFingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+				});
+				return {
+					...card("resumed-run", 4, "ready"),
+					manifestFingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+				};
+			}
+			throw new Error(`Unexpected core command ${command}`);
+		});
+		await harness.enter("enter-finished", { entry: "full", objective: "Finish old run" }, undefined, undefined, harness.context);
+		await harness.transition(
+			"complete-finished",
+			{ runId: "finished-run", revision: 0, stateHash: "finished-run-0-hash", action: "complete" },
+			undefined,
+			undefined,
+			harness.context,
+		);
+		const observed = await harness.status("discover-resumed", {}, undefined, undefined, harness.context);
+		const guarded = await harness.toolCall(
+			{ toolName: "hub", toolCallId: "hub-after-resume", input: { op: "wait" } },
+			harness.context,
+		);
+
+		expect(observed.isError).not.toBe(true);
+		expect(guarded).toEqual({
+			block: true,
+			reason: expect.stringContaining("sealed blocking task is one-shot"),
+		});
+	});
 });
 
 describe("uiEvidenceBinding", () => {

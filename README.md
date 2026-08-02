@@ -15,41 +15,54 @@ state, and a fail-closed three-lens quality gate.
 
 ### Суть проекта
 
-`orchestrate` превращает сессию **Oh My Pi (OMP)** в ведущего оркестратора сложной
-инженерной работы. Лид проходит подготовительный хребет Покока, публикует полноценные
-тикеты, а затем передаёт исполнение нативным OMP-агентам. Результат нельзя принять
-одним рассуждением модели: принятие разрешает только сохраняемый управляющий контур
-после детерминированных проверок и независимого ревью.
+`orchestrate` превращает сессию **Oh My Pi (OMP)** в ведущего оркестратора
+сложной инженерной работы. До входа в Pocock `/orchestrate` триажирует обычную
+полностью разрешённую работу: только один самодостаточный блокирующий пакет может
+быть выполнен напрямую. Во всех остальных случаях лид проходит подготовительный
+хребет Покока, публикует полноценные Тикеты и передаёт исполнение нативным
+OMP-агентам. Результат нельзя принять одним рассуждением модели: принятие
+разрешает только сохраняемый управляющий контур после детерминированных проверок
+и независимого ревью.
 
 У оркестратора три публичных входа:
 
-- **`/orchestrate`** — полный цикл для сырой задачи: триаж → уточнение → план → явное
-  одобрение → публикация тикетов → исполнение → проверка → синтез.
-- **`/orchestrate-frontier`** — тонкий вход для уже подготовленного фронтира тикетов. Он
-  проверяет происхождение спецификации, одобрения и рёбер зависимостей и сразу входит
-  в общий исполнительный цикл. Без доказуемого происхождения не стартует; когда
-  трекер объективно недоступен, допускается только явная аттестация владельца с
-  записанной причиной.
-- **`/orchestrate-sweep`** — тонкий вход для закрытого run-local Прочёса: все тикеты,
-  их приёмка и интеграция уже решены, владелец даёт явный witness, а runtime атомарно
-  запечатывает полный локальный ledger и DAG. Это не опубликованный фронтир и не
-  замена tracker provenance.
+- **`/orchestrate`** — сначала триаж. Прямой путь допустим только для обычной
+  полностью разрешённой работы с самодостаточными `Target`, `Change`, `Acceptance`,
+  исполнимой ровно одним Исполнителем в одном блокирующем нативном пакете; хост
+  независимо проверяет, что наблюдаемый результат и patch соответствуют полному
+  контракту `Target`, `Change` и `Acceptance`. Любое сомнение, сырая или
+  decision-bearing работа ведут в полный цикл:
+  уточнение → план → явное одобрение → публикация Тикетов → исполнение → проверка
+  → синтез.
+- **`/orchestrate-frontier`** — тонкий вход для уже подготовленного Фронтира
+  Тикетов. Он всегда вызывает `pocock_enter`, проверяет происхождение спецификации,
+  одобрения и рёбер зависимостей и затем входит в общий исполнительный цикл.
+- **`/orchestrate-sweep`** — тонкий вход для закрытого run-local Прочёса: все
+  Тикеты, их приёмка и интеграция уже решены, владелец даёт явный witness, а runtime
+  атомарно запечатывает полный локальный ledger и DAG. Он всегда вызывает
+  `pocock_enter`; это не опубликованный Фронтир и не замена tracker provenance.
 
-Все три головы используют одно исполнительное ядро. Они не содержат собственных копий
-маршрутизации, бюджетов, ретраев или правил приёмки.
+Прямой путь не создаёт Pocock-Прогон, Карточку состояния или Линзы и никогда не
+принимает Фронтир либо Прочёс. После входа все три Головы используют одно
+исполнительное ядро; они не содержат собственных копий маршрутизации, Бюджетов,
+ретраев или правил приёмки.
 
 ### Архитектура
 
 ```mermaid
 flowchart LR
-    H["/orchestrate, /orchestrate-frontier или /orchestrate-sweep"] --> C["OMP extension: pocock-control"]
+    O["/orchestrate: триаж"] -->|обычная полностью разрешённая работа| D["один блокирующий native OMP task"]
+    D --> H["хост сверяет результат и patch с Target, Change и Acceptance"]
+    O -->|сомнение или полный метод| C["OMP extension: pocock-control"]
+    F["/orchestrate-frontier"] --> C
+    W["/orchestrate-sweep"] --> C
     C --> R["omp_runtime.py: сохраняемая FSM"]
-    R --> D["запечатанный OMP task batch"]
-    D --> A["OMP capability-agents"]
-    A --> P["детерминированный pre-gate"]
-    P --> L["Standards + Spec + Critic"]
+    R --> P["запечатанный OMP task batch"]
+    P --> A["OMP capability-agents"]
+    A --> G["детерминированный pre-gate"]
+    G --> L["один волновой пакет: Standards + Spec + Critic"]
     L --> R
-    R --> S["приёмка и синтез"]
+    R --> S["частичная приёмка и синтез"]
 ```
 
 - **Голова** — публичный скилл. Она ведёт разговор с владельцем и запрашивает только
@@ -60,10 +73,13 @@ flowchart LR
   разрешившуюся модель и связывает результат с попыткой.
 - **Управляющий контур** —
   [`skill/orchestrate/tools/omp_runtime.py`](skill/orchestrate/tools/omp_runtime.py).
-  Он владеет фазами, допустимыми переходами, маршрутизацией, лимитами попыток,
-  резервом токенов, pre-gate, приёмкой и хэшированной карточкой состояния на диске.
-- **Транспорт** — только нативный OMP `task` в пакетном режиме. Публичные головы не
-  запускают CLI отдельных вендоров и не строят вложенный оркестратор.
+  Он владеет единственным долговечным Прогоном рабочего каталога, фазами, допустимыми
+  переходами, маршрутизацией, лимитами попыток, резервом токенов, pre-gate, приёмкой и
+  HMAC-аутентифицированной Карточкой состояния на диске.
+- **Транспорт Pocock** — только нативный OMP `task` в пакетном режиме. Публичные
+  Головы не запускают CLI отдельных вендоров и не строят вложенный оркестратор.
+  Исключение до `pocock_enter` — строго ограниченный Прямой путь `/orchestrate`;
+  это один блокирующий нативный пакет с хостовой проверкой, а не второй Прогон.
 
 Подробное архитектурное решение записано в
 [ADR-0009](docs/adr/0009-native-omp-control-plane.md).
@@ -103,34 +119,46 @@ settlement как оперативную телеметрию; fallback или �
 
 ### Сохраняемое состояние и fail-closed поведение
 
-Каждый прогон получает `runId` и карточку состояния:
+Каждый Pocock-Прогон получает `runId` и Карточку состояния:
 
 ```text
 runId · revision · stateHash · configFingerprint · manifestFingerprint · phase · nextActions
 ```
 
 Полное состояние хранится в `$XDG_STATE_HOME/pocock-omp` (по умолчанию
-`~/.local/state/pocock-omp`) отдельно для каждого рабочего каталога. Карточка
-аутентифицирована HMAC-ключом с правами `0600` и закрепляет снимок
+`~/.local/state/pocock-omp`) по рабочему каталогу. Ядро допускает ровно один
+нетерминальный долговечный Прогон на этот каталог между всеми OMP-сессиями.
+Новая сессия вызывает `pocock_status` без `runId`; ядро находит Прогон на диске,
+а адаптер гидратирует его Карточку. Бюджет и счётчики попыток принадлежат Прогону
+и не сбрасываются новой сессией.
+
+Карточка аутентифицирована HMAC-ключом с правами `0600` и закрепляет снимок
 runtime/config/manifests. Устаревшая ревизия, повреждённый файл, подделанное
-свидетельство, незапечатанный `task`, неверный результат или
-повторный вызов переводят протокол в отказ, а не в догадку.
+свидетельство, незапечатанный `task`, неверный результат или повторный вызов
+переводят протокол в отказ, а не в догадку. Ошибка связывания раздачи, состояния
+либо запечатанных входов останавливает всю команду; ошибка, безопасно связанная
+с одной попыткой, не отбрасывает её соседей.
 
-OMP-сессия хранит только зеркало карточки `pocock-state`. После возобновления сессии
-адаптер сверяет зеркало с авторитетным состоянием на диске. Осиротевший вызов `task`
-не может обойти runtime.
+Адаптер хранит лишь зеркало Карточки и его Hub-guard действует в пределах
+сессии. После settlement нативный `task` однократен: нельзя ждать или оживлять
+его через Hub; повтор — новая запечатанная попытка, разрешённая текущей Карточкой.
+Восстанавливаемая ошибка не оправдывает автоматических отмены и повторного
+входа. Обычная отмена возможна только по явному отказу владельца от работы.
+Новый вход может заменить активный Прогон лишь при установленном самим ядром
+расхождении runtime или capability-agent manifests. Ядро пишет replacement-журнал,
+сначала создаёт неактивную замену, затем откатывает непринятые patch, отменяет
+старый Прогон со ссылкой `supersededBy` и активирует замену; после сбоя `start`
+или `status` идемпотентно завершают эту последовательность.
 
-Перед запечатанной раздачей runtime отдельно проверяет известную невалидную форму
-baseline OMP: корневой и обнаруженные OMP вложенные репозитории, не являющиеся
-submodule, должны иметь разрешимый `HEAD`. Исправные вложенные репозитории разрешены;
-отказ перечисляет точные пути до запуска попытки.
+### Запечатанные входы и зависимости
 
-Пин runtime имеет две области жизни. Адаптер закрепляет байты отдельно для каждой
-OMP-сессии, поэтому новая сессия может увидеть штатно установленное обновление.
-Карточка закрепляет `runtimeFingerprint` на весь прогон: после изменения runtime
-старый прогон доступен только через `status`, получает пустой
-`nextActions` и не возобновляется. Работа продолжается новым прогоном из того же
-долговечного провенанса.
+`INPUTS` изолированного Тикета содержит полный встроенный контракт, разрешимый
+репозиторный путь, полный URL, полностью квалифицированный `issue://owner/repo/N`
+либо принятый артефакт предшественника. Сокращения `#123` и `Issue #123` не
+являются источником: ядро сообщает
+`incomplete_tracker_reference`. Зависимость называет принятый выход и
+установленный факт, который он предоставляет; поручения читать трекер, IRC или
+историю разговора недопустимы.
 
 ### Изоляция и границы доверия
 
@@ -148,24 +176,25 @@ OMP-сессии, поэтому новая сессия может увидет
 
 ### Проверка и принятие
 
-Перед LLM-ревью runtime уже привязал и хэшировал артефакт результата, затем выполняет
-детерминированный pre-gate:
+Перед LLM-ревью runtime привязывает и хэширует артефакт результата, затем
+выполняет детерминированный pre-gate:
 
-- запечатанные direct-argv команды и `git diff --check`, с ошибкой на конкретном
+- запечатанные direct-argv команды и `git diff --check`, с ошибкой на конкретной
   producer attempt;
-- diff-лимит каждого producer patch с централизованным откатом волны при превышении;
+- diff-лимит каждого producer patch;
 - для живого UI — challenge-bound browser/xdev evidence с точным критерием и
   успешным host-assert над наблюдаемым результатом.
 
-Затем один пакет OMP запускает три независимые линзы:
-
-1. **Standards** — соблюдение документированных правил проекта.
-2. **Spec** — полнота и точность относительно тикета.
-3. **Critic** — попытка опровергнуть результат и единственный вердикт `PASS`/`FAIL`.
-
-Приёмка возможна только при `Critic=PASS` и отсутствии выживших блокирующих замечаний,
-внесённых текущей работой. После приёмки runtime записывает телеметрию через единственный
-писатель и лишь затем разрешает синтез.
+Затем для **всей Волны** и только её прошедшего pre-gate подмножества запускается
+один пакет из трёх различных независимых Линз. Все Производители Волны имеют
+общий запечатанный поставщик/семейство, а Standards, Spec и Critic независимы от
+него. Каждая Линза возвращает
+`{lens, summary, reports:[{attemptId, summary, findings, verdict}]}` с отчётом
+для каждой прошедшей producer attempt. Standards и Spec дают `NO_VERDICT`;
+только Critic даёт `PASS`/`FAIL`. Ошибка одной Линзы повторяет только её, а не
+всю Волну. Приёмка сохраняет уже прошедшие Тикеты и для каждого нового требует
+`Critic=PASS` и отсутствия выживших блокирующих замечаний, внесённых текущей
+работой.
 
 ### Установка
 
@@ -219,17 +248,20 @@ bash scripts/verify-install.sh --offline
 ### Использование
 
 ```text
+/orchestrate обнови один полностью описанный файл
 /orchestrate реализуй сложную многофайловую задачу
 /orchestrate-frontier
 /orchestrate-frontier label:ready-for-agent
 /orchestrate-sweep выполни закрытый локальный прочёс
 ```
 
-`/orchestrate` нужен для новой, неразобранной или decision-bearing работы.
-`/orchestrate-frontier` нужен только тогда, когда спецификация, одобрение, тикеты и
-зависимости уже опубликованы. `/orchestrate-sweep` нужен только для полного
+`/orchestrate` сначала выбирает Прямой путь только при всех его строгих условиях;
+иначе он начинает полный метод через `pocock_enter`. `/orchestrate-frontier` нужен
+только тогда, когда спецификация, одобрение, Тикеты и зависимости уже опубликованы,
+и всегда входит через `pocock_enter`. `/orchestrate-sweep` нужен только для полного
 неопубликованного локального ledger с заранее решёнными приёмкой и интеграцией,
-явным witness владельца и независимой шириной DAG.
+явным witness владельца и независимой шириной DAG; он также всегда входит через
+`pocock_enter`. Ни Фронтир, ни Прочёс не могут быть переданы Прямому пути.
 
 ### Исторические компоненты
 
@@ -252,18 +284,21 @@ bash scripts/verify-install.sh --offline
 
 `orchestrate` 是 **Oh My Pi (OMP)** 的原生 Pocock 编排控制面。它有三个公共技能入口：
 
-- **`/orchestrate`**：完整流程，用于尚未拆解的任务；执行分诊、澄清、计划、明确批准、
-  工单发布、执行、验证和综合。
-- **`/orchestrate-frontier`**：用于已经发布并建立依赖关系的工单前沿；先验证规格、批准和
-  provenance，再直接进入执行循环。
+- **`/orchestrate`**：先分诊；只有完全明确的普通工作、具备自包含的
+  `Target`、`Change`、`Acceptance`，并可由一个阻塞式原生 `task` 批次中的单个 worker
+  完成时，才可走 direct path。host 必须独立核验可观察结果和 patch 是否符合完整的
+  `Target`、`Change`、`Acceptance` 合同；任何疑问都进入完整 Pocock 流程。
+- **`/orchestrate-frontier`**：用于已经发布并建立依赖关系的工单前沿；它始终调用
+  `pocock_enter`，再验证规格、批准和 provenance。
 - **`/orchestrate-sweep`**：用于闭合的 run-local sweep：工单、验收与集成均已决定，
-  所有者给出明确 witness，runtime 原子封存完整 ledger 和 DAG；它不是已发布的 tracker
-  frontier。
+  所有者给出明确 witness，runtime 原子封存完整 ledger 和 DAG；它始终调用
+  `pocock_enter`，不是已发布的 tracker frontier。
 
-三个入口共享同一个确定性运行时：
-[`skill/orchestrate/tools/omp_runtime.py`](skill/orchestrate/tools/omp_runtime.py)。
+direct path 不创建 Pocock run、状态卡或 lenses，也绝不接收 frontier 或 sweep。三个
+入口在进入 Pocock 后共享同一个确定性运行时：
+[`skill/orchestrate/tools/omp_runtime.py`](skill/orchestrate/tools/omp_runtime.py)；
 [`.omp/extensions/pocock-control/index.ts`](.omp/extensions/pocock-control/index.ts)
-是薄 OMP 适配器；唯一的工作传输是原生批量 `task`。
+是薄 OMP 适配器；唯一的 Pocock 工作传输是原生批量 `task`。
 
 ### 与模型解耦
 
@@ -275,14 +310,18 @@ fallback 或与声明模型不一致本身不会拒绝一次尝试，也不影�
 
 ### 状态、隔离与质量门
 
-运行状态持久化到磁盘，并由 `runId`、单调递增的 `revision` 与哈希链保护。安装器默认使用
-`task.isolation.mode: auto`；runtime 也接受显式选择的 OMP 隔离 backend（例如
-`rcopy`），但拒绝 `none`（[ADR-0010](docs/adr/0010-isolation-backend-policy.md)）。
-工作区可以使用 CoW、overlayfs/ProjFS、git worktree 或目录副本；agent frontmatter
-提供工具白名单。它不是操作系统容器或网络防火墙。
+控制面在每个工作目录中只允许一个非终态、持久化的 Pocock run。新 OMP 会话以没有
+`runId` 的 `pocock_status` 查找并水合它；预算和尝试计数不会重置。可恢复错误不会自动
+cancel-and-re-enter；普通取消只允许明确的 owner abandonment。只有 core 自身确认已有
+`runtime_mismatch` 时，新入口才能替换活动 run；core 先持久化 replacement journal
+并完整写入非活动的 staged replacement，再取消旧 run，最后激活 staged replacement。
+适配器的 Hub guard 仅限会话，已 settlement 的原生 `task` 是 one-shot，不能通过
+Hub 等待或复活。
 
-结果必须通过确定性 pre-gate 和三重独立审查：**Standards**、**Spec**、**Critic**。
-只有 Critic 可以给出最终 PASS/FAIL；任何仍存在的本次工作阻塞项都会拒绝接收。
+结果必须通过确定性 pre-gate。随后只有通过 pre-gate 的 producer subset 进入一个
+wave-level 三 lens 包：独立的 **Standards**、**Spec**、**Critic** 都报告每个 producer
+attempt。Standards/Spec 给出 `NO_VERDICT`，仅 Critic 给出 `PASS`/`FAIL`；仅失败 lens
+重试，已通过工单保持已接收。
 
 ### 安装与使用
 
@@ -292,10 +331,12 @@ fallback 或与声明模型不一致本身不会拒绝一次尝试，也不影�
 bash scripts/verify-install.sh --offline
 ```
 
-新任务、裸“orchestrate”请求或任何未决决策使用 `/orchestrate <任务>`；已经准备好的
-已发布工单前沿使用 `/orchestrate-frontier`；仅当完整未发布的本地 ledger、验收和集成
-已经闭合并有明确 owner witness 时使用 `/orchestrate-sweep`。旧 `run_lane` 仅保留为
-历史兼容代码，公共入口不再调用它。
+新任务、裸“orchestrate”请求或任何未决决策使用 `/orchestrate <任务>`；direct path 仅用于
+一个完全明确、普通且自包含的任务，并在单个 blocking `task` batch 中只运行一个 worker；
+否则调用 `pocock_enter`。已经准备好
+的已发布工单前沿始终使用 `/orchestrate-frontier`，闭合的未发布本地 ledger 始终使用
+`/orchestrate-sweep`；两者都不允许 direct path。旧 `run_lane` 仅保留为历史兼容代码，
+公共入口不再调用它。
 
 ---
 
@@ -306,20 +347,24 @@ bash scripts/verify-install.sh --offline
 `orchestrate` is a native **Oh My Pi (OMP)** control plane for Pocock-style engineering
 orchestration. It exposes three public skill heads:
 
-- **`/orchestrate`** — the full path for raw work: triage, clarification, plan, explicit
-  approval, ticket publication, execution, verification, and synthesis.
-- **`/orchestrate-frontier`** — the thin path for an already-published ticket frontier. It
-  verifies specification, approval, provenance, and dependency edges before execution.
+- **`/orchestrate`** — triages first. The direct path is available only to fully resolved
+  ordinary work with self-contained `Target`, `Change`, and `Acceptance`, executable by
+  exactly one worker item in one blocking native `task` batch and independently verified
+  by the host against the complete `Target`, `Change`, and `Acceptance` contract; doubt
+  enters full Pocock.
+- **`/orchestrate-frontier`** — the thin path for an already-published ticket frontier.
+  It always calls `pocock_enter`, then verifies specification, approval, provenance, and
+  dependency edges before execution.
 - **`/orchestrate-sweep`** — the thin path for a closed run-local sweep: every ticket,
   acceptance criterion, and integration decision is already decided, the owner supplies an
-  explicit witness, and the runtime atomically seals the complete ledger and DAG. It is not
-  a tracker frontier.
+  explicit witness, and the runtime atomically seals the complete ledger and DAG. It always
+  calls `pocock_enter`; it is not a tracker frontier.
 
-All three heads use one deterministic runtime,
+The direct path creates no Pocock run, state card, or lenses and never accepts a frontier
+or sweep. Once inside Pocock, all heads use one deterministic runtime,
 [`skill/orchestrate/tools/omp_runtime.py`](skill/orchestrate/tools/omp_runtime.py), and one
-thin OMP adapter,
-[`.omp/extensions/pocock-control/index.ts`](.omp/extensions/pocock-control/index.ts).
-Native batched OMP `task` is the only worker transport.
+thin OMP adapter, [`.omp/extensions/pocock-control/index.ts`](.omp/extensions/pocock-control/index.ts).
+Native batched OMP `task` is the only Pocock worker transport.
 
 ### Model-independent routing
 
@@ -333,10 +378,14 @@ fallback or declared-model mismatch alone neither rejects an attempt nor affects
 
 ### Durable state, isolation, and gates
 
-The control plane persists a hash-chained state machine with monotonic revisions. It
-owns routing, retry limits, budget reservation, deterministic pre-gates, review
-adjudication, and acceptance. OMP session entries contain only a mirrored state card;
-resume re-hydrates it from authoritative disk state.
+The control plane permits exactly one nonterminal durable run per workspace. A new OMP
+session calls `pocock_status` without `runId` to find and hydrate it; its budget and
+attempt counters persist. Recoverable failure never triggers automatic cancel-and-re-enter;
+explicit owner abandonment is the only ordinary cancellation path. A new entry may replace
+an active run only when the core itself proves `runtime_mismatch`; the core first persists
+the replacement journal and complete inactive staged replacement, then cancels the old run
+and activates the staged replacement. The adapter's Hub guard is session-local, and a
+settled native `task` is one-shot: it is never waited on or revived through Hub.
 
 The installer defaults to `task.isolation.mode: auto`; the runtime also accepts an
 explicit isolated OMP backend such as `rcopy`, but rejects `none`
@@ -344,9 +393,11 @@ explicit isolated OMP backend such as `rcopy`, but rejects `none`
 overlayfs/ProjFS, `git worktree`, or a directory copy, plus per-agent tool
 allowlists. This is not an OS container or a network sandbox.
 
-Every accepted deliverable passes deterministic checks and three independent lenses:
-**Standards**, **Spec**, and **Critic**. Critic owns the sole PASS/FAIL verdict, while any
-surviving introduced blocker refuses acceptance.
+Every pre-gate-passed producer subset receives one wave-level package of exactly three
+distinct independent lenses: **Standards**, **Spec**, and **Critic**. Each reports each
+producer attempt; Standards and Spec emit `NO_VERDICT`, and Critic owns the sole
+`PASS`/`FAIL`. Only a failed lens is retried, and partial acceptance preserves passing
+tickets.
 
 ### Install and verify
 
@@ -363,9 +414,12 @@ bash scripts/verify-install.sh --offline
 
 A normal install copies one detached snapshot of the skills, OMP agents, and extension
 without changing global OMP settings. Use `--link` only for live-checkout development.
-Invoke `/orchestrate <task>` for raw or decision-bearing work, `/orchestrate-frontier` for
-a prepared published frontier, and `/orchestrate-sweep` only for a closed unpublished local
-ledger with pre-decided acceptance and integration plus an explicit owner witness.
+Invoke `/orchestrate <task>` for raw or decision-bearing work, or for the narrowly
+eligible direct ordinary task described above; all other `/orchestrate` inputs enter
+Pocock. `/orchestrate-frontier` is always for a prepared published frontier and
+`/orchestrate-sweep` always for a closed unpublished local ledger with pre-decided
+acceptance and integration plus an explicit owner witness. Neither can use the direct
+path.
 
 The legacy [`run_lane`](skill/orchestrate/tools/run_lane/) executor remains only for
 historical reproduction; no public head calls it.
