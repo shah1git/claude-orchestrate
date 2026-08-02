@@ -780,6 +780,40 @@ def test_failed_task_preserves_transport_error_in_attempt_and_report(tmp_path, c
         }
     ]
 
+
+def test_success_exit_with_patch_capture_error_preserves_exact_failure(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    sealed = seal(cwd, state_dir, prepare(cwd, state_dir, admit_frontier(cwd, state_dir, response), config), "producer")
+    state = authoritative(cwd, state_dir, sealed["card"]["runId"])
+    assignment = state["attempts"][sealed["attemptIds"][0]]
+    result = normalized_result(tmp_path, assignment)
+    capture_error = "Patch capture failed: fatal: Not a valid object name"
+    result.update({"exitCode": 0, "error": capture_error})
+
+    settled = runtime.command_record_result(
+        cwd,
+        state_dir,
+        {
+            **reference(sealed["card"]),
+            "dispatchId": sealed["dispatchId"],
+            "toolCallId": "producer-patch-capture-error-tool",
+            "input": sealed["taskInput"],
+            "details": {"results": [result]},
+            "content": {},
+            "isError": False,
+        },
+        config,
+    )
+
+    persisted = authoritative(cwd, state_dir, settled["card"]["runId"])
+    attempt = persisted["attempts"][assignment["attemptId"]]
+    assert attempt["status"] == "availability_failed"
+    assert attempt["failureReason"] == capture_error
+    assert attempt["availabilityEvidence"]["reason"] == capture_error
+    report = runtime.command_report(cwd, state_dir, {"runId": settled["card"]["runId"]})["report"]
+    assert report["participants"][0]["failureReason"] == capture_error
+    assert report["failures"][0]["reason"] == capture_error
+
 def test_ui_evidence_failure_spends_two_quality_attempts_then_blocks(tmp_path, cwd, config):
     ticket = mechanical_ticket(ui_live=True)
     state_dir, response = start(tmp_path, cwd, config, "frontier")
@@ -900,6 +934,45 @@ def test_effective_omp_settings_are_fail_closed(monkeypatch, tmp_path):
             runtime.validate_effective_omp_settings(tmp_path)
         assert error.value.code == "omp_config_incompatible"
         assert error.value.details["mismatches"][0]["key"] == mismatch_key
+
+
+def test_seal_rejects_only_nested_repository_without_resolvable_head(tmp_path, config):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / "README.md").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "root"],
+        cwd=repo,
+        check=True,
+    )
+    nested = repo / "scratch" / "unborn"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=nested, check=True)
+
+    state_dir, response = start(tmp_path / "run", repo, config, "frontier")
+    response = prepare(repo, state_dir, admit_frontier(repo, state_dir, response), config)
+    before = response["card"]
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.command_seal(repo, state_dir, {**reference(before), "kind": "producer"})
+    assert error.value.code == "omp_isolation_baseline_invalid"
+    assert error.value.details == {
+        "repositories": [{"path": "scratch/unborn", "reason": "HEAD does not resolve to a commit"}]
+    }
+    unchanged = runtime.command_status(repo, state_dir, {"runId": before["runId"]})["card"]
+    assert unchanged["revision"] == before["revision"]
+    assert unchanged["phase"] == "producer_dispatch_pending"
+
+    (nested / "fixture.txt").write_text("healthy\n", encoding="utf-8")
+    subprocess.run(["git", "add", "fixture.txt"], cwd=nested, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-qm", "nested"],
+        cwd=nested,
+        check=True,
+    )
+    sealed = runtime.command_seal(repo, state_dir, {**reference(before), "kind": "producer"})
+    assert sealed["card"]["phase"] == "producer_running"
 
 
 def test_same_revision_state_rewrite_is_rejected_by_authenticated_witness(tmp_path, cwd, config):

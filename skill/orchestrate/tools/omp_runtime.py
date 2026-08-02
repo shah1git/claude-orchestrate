@@ -790,6 +790,87 @@ def validate_effective_omp_settings(cwd: Path) -> None:
     )
 
 
+def discover_omp_nested_repositories(repo_root: Path, submodule_paths: set[str]) -> list[Path]:
+    """Mirror OMP's non-submodule nested-repository discovery."""
+    nested: list[Path] = []
+
+    def walk(directory: Path) -> None:
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            return
+        for entry in entries:
+            if entry.name in {"node_modules", ".git"} or not entry.is_dir(follow_symlinks=False):
+                continue
+            path = Path(entry.path)
+            relative = path.relative_to(repo_root).as_posix()
+            if os.access(path / ".git", os.F_OK) and relative not in submodule_paths:
+                nested.append(path)
+                continue
+            walk(path)
+
+    walk(repo_root)
+    return sorted(nested)
+
+
+def validate_omp_isolation_baseline(cwd: Path) -> None:
+    """Reject repository shapes that OMP cannot capture as an isolation baseline."""
+    try:
+        root_result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=cwd,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise RuntimeFailure(
+            "omp_isolation_baseline_invalid",
+            "cannot inspect the Git repositories required by OMP task isolation",
+            repositories=[{"path": ".", "reason": str(exc)}],
+        ) from exc
+    fail(
+        root_result.returncode != 0 or not root_result.stdout.strip(),
+        "omp_isolation_baseline_invalid",
+        "OMP task isolation requires a Git checkout with a resolvable root",
+        repositories=[{"path": ".", "reason": "Git repository root is not resolvable"}],
+    )
+    repo_root = Path(root_result.stdout.strip()).resolve()
+    submodules = subprocess.run(
+        ["git", "submodule", "--quiet", "foreach", "--recursive", "echo $sm_path"],
+        cwd=repo_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    fail(
+        submodules.returncode != 0,
+        "omp_isolation_baseline_invalid",
+        "OMP cannot enumerate the repositories required for task isolation",
+        repositories=[{"path": ".", "reason": "initialized Git submodules are not enumerable"}],
+    )
+    submodule_paths = {line.strip() for line in submodules.stdout.splitlines() if line.strip()}
+    repositories = [repo_root, *discover_omp_nested_repositories(repo_root, submodule_paths)]
+    broken: list[dict[str, str]] = []
+    for repository in repositories:
+        head = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+            cwd=repository,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if head.returncode != 0 or not head.stdout.strip():
+            relative = "." if repository == repo_root else repository.relative_to(repo_root).as_posix()
+            broken.append({"path": relative, "reason": "HEAD does not resolve to a commit"})
+    fail(
+        bool(broken),
+        "omp_isolation_baseline_invalid",
+        "OMP cannot capture task isolation patches from repositories without a resolvable HEAD",
+        repositories=broken,
+    )
+
+
 def require_mapping(value: Any, field: str) -> dict[str, Any]:
     fail(not isinstance(value, dict), "invalid_request", f"{field} must be an object")
     return value
@@ -1870,6 +1951,7 @@ def command_seal(cwd: Path, explicit_state_dir: str | None, request: dict[str, A
         fail(state["phase"] != expected_phase, "illegal_transition", f"cannot seal {kind} in phase {state['phase']}")
         pending = state.get("pendingDispatch")
         fail(not isinstance(pending, dict) or pending.get("kind") != kind or pending.get("status") != "prepared", "dispatch_invalid", "no matching prepared dispatch exists")
+        validate_omp_isolation_baseline(cwd)
         collection = state["attempts"] if kind == "producer" else state["lensAttempts"]
         pending["status"] = "running"
         pending["sealedAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -2295,7 +2377,7 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
             exit_code = raw_result.get("exitCode")
             model_substituted = model_fallback is True or model_base(observed_model) != model_base(declared_model)
             reason = None
-            if is_error or model_substituted:
+            if is_error or model_substituted or task_error is not None:
                 reason = task_error
                 if reason is None:
                     reason = (

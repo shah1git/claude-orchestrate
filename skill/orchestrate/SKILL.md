@@ -163,8 +163,10 @@ Synthesize only after the runtime authorizes `begin_synthesis`, then request `co
 from the resulting card. A nonterminal run is never completed merely because a session
 ends.
 
-After `complete`, call `pocock_report` exactly once and use its immutable report as
-the participation appendix to the final answer. Before the ledger, define **attempt** in
+Before a session presents the final answer for any terminal run, call
+`pocock_report` exactly once in that same OMP session, even if another session
+already read it. Use its immutable report as the participation appendix to the
+final answer. Before the ledger, define **attempt** in
 the user's language: one runtime-sealed OMP Task dispatch; every producer execution,
 Standards / Spec / Critic lens dispatch, and retry is a separate attempt, not another
 ticket. Group ledger rows by role or lens and write the model actually used in that role

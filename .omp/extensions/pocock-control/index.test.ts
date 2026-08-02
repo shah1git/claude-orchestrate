@@ -202,6 +202,7 @@ function adapterHarness(respond?: CoreResponder) {
 		sessionStart: hooks.get("session_start")!,
 		toolCall: hooks.get("tool_call")!,
 		toolResult: hooks.get("tool_result")!,
+		sessionStop: hooks.get("session_stop")!,
 	};
 }
 
@@ -499,6 +500,42 @@ describe("Pocock participation observability", () => {
 		]);
 		expect(harness.entries).toHaveLength(entryCount);
 		expect(harness.requests.filter(value => value.command === "metadata")).toHaveLength(metadataCount);
+	});
+
+	test("keeps a terminal run alive until its participation report is read in the current session", async () => {
+		const runId = "terminal-report-run";
+		const harness = adapterHarness((command, request) => {
+			if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+			if (command === "start") return card(runId, 0, "ready");
+			if (command === "transition") return card(runId, 1, "completed");
+			if (command === "report") return { report: { runId: request.runId, participants: [] } };
+			throw new Error(`Unexpected core command ${command}`);
+		});
+
+		await harness.enter("enter-terminal-report", { entry: "full", objective: "Deliver report" }, undefined, undefined, harness.context);
+		await harness.transition(
+			"complete-terminal-report",
+			{ runId, revision: 0, stateHash: `${runId}-0-hash`, action: "complete" },
+			undefined,
+			undefined,
+			harness.context,
+		);
+
+		const missing = await harness.sessionStop(
+			{ session_id: "terminal-report-session", turn_id: "before-report", stop_hook_active: false },
+			harness.context,
+		);
+		expect(missing).toEqual({
+			continue: true,
+			additionalContext: expect.stringContaining("pocock_report"),
+		});
+
+		await harness.report("read-terminal-report", { runId }, undefined, undefined, harness.context);
+		const delivered = await harness.sessionStop(
+			{ session_id: "terminal-report-session", turn_id: "after-report", stop_hook_active: false },
+			harness.context,
+		);
+		expect(delivered).toBeUndefined();
 	});
 
 	test("surfaces core report errors through normal toolFailure", async () => {

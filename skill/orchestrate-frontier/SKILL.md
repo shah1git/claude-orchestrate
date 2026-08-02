@@ -134,8 +134,10 @@ After `pocock_accept`, query the durable tracker and call `continue_wave` with e
 Continue until the runtime observes an explicit empty remaining set and authorizes
 `begin_synthesis`. A nonterminal run is never completed merely because the session ends.
 
-After `complete`, call `pocock_report` exactly once and use its immutable report as the
-participation appendix. Before the ledger, define **attempt** in the user's language:
+Before a session presents the final answer for any terminal run, call
+`pocock_report` exactly once in that same OMP session, even if another session
+already read it. Use its immutable report as the participation appendix.
+Before the ledger, define **attempt** in the user's language:
 one runtime-sealed OMP Task dispatch; every producer execution, Standards / Spec / Critic
 lens dispatch, and retry is a separate attempt, not another ticket. Group one row per
 attempt by role or lens and write its actually used `observedModel`; when it is absent,

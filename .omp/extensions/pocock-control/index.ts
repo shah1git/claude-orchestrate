@@ -102,6 +102,7 @@ interface ActiveRun {
 	laneModels: Record<string, LaneModel>;
 	agents: Map<string, DeclaredAgent>;
 	manifestFingerprint: string;
+	participationReportRead: boolean;
 	dispatch?: SealedDispatch;
 }
 
@@ -799,6 +800,7 @@ function commitCard(
 		agents: options.agents ?? previous?.agents ?? new Map(),
 		manifestFingerprint: options.manifestFingerprint ?? previous?.manifestFingerprint ?? card.manifestFingerprint,
 		dispatch: reset ? undefined : previous?.dispatch,
+		participationReportRead: previous?.card.runId === card.runId && previous.participationReportRead,
 	};
 	updateDispatchWidget(pi, context, card);
 	vetoReason = undefined;
@@ -916,10 +918,20 @@ export default function pocockControl(pi: ExtensionAPI): void {
 	pi.on("session_stop", (event, context) => {
 		const runtime = asRuntimeContext(context);
 		const run = activeFor(runtime);
-		if (!run || isTerminal(run.card) || vetoReason || event.stop_hook_active) return;
+		if (!run || vetoReason || event.stop_hook_active) return;
 		const nudgeKey = `${event.session_id}:${event.turn_id}`;
 		if (lastStopNudge === nudgeKey) return;
 		lastStopNudge = nudgeKey;
+		if (isTerminal(run.card)) {
+			if (run.participationReportRead) return;
+			return {
+				continue: true,
+				additionalContext:
+					`Pocock run ${run.card.runId} is terminal in phase ${run.card.phase}, but its participation report ` +
+					"was not read in this OMP session. Call pocock_report exactly once for this run and use the immutable " +
+					"report as the participation appendix to the final answer.",
+			};
+		}
 		return {
 			continue: true,
 			additionalContext:
@@ -1144,6 +1156,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 				if (!runId) throw new PocockError("pocock_report requires a runId when no mirrored run is active");
 				const response = await invokeCore(pi, runtime, "report", { runId }, signal);
 				if (!isRecord(response.report)) throw new PocockError("Pocock core report did not return a report object");
+				if (current?.card.runId === runId) current.participationReportRead = true;
 				return toolSuccess({ report: response.report });
 			} catch (error) {
 				return toolFailure(error);

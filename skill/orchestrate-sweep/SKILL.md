@@ -101,8 +101,10 @@ card's `acceptedTicketIds`, `remainingTicketIds`, `readyTicketIds`, and `blocked
 but do not send them back as authority. The runtime advances accepted tickets and recomputes
 the sets. Only its empty remaining set can authorize `begin_synthesis`.
 
-After `complete`, call `pocock_report` exactly once and use its immutable report as the
-participation appendix. Before the ledger, define **attempt** in the user's language:
+Before a session presents the final answer for any terminal run, call
+`pocock_report` exactly once in that same OMP session, even if another session
+already read it. Use its immutable report as the participation appendix.
+Before the ledger, define **attempt** in the user's language:
 one runtime-sealed OMP Task dispatch; every producer execution, Standards / Spec / Critic
 lens dispatch, and retry is a separate attempt, not another ticket. Group one row per
 attempt by role or lens and write its actually used `observedModel`; when it is absent,
