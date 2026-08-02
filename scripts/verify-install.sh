@@ -454,6 +454,16 @@ else
       bad "тесты инструментов красные:"
       printf '%s\n' "${t_out}" | tail -5 | sed 's/^/      /'
     fi
+
+    # Машинный bootstrap не входит в установленный runtime, но его контракт
+    # проверяется из чекаута: локальный git fixture и временный HOME исключают
+    # сеть и пользовательскую конфигурацию.
+    if bootstrap_out="$(cd "${ORCH_DIR}" && guard 180 python3 -m pytest -q scripts/test_bootstrap_machine.py 2>&1)"; then
+      ok "bootstrap-machine regression: $(printf '%s\n' "${bootstrap_out}" | tail -1)"
+    else
+      bad "bootstrap-machine regression красный:"
+      printf '%s\n' "${bootstrap_out}" | tail -5 | sed 's/^/      /'
+    fi
   fi
 fi
 

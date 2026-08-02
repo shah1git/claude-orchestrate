@@ -21,13 +21,13 @@
 # Если pull обновил сам bootstrap-mac.sh — скрипт перезапускает себя свежей
 # версией (bash нельзя доверять дочитывание файла, изменившегося под ногами).
 #
-# Первый запуск: клонируйте репозиторий куда удобно (симлинки установки будут
-# указывать именно туда, поэтому место должно быть постоянным) и запустите
-# скрипт из чекаута:
+# Первый запуск вручную: клонируйте репозиторий куда удобно и запустите скрипт
+# из чекаута. Однокомандный перенос профиля и этот bootstrap выполняет
+# bootstrap-machine.sh.
 #   git clone https://github.com/shah1git/claude-orchestrate.git ~/projects/claude-orchestrate
 #   bash ~/projects/claude-orchestrate/bootstrap-mac.sh
-# sudo может потребоваться только для создания /opt/tools — там кэш апстрима
-# скиллов Покока.
+# Апстримный кэш по умолчанию хранится в пользовательском XDG cache; путь можно
+# переопределить через POCOCK_CACHE_DIR.
 # =============================================================================
 set -euo pipefail
 
@@ -46,8 +46,9 @@ if [ ! -d "${ORCH_DIR}/skill/orchestrate" ] \
   echo "✗ рядом со скриптом нет полного нативного OMP-контура (.omp/agents, pocock-control или omp_runtime.py) — запускайте bootstrap-mac.sh из чекаута этого репозитория" >&2
   exit 1
 fi
-POCOCK_CACHE="/opt/tools/mattpocock-skills"   # клон апстрима; канон живёт не здесь,
-                                              # а в ~/.agents/skills
+POCOCK_CACHE="${POCOCK_CACHE_DIR:-${XDG_CACHE_HOME:-${HOME}/.cache}/claude-orchestrate/mattpocock-skills}"
+                                              # Апстрим-кэш вне системного /opt;
+                                              # канон по-прежнему живёт в ~/.agents/skills.
 ORCH_REPO="https://github.com/shah1git/claude-orchestrate.git"
 POCOCK_REPO="https://github.com/mattpocock/skills.git"
 

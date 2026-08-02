@@ -1,0 +1,147 @@
+# Portable owner-selected OMP profile.
+# Authentication, setup completion, consent, sessions, and machine identifiers
+# are deliberately absent; bootstrap-machine.sh restores only reusable behavior.
+providers:
+  webSearchOrder: []
+  openaiWebsockets: auto
+  kimiApiFormat: auto
+  antigravityEndpoint: auto
+  streamFirstEventTimeoutSeconds: -1
+  streamIdleTimeoutSeconds: -1
+  maxInFlightRequests:
+    google-antigravity: 8
+    openai-codex: 3
+    anthropic: 3
+    kimi-code: 3
+    xai-oauth: 1
+  autoThinkingMaxEffort: xhigh
+modelRoles:
+  default: anthropic/claude-opus-5:high
+  smol: google-antigravity/gemini-3.6-flash:medium
+  slow: anthropic/claude-fable-5:max
+  free: google-antigravity/claude-opus-4-6:high
+  plan: anthropic/claude-fable-5:max
+  vision: openai-codex/gpt-5.6-sol:high
+  designer: openai-codex/gpt-5.6-sol:high
+  commit: google-antigravity/gemini-3.6-flash:medium
+  tiny: google-antigravity/gemini-3.6-flash:medium
+  task: openai-codex/gpt-5.6-terra:high
+  advisor: xai-oauth/grok-4.5:high
+modelTags:
+  free:
+    name: AG Opus
+    color: accent
+modelProviderOrder:
+  - openai-codex
+  - anthropic
+  - xai-oauth
+  - google-antigravity
+  - kimi-code
+cycleOrder:
+  - smol
+  - default
+  - free
+  - plan
+  - slow
+defaultThinkingLevel: auto
+contextPromotion:
+  enabled: true
+retry:
+  enabled: true
+  modelFallback: true
+  maxRetries: 6
+  baseDelayMs: 500
+  maxDelayMs: 45000
+  fallbackRevertPolicy: cooldown-expiry
+  usageAwareFallback: true
+  usageReservePct: 10
+  usageReservePolicy: auto
+  fallbackChains:
+    default:
+      - openai-codex/gpt-5.6-sol:high
+      - kimi-code/k3:high
+      - google-antigravity/gemini-3.1-pro:high
+      - xai-oauth/grok-4.5:high
+    smol:
+      - openai-codex/gpt-5.6-luna:high
+      - kimi-code/kimi-for-coding-highspeed:high
+      - anthropic/claude-haiku-4-5:high
+    slow:
+      - anthropic/claude-opus-5:high
+      - openai-codex/gpt-5.6-sol:max
+      - xai-oauth/grok-4.5:high
+      - kimi-code/k3:max
+      - google-antigravity/gemini-3.1-pro:high
+    free:
+      - google-antigravity/gemini-3.1-pro:high
+    plan:
+      - openai-codex/gpt-5.6-sol:max
+      - xai-oauth/grok-4.5:high
+      - kimi-code/k3:max
+      - google-antigravity/gemini-3.1-pro:high
+    vision:
+      - anthropic/claude-opus-5:high
+      - xai-oauth/grok-4.5:high
+      - google-antigravity/gemini-3.1-pro:high
+      - kimi-code/k3:high
+    designer:
+      - anthropic/claude-opus-5:high
+      - xai-oauth/grok-4.5:high
+      - google-antigravity/gemini-3.1-pro:high
+      - kimi-code/k3:high
+    commit:
+      - openai-codex/gpt-5.6-luna:low
+      - kimi-code/kimi-for-coding-highspeed:low
+      - anthropic/claude-haiku-4-5:low
+    tiny:
+      - openai-codex/gpt-5.6-luna:low
+      - kimi-code/kimi-for-coding-highspeed:minimal
+      - anthropic/claude-haiku-4-5:minimal
+    task:
+      - anthropic/claude-opus-5:high
+      - xai-oauth/grok-4.5:high
+      - google-antigravity/claude-opus-4-6:high
+      - kimi-code/k3:high
+    advisor:
+      - google-antigravity/gemini-3.6-flash:high
+      - anthropic/claude-opus-5:high
+      - openai-codex/gpt-5.6-terra:high
+      - kimi-code/k3:high
+task:
+  eager: preferred
+  maxConcurrency: 6
+  maxRecursionDepth: 1
+  maxRuntimeMs: 1800000
+  enableEffort: true
+  maxEffort: max
+  agentModelOverrides:
+    scout: "google-antigravity/gemini-3.6-flash:high,openai-codex/gpt-5.6-luna:low,kimi-code/kimi-for-coding-highspeed:low"
+    sonic: "google-antigravity/gemini-3.6-flash:high,openai-codex/gpt-5.6-luna:low,kimi-code/kimi-for-coding-highspeed:minimal"
+    librarian: "anthropic/claude-sonnet-5:medium,google-antigravity/gemini-3.1-pro:high,openai-codex/gpt-5.6-terra:medium,kimi-code/k3:high"
+    reviewer: "anthropic/claude-fable-5:max,xai-oauth/grok-4.5:high,openai-codex/gpt-5.6-sol:max,google-antigravity/claude-opus-4-6:high,kimi-code/k3:max"
+    designer: "openai-codex/gpt-5.6-sol:high,anthropic/claude-opus-5:high,xai-oauth/grok-4.5:high,google-antigravity/gemini-3.1-pro:high,kimi-code/k3:high"
+    task: "openai-codex/gpt-5.6-terra:high,anthropic/claude-opus-5:high,xai-oauth/grok-4.5:high,google-antigravity/claude-opus-4-6:high,kimi-code/k3:high"
+  batch: true
+  isolation:
+    mode: auto
+    apply: false
+    merge: patch
+  showResolvedModelBadge: true
+advisor:
+  enabled: true
+  subagents: false
+  syncBacklog: "3"
+  immuneTurns: 2
+tier:
+  openai: none
+  anthropic: none
+  google: none
+  subagent: inherit
+  advisor: none
+symbolPreset: unicode
+theme:
+  light: light
+async:
+  enabled: false
+display:
+  showTokenUsage: true

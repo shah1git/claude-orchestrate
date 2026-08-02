@@ -205,6 +205,22 @@ runtime/config/manifests. Устаревшая ревизия, повреждё�
 - `git`;
 - `gh` для работы с GitHub Issues во фронтирном входе.
 
+На новой машине весь переносимый профиль OMP, три публичные Головы, их
+capability-агенты, расширение и хребет Покока устанавливаются одной командой:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shah1git/claude-orchestrate/main/bootstrap-machine.sh | bash
+```
+
+Скрипт клонирует или обновляет репозиторий в
+`${XDG_DATA_HOME:-~/.local/share}/claude-orchestrate`, сохраняет прежние
+`config.yml` и `WATCHDOG.md` вне реестра OMP, устанавливает переносимый профиль и
+запускает полную самопроверку. OAuth, API-ключи, согласие `dev.autoqaConsent`,
+сессии и машинное состояние не переносятся; вендоры авторизуются владельцем после
+установки.
+
+Ручная установка:
+
 ```bash
 git clone https://github.com/shah1git/claude-orchestrate /opt/claude-orchestrate
 cd /opt/claude-orchestrate
@@ -325,6 +341,17 @@ attempt。Standards/Spec 给出 `NO_VERDICT`，仅 Critic 给出 `PASS`/`FAIL`�
 
 ### 安装与使用
 
+在新机器上一条命令即可安装可移植 OMP 配置、三个公共入口、capability agents、
+extension 和 Pocock spine：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shah1git/claude-orchestrate/main/bootstrap-machine.sh | bash
+```
+
+脚本不会迁移 OAuth、API keys、用户 consent、sessions 或机器运行状态；安装完成后由
+owner 自行登录供应商。手动安装仍然可用：
+
+```bash
 ./install.sh                 # 复制并注册技能、OMP agents 和 extension
 ./install.sh --link          # 仅开发：使用指向当前 checkout 的符号链接
 ./install.sh --configure-omp # 复制安装并明确写入全局 OMP task 不变量
@@ -403,6 +430,21 @@ tickets.
 
 Requirements: `omp`, Python 3.12+ with `PyYAML`, `git`, and `gh` for GitHub-backed
 frontiers.
+
+On a new machine, install the portable OMP profile, all three public heads, their
+capability agents, the extension, and the Pocock spine with one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shah1git/claude-orchestrate/main/bootstrap-machine.sh | bash
+```
+
+The script clones or updates the checkout under
+`${XDG_DATA_HOME:-~/.local/share}/claude-orchestrate`, backs up an existing
+`config.yml` and `WATCHDOG.md` outside OMP discovery, restores the portable profile,
+and runs the full verifier. It deliberately excludes OAuth, API keys, user consent,
+sessions, and machine runtime state; the owner logs in to each provider afterward.
+
+Manual installation:
 
 ```bash
 git clone https://github.com/shah1git/claude-orchestrate /opt/claude-orchestrate
