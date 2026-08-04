@@ -116,6 +116,52 @@ def canonical(value: Any) -> str:
 def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 
+def contains_lone_unicode_surrogate(value: str) -> bool:
+    """Return whether a JSON string contains an unpaired UTF-16 surrogate."""
+    return any("\ud800" <= character <= "\udfff" for character in value)
+
+
+def require_evidence_text(value: Any, field: str) -> str:
+    fail(
+        not isinstance(value, str) or value == "" or contains_lone_unicode_surrogate(value),
+        "evidence_invalid",
+        f"{field} must be a non-empty Unicode string without lone surrogates",
+    )
+    return value
+
+
+def normalize_ui_probe(value: Any) -> dict[str, str]:
+    """Validate and canonically order the closed v1 browser probe schema."""
+    fail(not isinstance(value, dict), "evidence_invalid", "witness.probe must be an object")
+    kind = value.get("kind")
+    fail(not isinstance(kind, str), "evidence_invalid", "witness.probe.kind must be a string")
+    fields = {
+        "url": ("expected", "kind"),
+        "dom": ("expected", "kind", "selector"),
+    }.get(kind)
+    fail(fields is None, "evidence_invalid", "witness.probe.kind is unknown")
+    fail(set(value) != set(fields), "evidence_invalid", "witness.probe has unsupported or missing fields")
+    normalized = {field: require_evidence_text(value[field], f"witness.probe.{field}") for field in fields}
+    fail(normalized["kind"] != kind, "evidence_invalid", "witness.probe.kind is invalid")
+    return {field: normalized[field] for field in sorted(normalized)}
+
+
+def normalize_ui_witness(value: Any) -> dict[str, Any]:
+    """Validate the adapter-owned, closed v1 UI witness envelope."""
+    fail(not isinstance(value, dict), "evidence_invalid", "witness must be an object")
+    fields = {"version", "witnessId", "attemptId", "challengeToken", "criterion", "probe", "probeHash"}
+    fail(set(value) != fields, "evidence_invalid", "witness has unsupported or missing fields")
+    fail(value.get("version") != 1 or isinstance(value.get("version"), bool), "evidence_invalid", "witness.version must be exactly 1")
+    return {
+        "attemptId": require_evidence_text(value["attemptId"], "witness.attemptId"),
+        "challengeToken": require_evidence_text(value["challengeToken"], "witness.challengeToken"),
+        "criterion": require_evidence_text(value["criterion"], "witness.criterion"),
+        "probe": normalize_ui_probe(value["probe"]),
+        "probeHash": require_evidence_text(value["probeHash"], "witness.probeHash"),
+        "version": 1,
+        "witnessId": require_evidence_text(value["witnessId"], "witness.witnessId"),
+    }
+
 
 def declared_slot(mapping: Any, key: str, label: str) -> str:
     """Return the single Pocock slot bound to a producer class or lens."""
@@ -2420,7 +2466,7 @@ def command_prepare(cwd: Path, explicit_state_dir: str | None, request: dict[str
                     "token": f"pocock-ui-{uuid.uuid4().hex}",
                     "target": ticket["ui_evidence"]["target"],
                     "criterion": ticket["ui_evidence"]["criterion"],
-                    "requiredStages": ["open", "exercise"],
+                    "requiredStages": ["open", "witness"],
                 }
             prepared_attempts.append(attempt)
             attempt_ids.append(attempt_id)
@@ -3429,206 +3475,6 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
     return output(state)
 
 
-def ui_evidence_bound(code: str, criterion: str) -> bool:
-    """Mirror the adapter's challenge-bound assertion test."""
-
-    def skip_quoted_or_comment(text: str, index: int) -> int | None:
-        if text.startswith("//", index):
-            newline = text.find("\n", index + 2)
-            return len(text) if newline < 0 else newline + 1
-        if text.startswith("/*", index):
-            closing = text.find("*/", index + 2)
-            return None if closing < 0 else closing + 2
-        if index >= len(text) or text[index] not in ("'", '"', "`"):
-            return index
-        quote = text[index]
-        cursor = index + 1
-        while cursor < len(text):
-            if text[cursor] == "\\":
-                cursor += 2
-                continue
-            if quote == "`" and text.startswith("${", cursor):
-                interpolation_end = skip_balanced_group(text, cursor + 1)
-                if interpolation_end is None:
-                    return None
-                cursor = interpolation_end
-                continue
-            if text[cursor] == quote:
-                return cursor + 1
-            cursor += 1
-        return None
-
-    def skip_balanced_group(text: str, opening: int) -> int | None:
-        closings = {"(": ")", "[": "]", "{": "}"}
-        stack = [closings[text[opening]]]
-        cursor = opening + 1
-        while cursor < len(text):
-            skipped = skip_quoted_or_comment(text, cursor)
-            if skipped is None:
-                return None
-            if skipped != cursor:
-                cursor = skipped
-                continue
-            char = text[cursor]
-            if char in closings:
-                stack.append(closings[char])
-            elif char in (")", "]", "}"):
-                if not stack or char != stack[-1]:
-                    return None
-                stack.pop()
-                if not stack:
-                    return cursor + 1
-            cursor += 1
-        return None
-
-    def strip_comments(expression: str) -> str:
-        pieces: list[str] = []
-        cursor = 0
-        while cursor < len(expression):
-            if expression.startswith("//", cursor):
-                newline = expression.find("\n", cursor + 2)
-                cursor = len(expression) if newline < 0 else newline + 1
-                pieces.append(" ")
-                continue
-            if expression.startswith("/*", cursor):
-                closing = expression.find("*/", cursor + 2)
-                if closing < 0:
-                    return ""
-                cursor = closing + 2
-                pieces.append(" ")
-                continue
-            skipped = skip_quoted_or_comment(expression, cursor)
-            if skipped is None:
-                return ""
-            if skipped != cursor:
-                pieces.append(expression[cursor:skipped])
-                cursor = skipped
-                continue
-            pieces.append(expression[cursor])
-            cursor += 1
-        return "".join(pieces)
-
-    def normalized_expression(expression: str) -> str:
-        normalized = strip_comments(expression).strip()
-        while normalized.startswith("("):
-            closing = skip_balanced_group(normalized, 0)
-            if closing != len(normalized):
-                break
-            normalized = normalized[1:-1].strip()
-        return normalized
-
-    def is_literal_expression(expression: str) -> bool:
-        normalized = normalized_expression(expression)
-        if normalized in {"true", "false", "null", "undefined"}:
-            return True
-        if re.fullmatch(r"[+-]?(?:0[xX][\da-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(?:n)?", normalized):
-            return True
-        if normalized[:1] in {"'", '"', "`"}:
-            return skip_quoted_or_comment(normalized, 0) == len(normalized)
-        if normalized[:1] in {"{", "["}:
-            return skip_balanced_group(normalized, 0) == len(normalized)
-        return False
-
-    def top_level_comparison(expression: str) -> tuple[int, int] | None:
-        stack: list[str] = []
-        closings = {"(": ")", "[": "]", "{": "}"}
-        operators = ("!==", "===", "==", "!=", "<=", ">=", "<", ">")
-        cursor = 0
-        while cursor < len(expression):
-            skipped = skip_quoted_or_comment(expression, cursor)
-            if skipped is None:
-                return None
-            if skipped != cursor:
-                cursor = skipped
-                continue
-            char = expression[cursor]
-            if char in closings:
-                stack.append(closings[char])
-            elif char in (")", "]", "}"):
-                if not stack or char != stack[-1]:
-                    return None
-                stack.pop()
-            elif not stack:
-                operator = next((candidate for candidate in operators if expression.startswith(candidate, cursor)), None)
-                if operator is not None:
-                    return cursor, len(operator)
-            cursor += 1
-        return None
-
-    def is_literal_comparison(expression: str) -> bool:
-        normalized = normalized_expression(expression)
-        comparison = top_level_comparison(normalized)
-        if comparison is None:
-            return False
-        index, length = comparison
-        return is_literal_expression(normalized[:index]) and is_literal_expression(normalized[index + length:])
-
-    def first_assert_argument(text: str, opening: int, closing: int) -> str | None:
-        stack: list[str] = []
-        closings = {"(": ")", "[": "]", "{": "}"}
-        cursor = opening + 1
-        while cursor < closing:
-            skipped = skip_quoted_or_comment(text, cursor)
-            if skipped is None:
-                return None
-            if skipped != cursor:
-                cursor = skipped
-                continue
-            char = text[cursor]
-            if char in closings:
-                stack.append(closings[char])
-            elif char in (")", "]", "}"):
-                if not stack or char != stack[-1]:
-                    return None
-                stack.pop()
-            elif char == "," and not stack:
-                return text[opening + 1:cursor]
-            cursor += 1
-        return text[opening + 1:closing]
-
-    cursor = 0
-    while cursor < len(code):
-        skipped = skip_quoted_or_comment(code, cursor)
-        if skipped is None:
-            return False
-        if skipped != cursor:
-            cursor = skipped
-            continue
-        if code.startswith("assert", cursor):
-            before = code[cursor - 1] if cursor else ""
-            after_index = cursor + len("assert")
-            after = code[after_index] if after_index < len(code) else ""
-            if before != "." and not re.match(r"[A-Za-z0-9_$]", before) and not re.match(r"[A-Za-z0-9_$]", after):
-                opening = after_index
-                while opening < len(code):
-                    next_index = skip_quoted_or_comment(code, opening)
-                    if next_index is None:
-                        return False
-                    if next_index != opening:
-                        opening = next_index
-                    elif code[opening].isspace():
-                        opening += 1
-                    else:
-                        break
-                if opening < len(code) and code[opening] == "(":
-                    call_end = skip_balanced_group(code, opening)
-                    if call_end is not None:
-                        first_argument = first_assert_argument(code, opening, call_end - 1)
-                        body = code[opening + 1:call_end - 1]
-                        if (
-                            criterion in body
-                            and first_argument is not None
-                            and not is_literal_expression(first_argument)
-                            and not is_literal_comparison(first_argument)
-                        ):
-                            return True
-                        # Nested assertion calls cannot add stronger evidence
-                        # than their enclosing assertion body; skip the body
-                        # once to keep parsing linear in untrusted code size.
-                        cursor = call_end
-                        continue
-        cursor += 1
-    return False
 def command_record_evidence(cwd: Path, explicit_state_dir: str | None, request: dict[str, Any]) -> dict[str, Any]:
     def apply(state: dict[str, Any]) -> None:
         fail(state["phase"] != "pregate_pending", "illegal_transition", "host UI evidence is accepted only before the deterministic pre-gate")
@@ -3650,38 +3496,50 @@ def command_record_evidence(cwd: Path, explicit_state_dir: str | None, request: 
         invocation = require_mapping(request.get("invocation"), "invocation")
         fail(invocation.get("name") != token, "evidence_invalid", "host UI invocation is not bound to the challenge token")
         action = invocation.get("action")
+        witness: dict[str, Any] | None = None
         if stage == "open":
+            fail("witness" in request, "evidence_invalid", "UI open evidence must not include a witness")
             app = invocation.get("app") if isinstance(invocation.get("app"), dict) else {}
             observed_target = invocation.get("url") or app.get("target")
             fail(action != "open" or observed_target != challenge.get("target"), "evidence_invalid", "UI open evidence must use the exact issued target")
         else:
-            code = require_text(invocation.get("code"), "invocation.code")
-            criterion = require_text(challenge.get("criterion"), "challenge.criterion")
-            fail(
-                action != "run" or not ui_evidence_bound(code, criterion),
-                "evidence_invalid",
-                "UI exercise evidence must assert a non-constant observation bound to the exact issued criterion",
-            )
+            fail(action != "run" or "code" in invocation, "evidence_invalid", "UI witness invocation must be declarative")
+            witness = normalize_ui_witness(request.get("witness"))
+            fail(witness["attemptId"] != attempt_ids[0], "evidence_invalid", "witness is bound to another attempt")
+            fail(witness["challengeToken"] != token, "evidence_invalid", "witness is bound to another challenge token")
+            fail(witness["criterion"] != challenge.get("criterion"), "evidence_invalid", "witness is bound to another criterion")
+            probe_hash = digest(witness["probe"])
+            fail(witness["probeHash"] != probe_hash, "evidence_invalid", "witness probeHash does not match the canonical probe")
+            witness_id = digest({
+                "attemptId": witness["attemptId"],
+                "challengeToken": witness["challengeToken"],
+                "criterion": witness["criterion"],
+                "probeHash": probe_hash,
+                "runId": state["runId"],
+                "version": witness["version"],
+            })
+            fail(witness["witnessId"] != witness_id, "evidence_invalid", "witnessId does not match the current challenge binding")
         completed = {
             record.get("stage")
             for record in state["evidence"]
             if record.get("challengeToken") == token
         }
         fail(stage in completed, "evidence_invalid", f"UI evidence stage {stage} was already recorded")
-        if stage == "exercise":
-            fail("open" not in completed, "evidence_invalid", "UI exercise evidence requires a recorded open stage")
+        if stage == "witness":
+            fail("open" not in completed, "evidence_invalid", "UI witness evidence requires a recorded open stage")
         record = {
             "toolCallId": require_text(request.get("toolCallId"), "toolCallId"),
             "tool": require_text(request.get("tool"), "tool"),
             "success": request.get("success") is True,
             "details": request.get("details"),
-            "invocation": invocation,
             "content": request.get("content"),
             "attemptIds": attempt_ids,
             "challengeToken": token,
             "stage": stage,
             "recordedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
         }
+        if witness is not None:
+            record["witness"] = witness
         fail(record["tool"] not in {"browser", "xdev"}, "evidence_invalid", "only host browser results satisfy a UI challenge")
         fail(not record["success"], "evidence_invalid", "only successful host-observed tool results are evidence")
         state["evidence"].append(record)
@@ -3840,7 +3698,7 @@ def command_pregate(cwd: Path, explicit_state_dir: str | None, request: dict[str
                             "stage": record.get("stage"),
                             "tool": record.get("tool"),
                             "toolCallId": record.get("toolCallId"),
-                            "invocation": record.get("invocation"),
+                            "witness": record.get("witness"),
                             "details": record.get("details"),
                             "content": record.get("content"),
                         }),

@@ -7,6 +7,8 @@ disk artifacts, never a fake routing decision.
 
 from __future__ import annotations
 
+import hashlib
+
 import copy
 import json
 import os
@@ -85,6 +87,53 @@ def transition(cwd: Path, state_dir: str, response: dict, action: str, payload: 
     if payload is not None:
         request["payload"] = payload
     return runtime.command_transition(cwd, state_dir, request)
+
+def browser_witness(card: dict, challenge: dict, probe: dict[str, str] | None = None) -> dict:
+    probe = probe or {"kind": "dom", "selector": "body", "expected": "fixture"}
+    normalized = {field: probe[field] for field in sorted(probe)}
+    probe_hash = hashlib.sha256(
+        json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    witness = {
+        "version": 1,
+        "attemptId": challenge["attemptId"],
+        "challengeToken": challenge["token"],
+        "criterion": challenge["criterion"],
+        "probe": probe,
+        "probeHash": probe_hash,
+    }
+    witness["witnessId"] = hashlib.sha256(
+        json.dumps(
+            {
+                "attemptId": witness["attemptId"],
+                "challengeToken": witness["challengeToken"],
+                "criterion": witness["criterion"],
+                "probeHash": witness["probeHash"],
+                "runId": card["runId"],
+                "version": witness["version"],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return witness
+
+
+def witness_request(card: dict, challenge: dict, probe: dict[str, str] | None = None) -> dict:
+    return {
+        **reference(card),
+        "toolCallId": "browser-witness",
+        "tool": "browser",
+        "success": True,
+        "invocation": {"action": "run", "name": challenge["token"]},
+        "details": {"url": challenge["target"]},
+        "content": "rendered",
+        "attemptIds": [challenge["attemptId"]],
+        "challengeToken": challenge["token"],
+        "stage": "witness",
+        "witness": browser_witness(card, challenge, probe),
+    }
 
 
 def advance_full(cwd: Path, state_dir: str, response: dict) -> dict:
@@ -1257,7 +1306,7 @@ def test_same_revision_state_rewrite_is_rejected_by_authenticated_witness(tmp_pa
     assert error.value.code == "state_auth_failed"
 
 
-def test_ui_evidence_is_attempt_bound_and_ui_tickets_cannot_share_a_wave(tmp_path, cwd, config):
+def test_ui_witness_is_exactly_bound_and_ui_tickets_cannot_share_a_wave(tmp_path, cwd, config):
     ui_ticket = mechanical_ticket(ui_live=True)
     state_dir, response = start(tmp_path, cwd, config, "frontier")
     response = admit_frontier(cwd, state_dir, response)
@@ -1269,6 +1318,18 @@ def test_ui_evidence_is_attempt_bound_and_ui_tickets_cannot_share_a_wave(tmp_pat
     response = settle_producer(tmp_path, cwd, state_dir, sealed, config)
     card = response["card"]
     challenge = card["evidenceRequests"][0]
+    assert challenge["requiredStages"] == ["open", "witness"]
+    assert runtime.normalize_ui_probe({"kind": "url", "expected": " https://fixture.test/ "}) == {
+        "expected": " https://fixture.test/ ",
+        "kind": "url",
+    }
+
+    request = witness_request(card, challenge, {"kind": "dom", "selector": " main ", "expected": " café "})
+
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.command_record_evidence(cwd, state_dir, request)
+    assert error.value.code == "evidence_invalid"
+
     response = runtime.command_record_evidence(
         cwd,
         state_dir,
@@ -1277,11 +1338,7 @@ def test_ui_evidence_is_attempt_bound_and_ui_tickets_cannot_share_a_wave(tmp_pat
             "toolCallId": "browser-open",
             "tool": "browser",
             "success": True,
-            "invocation": {
-                "action": "open",
-                "name": challenge["token"],
-                "url": challenge["target"],
-            },
+            "invocation": {"action": "open", "name": challenge["token"], "url": challenge["target"]},
             "details": {"url": "http://fixture.test"},
             "content": "opened",
             "attemptIds": [challenge["attemptId"]],
@@ -1290,41 +1347,61 @@ def test_ui_evidence_is_attempt_bound_and_ui_tickets_cannot_share_a_wave(tmp_pat
         },
     )
     card = response["card"]
-    exercise_request = {
-        **reference(card),
-        "toolCallId": "browser-exercise",
-        "tool": "browser",
-        "success": True,
-        "invocation": {
-            "action": "run",
-            "name": challenge["token"],
-            "code": "const rendered = document.body.textContent?.includes('fixture'); assert(rendered, 'fixture renders')",
-        },
-        "details": {"url": "http://fixture.test"},
-        "content": "rendered",
-        "attemptIds": [challenge["attemptId"]],
-        "challengeToken": challenge["token"],
-        "stage": "exercise",
-    }
-    invalid_exercise = copy.deepcopy(exercise_request)
-    invalid_exercise["invocation"]["code"] = "return document.body.textContent"
+    request = witness_request(card, challenge, {"kind": "dom", "selector": " main ", "expected": " café "})
+    for legacy_code in (
+        "assert(true)",
+        "try { assert(false) } catch {}",
+        "Promise.reject().catch(() => assert(false))",
+        "return; assert(false)",
+        "if (false) assert(false)",
+        "console.assert(false)",
+    ):
+        legacy_code_only = copy.deepcopy(request)
+        legacy_code_only.pop("witness")
+        legacy_code_only["invocation"]["code"] = legacy_code
+        with pytest.raises(runtime.RuntimeFailure) as error:
+            runtime.command_record_evidence(cwd, state_dir, legacy_code_only)
+        assert error.value.code == "evidence_invalid"
+
+    invalid_witnesses = (
+        lambda witness: witness.update(version=2),
+        lambda witness: witness.update(attemptId="other-attempt"),
+        lambda witness: witness.update(challengeToken="other-token"),
+        lambda witness: witness.update(criterion="other criterion"),
+        lambda witness: witness.update(probeHash="0" * 64),
+        lambda witness: witness.update(witnessId="0" * 64),
+        lambda witness: witness.update(extra="forbidden"),
+        lambda witness: witness.update(probe={"kind": "unknown", "expected": "x"}),
+        lambda witness: witness.update(probe={"kind": "url", "expected": "x", "extra": "forbidden"}),
+        lambda witness: witness.update(probe={"kind": "dom", "selector": "body", "expected": False}),
+        lambda witness: witness.update(probe={"kind": "url", "expected": "\ud800"}),
+    )
+    for mutate_witness in invalid_witnesses:
+        invalid_request = copy.deepcopy(request)
+        mutate_witness(invalid_request["witness"])
+        with pytest.raises(runtime.RuntimeFailure) as error:
+            runtime.command_record_evidence(cwd, state_dir, invalid_request)
+        assert error.value.code == "evidence_invalid"
+
+    response = runtime.command_record_evidence(cwd, state_dir, request)
+    state = authoritative(cwd, state_dir, response["card"]["runId"])
+    witness_record = next(record for record in state["evidence"] if record["stage"] == "witness")
+    assert witness_record["witness"]["probe"] == {"expected": " café ", "kind": "dom", "selector": " main "}
+    assert witness_record["witness"]["probeHash"] == hashlib.sha256(
+        b'{"expected":" caf\xc3\xa9 ","kind":"dom","selector":" main "}'
+    ).hexdigest()
+
+    replay = witness_request(response["card"], challenge, {"kind": "dom", "selector": " main ", "expected": " café "})
     with pytest.raises(runtime.RuntimeFailure) as error:
-        runtime.command_record_evidence(cwd, state_dir, invalid_exercise)
+        runtime.command_record_evidence(cwd, state_dir, replay)
     assert error.value.code == "evidence_invalid"
 
-    constant_exercise = copy.deepcopy(exercise_request)
-    constant_exercise["invocation"]["code"] = "assert(true, 'fixture renders')"
-    with pytest.raises(runtime.RuntimeFailure) as error:
-        runtime.command_record_evidence(cwd, state_dir, constant_exercise)
-    assert error.value.code == "evidence_invalid"
-
-    response = runtime.command_record_evidence(cwd, state_dir, exercise_request)
     response = pregate(cwd, state_dir, response, config)
     assert response["card"]["phase"] == "lens_prepare_pending"
     state = authoritative(cwd, state_dir, response["card"]["runId"])
     ui_check = next(check for check in state["pregate"]["checks"] if check.get("kind") == "ui-evidence")
     assert ui_check["criterion"] == "fixture renders"
-    assert any("assert(" in record for record in ui_check["records"])
+    assert any('"witnessId"' in record for record in ui_check["records"])
 
 
 def test_pregate_keeps_passed_candidates_and_retries_only_failed_tickets(tmp_path, cwd, config):
@@ -2774,20 +2851,6 @@ def test_successful_lenses_become_accepted_only_at_adjudication(tmp_path, cwd, c
     assert {attempt["status"] for attempt in accepted["lensAttempts"].values()} == {"accepted"}
 
 
-@pytest.mark.parametrize(
-    ("code", "expected"),
-    [
-        ('assert(document.body.textContent.includes("fixture renders"), "fixture renders")', True),
-        ('assert(document.body.textContent.includes(`${value})`), "fixture renders")', True),
-        ('assert(true, "fixture renders")', False),
-        ('assert(1 === 1, "fixture renders")', False),
-        ('assert({}, "fixture renders")', False),
-        ('console.assert(document.body.textContent, "fixture renders")', False),
-        ('assert(document.body.textContent, "another criterion"); "fixture renders"', False),
-    ],
-)
-def test_ui_evidence_requires_a_criterion_bound_nonconstant_assertion(code, expected):
-    assert runtime.ui_evidence_bound(code, "fixture renders") is expected
 
 
 def test_run_diff_check_returns_a_result_for_a_completed_git_check(tmp_path):

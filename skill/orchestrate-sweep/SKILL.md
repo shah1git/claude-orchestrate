@@ -92,7 +92,10 @@ synthesis. Do not create a second policy engine in prose.
 
 После `admit_sweep` вызовите разрешённый Карточкой `pocock_prepare` **без**
 `tickets`: runtime читает запечатанные тела и вычисляет готовую Волну. Затем
-следуйте [единому протоколу исполнения](../orchestrate/references/execution-protocol.md).
+следуйте только
+[единому протоколу исполнения](../orchestrate/references/execution-protocol.md).
+Это единственный нормативный источник, включая host-witness UI-доказательство;
+не воспроизводите и не расширяйте его policy в этой Голове.
 
 После `pocock_accept` запросите разрешённый `pocock_transition` с
 `action: "continue_wave"` **без payload**. `begin_synthesis` также не получает

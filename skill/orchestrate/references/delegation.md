@@ -133,10 +133,10 @@ accepts a whole-wave diff as attribution for an individual producer.
 `pocock_pregate` runs each declared `verification` command by direct `argv`
 execution, applies the configured per-ticket (per-attempt) diff ceiling, and
 checks the combined diff. A `ui_live` ticket also receives an attempt-bound challenge token:
-the host must record successful `open` and then `exercise` evidence against that
-same token, target, and criterion through `browser` or `xdev`. Worker assertions,
-screenshots without the challenge, and evidence from another attempt do not
-satisfy it.
+the host must record successful `open` and then a declarative `witness` against the
+same token, target, and criterion through `browser` or `xdev`. The adapter owns
+the host assertion and one-shot `toolCallId` binding; worker assertions, ordinary
+run results, screenshots, and evidence from another attempt do not satisfy it.
 
 Any dispatch, state, or sealed-INPUT binding failure aborts the command. A failure the
 core can safely attribute to one producer attempt rejects that attempt without discarding

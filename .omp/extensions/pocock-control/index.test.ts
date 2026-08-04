@@ -755,10 +755,10 @@ describe("uiEvidenceBinding", () => {
 		token: "pocock-ui-token",
 		target: "http://fixture.test",
 		criterion: "fixture renders",
-		requiredStages: ["open", "exercise"],
-		completedStages: [],
+		requiredStages: ["open", "witness"],
+		completedStages: ["open"],
 	};
-	const card = {
+	const stateCard = {
 		runId: "run-1",
 		revision: 3,
 		stateHash: "hash",
@@ -767,78 +767,201 @@ describe("uiEvidenceBinding", () => {
 		evidenceRequests: [challenge],
 	};
 
-	test("binds only the issued target and token to the open challenge", () => {
-		const invocation = { action: "open", name: challenge.token, url: challenge.target };
-		expect(uiEvidenceBinding(card, {
-			toolName: "write",
-			input: { path: "xd://browser", content: JSON.stringify(invocation) },
-		})).toEqual({ challenge, stage: "open", tool: "xdev", invocation });
-		expect(uiEvidenceBinding(card, {
+	test("binds a closed DOM or URL probe and generates adapter-owned code", () => {
+		const expected = `text "quoted" \\\\ ${"unicode ✓"}`;
+		const invocation = {
+			action: "run",
+			name: challenge.token,
+			witness: { version: 1, probe: { kind: "dom", selector: `#target'); throw new Error('injected`, expected } },
+		};
+		const binding = uiEvidenceBinding(stateCard, { toolName: "browser", input: invocation });
+		expect(binding).toMatchObject({
+			challenge,
+			stage: "witness",
+			tool: "browser",
+			invocation,
+			witness: {
+				version: 1,
+				attemptId: challenge.attemptId,
+				challengeToken: challenge.token,
+				criterion: challenge.criterion,
+				probe: invocation.witness.probe,
+			},
+		});
+		const generated = binding?.generatedInput as { code: string };
+		const values = JSON.stringify({ expected, selector: invocation.witness.probe.selector });
+		expect(generated).toEqual({
+			action: "run",
+			name: challenge.token,
+			code: `const observed = await tab.evaluate(({ selector, expected }) => document.querySelector(selector)?.textContent === expected, ${values});\nassert(observed, ${JSON.stringify(challenge.criterion)});`,
+		});
+		expect(uiEvidenceBinding(stateCard, {
 			toolName: "write",
 			input: {
 				path: "xd://browser",
-				content: JSON.stringify({ action: "open", name: challenge.token, url: "http://other.test" }),
+				content: JSON.stringify({
+					action: "run",
+					name: challenge.token,
+					witness: { version: 1, probe: { kind: "url", expected: " http://fixture.test " } },
+				}),
 			},
-		})).toBeUndefined();
-		expect(uiEvidenceBinding(card, {
-			toolName: "browser",
-			input: { action: "open", url: challenge.target },
-		})).toBeUndefined();
+		})?.witness?.probe).toEqual({ kind: "url", expected: " http://fixture.test " });
 	});
 
-	test("requires recorded open evidence and a criterion-bound non-literal assertion before exercise", () => {
-		const opened = { ...card, evidenceRequests: [{ ...challenge, completedStages: ["open"] }] };
-		expect(uiEvidenceBinding(card, {
+	test("host assertion alone decides successful and false observations", async () => {
+		const invocation = {
+			action: "run",
+			name: challenge.token,
+			witness: { version: 1, probe: { kind: "url", expected: "http://fixture.test/" } },
+		};
+		const binding = uiEvidenceBinding(stateCard, { toolName: "browser", input: invocation });
+		const generated = binding?.generatedInput as { code: string };
+		const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
+			...args: string[]
+		) => (...values: unknown[]) => Promise<unknown>;
+		const execute = new AsyncFunction("tab", "assert", generated.code);
+		const hostAssert = (observed: unknown, message: string) => {
+			if (!observed) throw new Error(message);
+		};
+		await expect(execute({ evaluate: async () => false }, hostAssert)).rejects.toThrow(challenge.criterion);
+		await expect(execute({ evaluate: async () => true }, hostAssert)).resolves.toBeUndefined();
+	});
+
+	test("rejects closed-schema violations, lexical assertions, and completed witnesses", () => {
+		const invocation = {
+			action: "run",
+			name: challenge.token,
+			witness: { version: 1, probe: { kind: "url", expected: "http://fixture.test" } },
+		};
+		for (const malformed of [
+			{ ...invocation, code: "assert(document.title)" },
+			{ action: "run", name: challenge.token, code: "console.assert(document.title)" },
+			{ action: "run", name: challenge.token, code: "try { assert(false) } catch {}" },
+			{ action: "run", name: challenge.token, code: "Promise.reject().catch(() => assert(false))" },
+			{ action: "run", name: challenge.token, code: "return; assert(false)" },
+			{ action: "run", name: challenge.token, code: "if (false) assert(false)" },
+			{ ...invocation, witness: { version: 1, probe: { kind: "url", expected: "", extra: true } } },
+			{ ...invocation, witness: { version: 1, probe: { kind: "dom", selector: "#x", expected: "ok", extra: true } } },
+			{ ...invocation, witness: { version: 2, probe: invocation.witness.probe } },
+			{ ...invocation, witness: { version: 1, probe: { kind: "unknown", expected: "ok" } } },
+			{ ...invocation, witness: { version: 1, probe: { kind: "url", expected: "\ud800" } } },
+		]) {
+			expect(uiEvidenceBinding(stateCard, { toolName: "browser", input: malformed })).toBeUndefined();
+		}
+		expect(uiEvidenceBinding({
+			...stateCard,
+			evidenceRequests: [{ ...challenge, completedStages: ["open", "witness"] }],
+		}, { toolName: "browser", input: invocation })).toBeUndefined();
+	});
+
+	test("records only a successful one-shot pending declarative witness", async () => {
+		const active = {
+			...card("witness-run", 0, "pregate_pending"),
+			evidenceRequests: [challenge],
+		};
+		const harness = adapterHarness((command, request) => {
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") return coreCard(active);
+			if (command === "record-evidence") {
+				return coreCard({
+					...active,
+					revision: 1,
+					stateHash: "witness-run-1-hash",
+					evidenceRequests: [{ ...challenge, completedStages: ["open", "witness"] }],
+				});
+			}
+			throw new Error(`Unexpected core command ${command}`);
+		});
+		await harness.enter("enter-witness", { entry: "full", objective: "Record witness" }, undefined, undefined, harness.context);
+		const invocation = {
+			action: "run",
+			name: challenge.token,
+			witness: { version: 1, probe: { kind: "url", expected: "http://fixture.test/" } },
+		};
+		const replacement = await harness.toolCall({
 			toolName: "browser",
-			input: { action: "run", name: challenge.token, code: "assert(true)" },
-		})).toBeUndefined();
-		expect(uiEvidenceBinding(opened, {
-			toolName: "browser",
-			input: { action: "run", name: challenge.token, code: "return document.title" },
-		})).toBeUndefined();
-		expect(uiEvidenceBinding(opened, {
-			toolName: "browser",
-			input: { action: "run", name: challenge.token, code: "assert(true, 'fixture renders')" },
-		})).toBeUndefined();
-		expect(uiEvidenceBinding(opened, {
-			toolName: "browser",
-			input: { action: "run", name: challenge.token, code: "assert(1 === 1, 'fixture renders')" },
-		})).toBeUndefined();
-		expect(uiEvidenceBinding(opened, {
-			toolName: "browser",
-			input: { action: "run", name: challenge.token, code: "assert({}, 'fixture renders')" },
-		})).toBeUndefined();
-		expect(uiEvidenceBinding(opened, {
-			toolName: "browser",
+			toolCallId: "witness-call",
+			input: invocation,
+		}, harness.context);
+		expect(replacement).toEqual({
 			input: {
 				action: "run",
 				name: challenge.token,
-				code: "console.assert(document.body.textContent, 'fixture renders')",
+				code: `const observed = await tab.evaluate((expected) => location.href === expected, ${JSON.stringify(invocation.witness.probe.expected)});\nassert(observed, ${JSON.stringify(challenge.criterion)});`,
 			},
-		})).toBeUndefined();
-		expect(uiEvidenceBinding(opened, {
+		});
+		if (!isJsonRecord(replacement) || !isJsonRecord(replacement.input)) throw new Error("Witness replacement is malformed");
+		await harness.toolResult({
 			toolName: "browser",
-			input: {
-				action: "run",
-				name: challenge.token,
-				code: "const rendered = document.title.length > 0; assert(rendered); 'fixture renders'",
+			toolCallId: "witness-call",
+			input: replacement.input,
+			details: { returned: true },
+			content: [{ type: "text", text: "true" }],
+			isError: false,
+		}, harness.context);
+		const records = harness.requests.filter(entry => entry.command === "record-evidence");
+		expect(records).toHaveLength(1);
+		expect(records[0]!.request).toMatchObject({
+			stage: "witness",
+			attemptIds: [challenge.attemptId],
+			challengeToken: challenge.token,
+			invocation,
+			witness: {
+				version: 1,
+				attemptId: challenge.attemptId,
+				challengeToken: challenge.token,
+				criterion: challenge.criterion,
+				probe: invocation.witness.probe,
 			},
-		})).toBeUndefined();
-		expect(uiEvidenceBinding(opened, {
+		});
+		await harness.toolResult({
 			toolName: "browser",
-			input: {
-				action: "run",
-				name: challenge.token,
-				code: "const rendered = document.title.length > 0; assert(rendered, 'fixture renders')",
-			},
-		})?.stage).toBe("exercise");
-		expect(uiEvidenceBinding(opened, {
+			toolCallId: "witness-call",
+			input: invocation,
+			details: { returned: true },
+			isError: false,
+		}, harness.context);
+		expect(harness.requests.filter(entry => entry.command === "record-evidence")).toHaveLength(1);
+	});
+
+	test("drops failed, forged, and legacy witness attempts before recording evidence", async () => {
+		const active = {
+			...card("rejected-witness-run", 0, "pregate_pending"),
+			evidenceRequests: [challenge],
+		};
+		const harness = adapterHarness((command, request) => {
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") return coreCard(active);
+			if (command === "record-evidence") return coreCard(active);
+			throw new Error(`Unexpected core command ${command}`);
+		});
+		await harness.enter("enter-rejected-witness", { entry: "full", objective: "Reject witness" }, undefined, undefined, harness.context);
+		const valid = {
+			action: "run",
+			name: challenge.token,
+			witness: { version: 1, probe: { kind: "url", expected: "http://fixture.test/" } },
+		};
+		await harness.toolCall({ toolName: "browser", toolCallId: "failed-witness", input: valid }, harness.context);
+		const failure = await harness.toolResult({
 			toolName: "browser",
-			input: {
-				action: "run",
-				name: challenge.token,
-				code: "assert(document.body.textContent?.includes(`${value})`), 'fixture renders')",
-			},
-		})?.stage).toBe("exercise");
+			toolCallId: "failed-witness",
+			input: valid,
+			details: { returned: false },
+			isError: true,
+		}, harness.context);
+		expect(failure).toMatchObject({ isError: true });
+		expect(await harness.toolCall({
+			toolName: "browser",
+			toolCallId: "forged-witness",
+			input: { ...valid, witness: { version: 1, probe: { kind: "url", expected: "http://fixture.test/", extra: true } } },
+		}, harness.context)).toBeUndefined();
+		await harness.toolResult({
+			toolName: "browser",
+			toolCallId: "legacy-witness",
+			input: { action: "run", name: challenge.token, code: "assert(document.title, 'fixture renders')" },
+			details: {},
+			isError: false,
+		}, harness.context);
+		expect(harness.requests.filter(entry => entry.command === "record-evidence")).toHaveLength(0);
 	});
 });

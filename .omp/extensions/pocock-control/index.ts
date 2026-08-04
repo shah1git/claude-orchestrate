@@ -521,249 +521,93 @@ function browserInvocation(event: { toolName: string; input: JsonRecord }): Json
 	}
 }
 
-function skipQuotedString(code: string, index: number): number | undefined {
-	const quote = code[index];
-	for (let cursor = index + 1; cursor < code.length; cursor += 1) {
-		if (code[cursor] === "\\") {
-			cursor += 1;
-			continue;
-		}
-		if (code[cursor] === quote) return cursor + 1;
-	}
-	return undefined;
+type WitnessProbe =
+	| { kind: "url"; expected: string }
+	| { kind: "dom"; selector: string; expected: string };
+
+interface StructuredWitness {
+	version: 1;
+	witnessId: string;
+	attemptId: string;
+	challengeToken: string;
+	criterion: string;
+	probe: WitnessProbe;
+	probeHash: string;
 }
 
-function skipBalancedGroup(code: string, index: number): number | undefined {
-	const closingFor: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
-	const firstClosing = closingFor[code[index]];
-	if (!firstClosing) return undefined;
-	const closings = [firstClosing];
-	for (let cursor = index + 1; cursor < code.length; cursor += 1) {
-		const skipped = skipQuotedOrComment(code, cursor);
-		if (skipped === undefined) return undefined;
-		if (skipped !== cursor) {
-			cursor = skipped - 1;
-			continue;
-		}
-		const character = code[cursor];
-		const closing = closingFor[character];
-		if (closing) {
-			closings.push(closing);
-			continue;
-		}
-		if (character === ")" || character === "]" || character === "}") {
-			if (character !== closings[closings.length - 1]) return undefined;
-			closings.pop();
-			if (closings.length === 0) return cursor + 1;
-		}
-	}
-	return undefined;
+interface PendingWitness {
+	runId: string;
+	tool: "browser" | "xdev";
+	invocation: JsonRecord;
+	witness: StructuredWitness;
+	stage: "witness";
 }
 
-function skipTemplateString(code: string, index: number): number | undefined {
-	for (let cursor = index + 1; cursor < code.length; cursor += 1) {
-		if (code[cursor] === "\\") {
-			cursor += 1;
-			continue;
-		}
-		if (code[cursor] === "`") return cursor + 1;
-		if (code[cursor] === "$" && code[cursor + 1] === "{") {
-			const end = skipBalancedGroup(code, cursor + 1);
-			if (end === undefined) return undefined;
-			cursor = end - 1;
-		}
-	}
-	return undefined;
-}
-
-function skipQuotedOrComment(code: string, index: number): number | undefined {
-	const character = code[index];
-	if (character === "'" || character === "\"") return skipQuotedString(code, index);
-	if (character === "`") return skipTemplateString(code, index);
-	if (code.startsWith("//", index)) {
-		const lineEnd = code.indexOf("\n", index + 2);
-		return lineEnd === -1 ? code.length : lineEnd + 1;
-	}
-	if (code.startsWith("/*", index)) {
-		const commentEnd = code.indexOf("*/", index + 2);
-		return commentEnd === -1 ? undefined : commentEnd + 2;
-	}
-	return index;
-}
-
-function firstAssertArgument(code: string, openingParen: number, closingParen: number): string | undefined {
-	const closings: string[] = [];
-	for (let cursor = openingParen + 1; cursor < closingParen; cursor += 1) {
-		const skipped = skipQuotedOrComment(code, cursor);
-		if (skipped === undefined) return undefined;
-		if (skipped !== cursor) {
-			cursor = skipped - 1;
-			continue;
-		}
-		const character = code[cursor];
-		if (character === "(") {
-			closings.push(")");
-			continue;
-		}
-		if (character === "[") {
-			closings.push("]");
-			continue;
-		}
-		if (character === "{") {
-			closings.push("}");
-			continue;
-		}
-		if (character === ")" || character === "]" || character === "}") {
-			if (character !== closings[closings.length - 1]) return undefined;
-			closings.pop();
-			continue;
-		}
-		if (character === "," && closings.length === 0) return code.slice(openingParen + 1, cursor);
-	}
-	return closings.length === 0 ? code.slice(openingParen + 1, closingParen) : undefined;
-}
-
-function stripComments(expression: string): string {
-	let result = "";
-	for (let cursor = 0; cursor < expression.length; cursor += 1) {
-		const skipped = skipQuotedOrComment(expression, cursor);
-		if (skipped === undefined) return expression;
-		if (skipped !== cursor) {
-			if (expression.startsWith("//", cursor) || expression.startsWith("/*", cursor)) result += " ";
-			else result += expression.slice(cursor, skipped);
-			cursor = skipped - 1;
-			continue;
-		}
-		result += expression[cursor];
-	}
-	return result;
-}
-
-function normalizedExpression(expression: string): string {
-	let normalized = stripComments(expression).trim();
-	while (normalized.startsWith("(")) {
-		const closing = skipBalancedGroup(normalized, 0);
-		if (closing !== normalized.length) break;
-		normalized = normalized.slice(1, -1).trim();
-	}
-	return normalized;
-}
-
-function isLiteralExpression(expression: string): boolean {
-	const normalized = normalizedExpression(expression);
-	if (/^(?:true|false|null|undefined)$/.test(normalized)) return true;
-	if (/^[+-]?(?:0[xX][\da-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(?:n)?$/.test(normalized)) {
-		return true;
-	}
-	const quote = normalized[0];
-	if (quote === "'" || quote === "\"" || quote === "`") {
-		const end = quote === "`" ? skipTemplateString(normalized, 0) : skipQuotedString(normalized, 0);
-		return end === normalized.length;
-	}
-	if (quote === "{" || quote === "[") {
-		return skipBalancedGroup(normalized, 0) === normalized.length;
-	}
-	return false;
-}
-
-function topLevelComparison(expression: string): { index: number; length: number } | undefined {
-	const closings: string[] = [];
-	const operators = ["!==", "===", "==", "!=", "<=", ">=", "<", ">"];
-	for (let cursor = 0; cursor < expression.length; cursor += 1) {
-		const skipped = skipQuotedOrComment(expression, cursor);
-		if (skipped === undefined) return undefined;
-		if (skipped !== cursor) {
-			cursor = skipped - 1;
-			continue;
-		}
-		const character = expression[cursor];
-		if (character === "(") {
-			closings.push(")");
-			continue;
-		}
-		if (character === "[") {
-			closings.push("]");
-			continue;
-		}
-		if (character === "{") {
-			closings.push("}");
-			continue;
-		}
-		if (character === ")" || character === "]" || character === "}") {
-			if (character !== closings[closings.length - 1]) return undefined;
-			closings.pop();
-			continue;
-		}
-		if (closings.length === 0) {
-			const operator = operators.find(candidate => expression.startsWith(candidate, cursor));
-			if (operator) return { index: cursor, length: operator.length };
-		}
-	}
-	return undefined;
-}
-
-function isLiteralComparison(expression: string): boolean {
-	const normalized = normalizedExpression(expression);
-	const comparison = topLevelComparison(normalized);
-	if (!comparison) return false;
-	return (
-		isLiteralExpression(normalized.slice(0, comparison.index))
-		&& isLiteralExpression(normalized.slice(comparison.index + comparison.length))
-	);
-}
-
-
-function skipWhitespaceAndComments(code: string, index: number): number | undefined {
-	let cursor = index;
-	while (cursor < code.length) {
-		if (/\s/.test(code[cursor])) {
-			cursor += 1;
-			continue;
-		}
-		if (code.startsWith("//", cursor) || code.startsWith("/*", cursor)) {
-			const skipped = skipQuotedOrComment(code, cursor);
-			if (skipped === undefined) return undefined;
-			cursor = skipped;
-			continue;
-		}
-		break;
-	}
-	return cursor;
-}
-
-function hasCriterionBoundAssertion(code: string, criterion: string): boolean {
-	for (let cursor = 0; cursor < code.length; cursor += 1) {
-		const skipped = skipQuotedOrComment(code, cursor);
-		if (skipped === undefined) return false;
-		if (skipped !== cursor) {
-			cursor = skipped - 1;
-			continue;
-		}
-		if (
-			!code.startsWith("assert", cursor)
-			|| code[cursor - 1] === "."
-			|| /[A-Za-z0-9_$]/.test(code[cursor - 1] ?? "")
-			|| /[A-Za-z0-9_$]/.test(code[cursor + "assert".length] ?? "")
-		) continue;
-		const openingParen = skipWhitespaceAndComments(code, cursor + "assert".length);
-		if (openingParen === undefined || code[openingParen] !== "(") continue;
-		const callEnd = skipBalancedGroup(code, openingParen);
-		if (callEnd === undefined) continue;
-		const firstArgument = firstAssertArgument(code, openingParen, callEnd - 1);
-		if (
-			code.slice(openingParen + 1, callEnd - 1).includes(criterion)
-			&& firstArgument !== undefined
-			&& !isLiteralExpression(firstArgument)
-			&& !isLiteralComparison(firstArgument)
-		) {
+function hasLoneSurrogate(value: string): boolean {
+	for (let index = 0; index < value.length; index += 1) {
+		const codeUnit = value.charCodeAt(index);
+		if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+			if (index + 1 >= value.length) return true;
+			const next = value.charCodeAt(index + 1);
+			if (next < 0xdc00 || next > 0xdfff) return true;
+			index += 1;
+		} else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
 			return true;
 		}
-		// One full parse per assertion keeps the check linear for untrusted
-		// browser code. A nested assertion cannot provide stronger evidence
-		// than the enclosing call body already inspected above.
-		cursor = callEnd - 1;
 	}
 	return false;
+}
+
+function nonEmptyWellFormedString(value: unknown): value is string {
+	return typeof value === "string" && value.length > 0 && !hasLoneSurrogate(value);
+}
+
+/**
+ * Serializes the closed witness values identically on every host. Probe
+ * validation admits only strings and the integer protocol version, so this
+ * deliberately small JSON writer has no lossy or implementation-defined cases.
+ */
+function canonicalJson(value: string | number | JsonRecord): string {
+	if (typeof value === "string") return JSON.stringify(value);
+	if (typeof value === "number") return JSON.stringify(value);
+	const keys = Object.keys(value).sort();
+	return `{${keys.map(key => `${JSON.stringify(key)}:${canonicalJson(value[key] as string | number | JsonRecord)}`).join(",")}}`;
+}
+
+function normalizedProbe(value: unknown): WitnessProbe | undefined {
+	if (!isRecord(value) || !nonEmptyWellFormedString(value.kind)) return undefined;
+	if (value.kind === "url") {
+		if (!sameKeys(value, ["kind", "expected"]) || !nonEmptyWellFormedString(value.expected)) return undefined;
+		return { expected: value.expected, kind: "url" };
+	}
+	if (value.kind === "dom") {
+		if (
+			!sameKeys(value, ["kind", "selector", "expected"])
+			|| !nonEmptyWellFormedString(value.selector)
+			|| !nonEmptyWellFormedString(value.expected)
+		) return undefined;
+		return { expected: value.expected, kind: "dom", selector: value.selector };
+	}
+	return undefined;
+}
+
+function witnessCode(probe: WitnessProbe, criterion: string): string {
+	if (probe.kind === "url") {
+		return `const observed = await tab.evaluate((expected) => location.href === expected, ${JSON.stringify(probe.expected)});\nassert(observed, ${JSON.stringify(criterion)});`;
+	}
+	const values = JSON.stringify({ expected: probe.expected, selector: probe.selector });
+	return `const observed = await tab.evaluate(({ selector, expected }) => document.querySelector(selector)?.textContent === expected, ${values});\nassert(observed, ${JSON.stringify(criterion)});`;
+}
+
+function generatedBrowserInvocation(
+	event: { toolName: string; input: JsonRecord },
+	challengeToken: string,
+	probe: WitnessProbe,
+	criterion: string,
+): JsonRecord {
+	const execution = { action: "run", name: challengeToken, code: witnessCode(probe, criterion) };
+	if (event.toolName === "browser") return execution;
+	return { ...event.input, content: JSON.stringify(execution) };
 }
 
 export function uiEvidenceBinding(
@@ -771,9 +615,11 @@ export function uiEvidenceBinding(
 	event: { toolName: string; input: JsonRecord },
 ): {
 	challenge: EvidenceRequest;
-	stage: "open" | "exercise";
+	stage: "open" | "witness";
 	tool: "browser" | "xdev";
 	invocation: JsonRecord;
+	witness?: StructuredWitness;
+	generatedInput?: JsonRecord;
 } | undefined {
 	const invocation = browserInvocation(event);
 	if (!invocation || !Array.isArray(card.evidenceRequests)) return undefined;
@@ -787,29 +633,65 @@ export function uiEvidenceBinding(
 			&& nonEmptyString(value.target) !== undefined
 			&& nonEmptyString(value.criterion) !== undefined
 			&& Array.isArray(value.requiredStages)
+			&& Array.isArray(value.completedStages)
 		);
 	});
 	if (!challenge) return undefined;
+	if (
+		challenge.requiredStages.length !== 2
+		|| challenge.requiredStages[0] !== "open"
+		|| challenge.requiredStages[1] !== "witness"
+		|| !challenge.completedStages.every(stage => stage === "open" || stage === "witness")
+	) return undefined;
+	const attemptId = nonEmptyString(challenge.attemptId);
+	const criterion = nonEmptyString(challenge.criterion);
+	const runId = nonEmptyString(card.runId);
+	if (!attemptId || !criterion || !runId) return undefined;
+	const tool = event.toolName === "browser" ? "browser" : "xdev";
 
-	let stage: "open" | "exercise";
 	if (invocation.action === "open") {
 		const app = isRecord(invocation.app) ? invocation.app : undefined;
 		const observedTarget = nonEmptyString(invocation.url) ?? nonEmptyString(app?.target);
 		if (observedTarget !== challenge.target || challenge.completedStages.includes("open")) return undefined;
-		stage = "open";
-	} else if (invocation.action === "run") {
-		const code = nonEmptyString(invocation.code);
-		if (
-			!challenge.completedStages.includes("open")
-			|| challenge.completedStages.includes("exercise")
-			|| !code
-			|| !hasCriterionBoundAssertion(code, challenge.criterion)
-		) return undefined;
-		stage = "exercise";
-	} else {
-		return undefined;
+		return { challenge, stage: "open", tool, invocation };
 	}
-	return { challenge, stage, tool: event.toolName === "browser" ? "browser" : "xdev", invocation };
+
+	if (
+		invocation.action !== "run"
+		|| !sameKeys(invocation, ["action", "name", "witness"])
+		|| !challenge.completedStages.includes("open")
+		|| challenge.completedStages.includes("witness")
+		|| !isRecord(invocation.witness)
+		|| !sameKeys(invocation.witness, ["version", "probe"])
+		|| invocation.witness.version !== 1
+	) return undefined;
+	const probe = normalizedProbe(invocation.witness.probe);
+	if (!probe) return undefined;
+	const probeHash = sha256(canonicalJson(probe));
+	const witness: StructuredWitness = {
+		version: 1,
+		witnessId: sha256(canonicalJson({
+			attemptId,
+			challengeToken,
+			criterion,
+			probeHash,
+			runId,
+			version: 1,
+		})),
+		attemptId,
+		challengeToken,
+		criterion,
+		probe,
+		probeHash,
+	};
+	return {
+		challenge,
+		stage: "witness",
+		tool,
+		invocation,
+		witness,
+		generatedInput: generatedBrowserInvocation(event, challengeToken, probe, criterion),
+	};
 }
 
 
@@ -952,6 +834,7 @@ function updateDispatchWidget(pi: ExtensionAPI, context: RuntimeContext | undefi
 let activeRun: ActiveRun | undefined;
 let vetoReason: string | undefined;
 let sealingToolCallId: string | undefined;
+const pendingWitnesses = new Map<string, PendingWitness>();
 let lifecycleEpoch = 0;
 let lastStopNudge = "";
 let mutationTail: Promise<void> = Promise.resolve();
@@ -969,6 +852,7 @@ function serialize<T>(operation: () => Promise<T>): Promise<T> {
 function failClosed(pi: ExtensionAPI, reason: string, context?: RuntimeContext): void {
 	activeRun = undefined;
 	sealingToolCallId = undefined;
+	pendingWitnesses.clear();
 	vetoReason = reason;
 	updateDispatchWidget(pi, context);
 	pi.logger.warn(`[pocock-control] ${reason}`);
@@ -1068,6 +952,7 @@ async function hydrateSession(pi: ExtensionAPI, context: RuntimeContext): Promis
 	const epoch = ++lifecycleEpoch;
 	activeRun = undefined;
 	sealingToolCallId = undefined;
+	pendingWitnesses.clear();
 
 	updateDispatchWidget(pi, context);
 	if (!mirror.found) {
@@ -1408,6 +1293,25 @@ export default function pocockControl(pi: ExtensionAPI): void {
 				};
 			});
 		}
+		if (event.toolName === "browser" || event.toolName === "write") {
+			return serialize(async () => {
+				const run = activeFor(runtime);
+				if (!run || isTerminal(run.card) || vetoReason) return;
+				const binding = uiEvidenceBinding(run.card, event);
+				if (!binding || binding.stage !== "witness" || !binding.witness || !binding.generatedInput) return;
+				if (pendingWitnesses.has(event.toolCallId)) {
+					return { block: true, reason: "A Pocock witness invocation is already sealed for this tool call" };
+				}
+				pendingWitnesses.set(event.toolCallId, {
+					runId: run.card.runId,
+					tool: binding.tool,
+					invocation: binding.invocation,
+					witness: binding.witness,
+					stage: "witness",
+				});
+				return { input: binding.generatedInput };
+			});
+		}
 		if (event.toolName !== "task") return;
 		return serialize(async () => {
 			const runtime = asRuntimeContext(context);
@@ -1546,12 +1450,53 @@ export default function pocockControl(pi: ExtensionAPI): void {
 			});
 		}
 
+		const pending = pendingWitnesses.get(event.toolCallId);
+		if (pending) {
+			pendingWitnesses.delete(event.toolCallId);
+			return serialize(async () => {
+				if (
+					event.isError
+					|| (pending.tool === "browser" && event.toolName !== "browser")
+					|| (pending.tool === "xdev" && event.toolName !== "write")
+				) {
+					return toolFailure("Pocock declarative witness execution did not succeed");
+				}
+				const run = activeFor(runtime);
+				if (!run || isTerminal(run.card) || vetoReason || run.card.runId !== pending.runId) {
+					return toolFailure("Pocock declarative witness result does not match the active run");
+				}
+				const request: JsonRecord = {
+					runId: run.card.runId,
+					revision: run.card.revision,
+					stateHash: run.card.stateHash,
+					toolCallId: event.toolCallId,
+					tool: pending.tool,
+					invocation: pending.invocation,
+					details: detailsForObservedTool(event.details),
+					content: event.content,
+					success: true,
+					attemptIds: [pending.witness.attemptId],
+					challengeToken: pending.witness.challengeToken,
+					stage: pending.stage,
+					witness: pending.witness,
+				};
+				try {
+					const response = await invokeCore(pi, runtime, "record-evidence", request);
+					const card = requireCard(response, "record-evidence");
+					commitCard(pi, runtime, card, { expectedRunId: run.card.runId });
+					return;
+				} catch (error) {
+					return toolFailure(`Pocock could not record observed browser evidence: ${errorMessage(error)}`);
+				}
+			});
+		}
+
 		if (event.isError) return;
 		return serialize(async () => {
 			const run = activeFor(runtime);
 			if (!run || isTerminal(run.card) || vetoReason) return;
 			const binding = uiEvidenceBinding(run.card, event);
-			if (!binding) return;
+			if (!binding || binding.stage !== "open") return;
 
 			const request: JsonRecord = {
 				runId: run.card.runId,
@@ -1565,7 +1510,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 				success: true,
 				attemptIds: [binding.challenge.attemptId],
 				challengeToken: binding.challenge.token,
-				stage: binding.stage,
+				stage: "open",
 			};
 
 			try {

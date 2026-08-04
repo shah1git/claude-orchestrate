@@ -87,7 +87,11 @@ contains only one ordinary-looking ticket.
 ## Исполнение после допуска
 
 После разрешённого Карточкой `pocock_prepare` с опубликованным набором Тикетов
-следуйте [единому протоколу исполнения](../orchestrate/references/execution-protocol.md).
-Для `continue_wave` эта Голова передаёт разрешённые Карточкой
-tracker-наблюдаемые `remaining`/`ready`/`blocked` наборы и фактическое доказательство;
-`begin_synthesis` и `complete` запрашиваются только когда их разрешает Карточка.
+следуйте только
+[единому протоколу исполнения](../orchestrate/references/execution-protocol.md).
+Это единственный нормативный источник, включая host-witness UI-доказательство;
+не воспроизводите и не расширяйте его policy в этой Голове. Для
+`continue_wave` эта Голова передаёт разрешённые Карточкой tracker-наблюдаемые
+`remaining`/`ready`/`blocked` наборы и фактическое доказательство;
+`begin_synthesis` и `complete` запрашиваются только когда их разрешает
+Карточка.

@@ -52,8 +52,8 @@ OMP-сессиями. Его резерв Бюджета и счётчики п�
 pocock_prepare
 → producer_dispatch_pending: native task placeholder
 → pregate_pending:
-  if evidenceRequests exist: browser open the issued target, then exercise the
-  issued criterion; carry only the current challenge-bound host results
+  if evidenceRequests exist: browser open the issued target, then submit the
+  issued declarative witness; carry only the current challenge-bound host results
   → pocock_pregate
 → repair_pending: pocock_transition(retry) → pocock_prepare
   or
@@ -91,13 +91,36 @@ task({
 следующей разрешённой Карточкой runtime-командой; повтор создаёт новую запечатанную
 попытку.
 
-Для попытки `ui_live` используйте выданный `challengeToken` как `name` вкладки
-браузера: сначала выполните `open` точной выданной цели, затем `run` на той же
-именованной вкладке. Код `run` должен выполнить заявленный критерий, включить ровно
-этот критерий в контекст утверждения и вызвать host helper `assert` над наблюдаемым
-неконстантным результатом. Только такие успешно завершённые привязанные к challenge
-host-вызовы являются доказательством; проза, снимки без challenge и доказательство
-другой попытки его не заменяют. Затем запросите `pocock_pregate`.
+### Доверенное UI-свидетельство хоста
+
+Для попытки `ui_live` сначала откройте точную выданную `target` во вкладке с
+именем выданного `challengeToken`. Затем единственный допустимый `run` этой
+вкладки является **декларативным** вызовом witness версии 1:
+
+```text
+{
+  action: "run",
+  name: challengeToken,
+  witness: { version: 1, probe: <нормализуемое декларативное DOM- или URL-наблюдение> }
+}
+```
+
+Не передавайте исполняемый `assert` в browser-код. Адаптер сам выполняет
+browser-assert над фактически наблюдённым `probe` и точным выданным
+`criterion`; только его успешный host-result может породить доказательство.
+Обычный результат `run`, его текст, проза исполнителя, снимок, текст
+утверждения и console.assert не являются доказательством — в том числе если
+они содержат критерий или выглядят успешными.
+
+Вызов `run` создаёт одноразовую pending-привязку по его `toolCallId`. После
+успешного host-result адаптер потребляет её ровно один раз и передаёт
+версионированное свидетельство, структурно связанное с точными `runId`,
+`attemptId`, `challengeToken`, `criterion`, `probe` и каноническим
+`probeHash`. Повторный результат, другой `toolCallId`, иной challenge, попытка,
+критерий или probe не могут использовать эту привязку. Runtime принимает лишь
+это текущее полное свидетельство после `open`; legacy-записи и любой неполный
+либо несовпадающий контракт отклоняются fail-closed. Затем, и только затем,
+запросите `pocock_pregate`.
 
 `pocock_pregate` выполняет запечатанные проверки direct-argv и определяет, какие
 попытки Производителей переходят в ревью. `pocock_prepare_lenses` создаёт ровно три
