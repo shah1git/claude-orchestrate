@@ -27,8 +27,9 @@ run-local Прочёс с полным локальным ledger, заранее
 через нативный OMP-контур (ADR-0009): тонкий adapter
 `.omp/extensions/pocock-control/`, сохраняемый runtime
 `skill/orchestrate/tools/omp_runtime.py` и один запечатанный OMP `task` batch на
-раздачу. Конкретные модели задаются только OMP-ролями
-`@smol`/`@task`/`@advisor`/`@slow`; внешний `run_lane` оставлен как история и
+раздачу. Конкретные модели контуру неизвестны: он оперирует слотами — ролями
+OMP `@pocock-*` (шесть основных и шесть парных `-backup`), а какая модель стоит
+за ролью, задаёт основной конфиг OMP (`$(omp config path)/config.yml`); внешний `run_lane` оставлен как история и
 публичными головами не вызывается.
 
 ## Agent skills

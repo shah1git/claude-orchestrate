@@ -18,6 +18,19 @@ SENSITIVE_KEY = re.compile(
 )
 MACHINE_ONLY_ROOT_KEYS = frozenset({"dev", "setupVersion"})
 REQUIRED_MODEL_ROLES = frozenset({"default", "smol", "slow", "task", "advisor"})
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+POCOCK_AGENT_MANIFESTS_DIR = REPOSITORY_ROOT / ".omp" / "agents"
+
+
+def required_pocock_model_roles() -> frozenset[str]:
+    roles = frozenset(
+        manifest.stem
+        for manifest in POCOCK_AGENT_MANIFESTS_DIR.glob("pocock-*.md")
+        if manifest.is_file()
+    )
+    if not roles:
+        fail(f"no Pocock agent manifests in {POCOCK_AGENT_MANIFESTS_DIR}")
+    return roles
 
 
 def fail(message: str) -> NoReturn:
@@ -63,15 +76,38 @@ def validate_profile(profile: object) -> None:
     walk_keys(root)
 
     roles = require_mapping(root.get("modelRoles"), "modelRoles")
-    missing_roles = REQUIRED_MODEL_ROLES.difference(roles)
+    required_pocock_roles = required_pocock_model_roles()
+    missing_roles = REQUIRED_MODEL_ROLES.union(required_pocock_roles).difference(roles)
     if missing_roles:
         fail(f"modelRoles is missing: {', '.join(sorted(missing_roles))}")
 
-    async_settings = require_mapping(root.get("async"), "async")
-    require_value(async_settings, "enabled", False, "async")
+    empty_pocock_roles = sorted(
+        role
+        for role in required_pocock_roles
+        if not isinstance(roles.get(role), str) or not roles[role].strip()
+    )
+    if empty_pocock_roles:
+        fail(f"modelRoles has empty Pocock roles: {', '.join(empty_pocock_roles)}")
+
 
     retry = require_mapping(root.get("retry"), "retry")
     require_value(retry, "modelFallback", True, "retry")
+    fallback_chains = require_mapping(retry.get("fallbackChains"), "retry.fallbackChains")
+    missing_chains = required_pocock_roles.difference(fallback_chains)
+    if missing_chains:
+        fail(f"retry.fallbackChains is missing: {', '.join(sorted(missing_chains))}")
+    empty_chains = sorted(
+        role
+        for role in required_pocock_roles
+        if not isinstance(fallback_chains.get(role), Sequence)
+        or isinstance(fallback_chains[role], (str, bytes, bytearray))
+        or not fallback_chains[role]
+    )
+    if empty_chains:
+        fail(f"retry.fallbackChains has empty Pocock chains: {', '.join(empty_chains)}")
+
+    async_settings = require_mapping(root.get("async"), "async")
+    require_value(async_settings, "enabled", False, "async")
 
     task = require_mapping(root.get("task"), "task")
     require_value(task, "batch", True, "task")

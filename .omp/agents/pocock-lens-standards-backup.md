@@ -1,7 +1,7 @@
 ---
-name: pocock-reviewer-advisor
-description: "Read-only рецензент Pocock для назначенной линзы проверки."
-model: "@advisor"
+name: pocock-lens-standards-backup
+description: "Read-only рецензент Pocock для назначенной линзы проверки. Запасной слот."
+model: "@pocock-lens-standards-backup"
 tools: [read, grep, glob, lsp]
 spawns: []
 blocking: true

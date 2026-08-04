@@ -9,9 +9,11 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +21,7 @@ BOOTSTRAP_MACHINE = REPOSITORY_ROOT / "bootstrap-machine.sh"
 PORTABLE_PROFILE = REPOSITORY_ROOT / "scripts" / "omp-portable-profile.yml"
 PORTABLE_WATCHDOG = REPOSITORY_ROOT / "scripts" / "omp-portable-WATCHDOG.md"
 PROFILE_VALIDATOR = REPOSITORY_ROOT / "scripts" / "validate_portable_omp_profile.py"
+POCOCK_AGENT_MANIFESTS = REPOSITORY_ROOT / ".omp" / "agents"
 
 
 @pytest.fixture
@@ -37,6 +40,10 @@ def bootstrap_fixture(tmp_path: Path) -> dict[str, Path]:
     (scripts / PORTABLE_WATCHDOG.name).write_bytes(PORTABLE_WATCHDOG.read_bytes())
     (scripts / PROFILE_VALIDATOR.name).write_bytes(PROFILE_VALIDATOR.read_bytes())
     (scripts / PROFILE_VALIDATOR.name).chmod(0o755)
+    fixture_agents = source / ".omp" / "agents"
+    fixture_agents.mkdir(parents=True)
+    for manifest in POCOCK_AGENT_MANIFESTS.glob("pocock-*.md"):
+        (fixture_agents / manifest.name).write_bytes(manifest.read_bytes())
 
     (source / "bootstrap-mac.sh").write_text(
         "#!/bin/sh\n"
@@ -190,3 +197,62 @@ def test_bootstrap_refuses_secret_like_profile_before_replacing_config(
     assert result.returncode != 0
     assert existing_config.read_bytes() == previous_contents
     assert not fixture["bootstrap_log"].exists()
+
+
+def test_portable_profile_declares_pocock_agent_roles_and_rejects_missing_role(
+    tmp_path: Path,
+) -> None:
+    """The portable profile and validator track the current Pocock manifests."""
+    pocock_roles = {
+        manifest.stem
+        for manifest in POCOCK_AGENT_MANIFESTS.glob("pocock-*.md")
+        if manifest.is_file()
+    }
+    assert len(pocock_roles) == 12
+
+    profile = yaml.safe_load(PORTABLE_PROFILE.read_text(encoding="utf-8"))
+    model_roles = profile["modelRoles"]
+    declared_pocock_roles = {
+        role for role in model_roles if role.startswith("pocock-")
+    }
+    assert declared_pocock_roles == pocock_roles
+    assert all(
+        isinstance(model_roles[role], str) and model_roles[role].strip()
+        for role in pocock_roles
+    )
+    fallback_chains = profile["retry"]["fallbackChains"]
+    assert {
+        role for role in fallback_chains if role.startswith("pocock-")
+    } == pocock_roles
+    assert all(fallback_chains[role] for role in pocock_roles)
+
+    missing_role = sorted(pocock_roles)[0]
+    del model_roles[missing_role]
+    missing_role_profile = tmp_path / "missing-pocock-role.yml"
+    missing_role_profile.write_text(
+        yaml.safe_dump(profile, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    validation = subprocess.run(
+        [sys.executable, str(PROFILE_VALIDATOR), str(missing_role_profile)],
+        capture_output=True,
+        text=True,
+    )
+    assert validation.returncode != 0
+    assert missing_role in validation.stderr
+
+    profile = yaml.safe_load(PORTABLE_PROFILE.read_text(encoding="utf-8"))
+    del profile["retry"]["fallbackChains"][missing_role]
+    missing_chain_profile = tmp_path / "missing-pocock-chain.yml"
+    missing_chain_profile.write_text(
+        yaml.safe_dump(profile, sort_keys=False),
+        encoding="utf-8",
+    )
+    chain_validation = subprocess.run(
+        [sys.executable, str(PROFILE_VALIDATOR), str(missing_chain_profile)],
+        capture_output=True,
+        text=True,
+    )
+    assert chain_validation.returncode != 0
+    assert missing_role in chain_validation.stderr

@@ -116,8 +116,8 @@ pocock_prepare
   → lens_dispatch_pending: one wave-level fixed three-lens task
     → an isolated failed lens retries alone
     → adjudication_pending: pocock_adjudicate
-      → repair_pending only for affected producer attempts
-      or accepted producer tickets: pocock_accept
+      → repair_pending only for affected producer attempts: core routes each by its recorded rejection cause (no separate retry)
+        → pocock_prepare
 → pocock_transition(continue_wave) with exact remaining/ready/blocked tracker
   sets and evidence; accepted tickets remain accepted; repeat while work remains
 → only an explicit empty remaining set authorizes begin_synthesis → complete
@@ -142,14 +142,23 @@ native task is one-shot: never wait for or revive it through Hub; any retry is a
 card-authorized sealed attempt.
 
 The core executes sealed direct-argv checks, then creates exactly three distinct
-wave-level reviewers over the pre-gate-passed producer subset. Producers share a sealed
-vendor/family for the wave; every Standards, Spec, and Critic reviewer is independent from
-it. Each lens returns
+wave-level reviewers over the pre-gate-passed producer subset. A wave may mix
+`mechanical`, `skilled`, and `judgment` producer attempts on their respective slots.
+Configuration makes producer and lens slot sets disjoint, the three lens slots pairwise
+distinct, and every primary slot distinct from its backup. Before dispatching lenses,
+the core fails closed with `independent_reviewer_unavailable` if a lens's opaque
+`resolvedModel` string exactly matches that of any producer in the wave; it does not
+classify vendors or families. Each lens returns
 `{lens, summary, reports:[{attemptId, summary, findings, verdict}]}` covering every passed
 producer attempt. Standards and Spec emit `NO_VERDICT`; Critic alone emits `PASS` or
-`FAIL`. Only an isolated failed lens is retried; adjudication preserves already accepted
-tickets and rejects any ticket with a Critic `FAIL` or surviving introduced blocking
-Standards or Spec finding.
+`FAIL`. Only an isolated failed lens is retried, and a successful backup-slot lens clears
+its backup marker. Retry routing is core-owned: a missing diagnosis uses
+`lastFailureKind`; `capability` deepens the class (writers stop at `skilled`, exhausted
+`judgment` blocks as `escalation_exhausted`) and `availability` uses the paired backup.
+During partial acceptance each rejected ticket routes directly by its recorded rejection
+cause, without a separate `retry`; adjudication preserves already accepted tickets and
+rejects any ticket with a Critic `FAIL` or surviving introduced blocking Standards or Spec
+finding.
 
 After `pocock_accept`, query the durable tracker and call `continue_wave` with exact
 `remainingTicketIds`, `nextTicketIds`, `blockedTicketIds`, and factual `evidence`.

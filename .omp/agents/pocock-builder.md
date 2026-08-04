@@ -1,7 +1,7 @@
 ---
-name: pocock-builder-advisor
+name: pocock-builder
 description: "Пишущий исполнитель Pocock для реализации запечатанного билета."
-model: "@advisor"
+model: "@pocock-builder"
 tools: [read, grep, glob, write, edit, bash, lsp]
 spawns: []
 blocking: true

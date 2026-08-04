@@ -116,12 +116,21 @@ the one sealed native `task` placeholder, browser evidence, pre-gate, one wave-l
 three-lens gate, isolated failed-lens retry, partial acceptance, and synthesis. Direct
 execution is unavailable after sweep admission.
 
-The gate is exactly Standards, Spec, and Critic over the pre-gate-passed producer subset;
-the three reviewers are distinct and independent from the wave's shared sealed producer
-vendor/family. Each returns
+The gate is exactly Standards, Spec, and Critic over the pre-gate-passed producer subset.
+A wave may mix `mechanical`, `skilled`, and `judgment` producer attempts on their
+respective slots. Configuration makes producer and lens slot sets disjoint, the three
+lens slots pairwise distinct, and every primary slot distinct from its backup. Before
+dispatching lenses, the core fails closed with `independent_reviewer_unavailable` if a
+lens's opaque `resolvedModel` string exactly matches that of any producer in the wave; it
+does not classify vendors or families. Each returns
 `{lens, summary, reports:[{attemptId, summary, findings, verdict}]}` for every passed
 producer attempt. Standards and Spec emit `NO_VERDICT`, Critic emits `PASS` or `FAIL`,
-and only an isolated failed lens retries.
+and only an isolated failed lens retries; a successful backup-slot lens clears its backup
+marker. Retry routing is core-owned: a missing diagnosis uses `lastFailureKind`;
+`capability` deepens the class (writers stop at `skilled`, exhausted `judgment` blocks as
+`escalation_exhausted`) and `availability` uses the paired backup. During partial
+acceptance each rejected ticket routes directly by its recorded rejection cause, without
+a separate `retry`.
 
 For a sweep, call `pocock_transition(action: "continue_wave")` with **no payload** after
 `pocock_accept`; `begin_synthesis` likewise omits a payload. Inspect the current runtime

@@ -1,7 +1,7 @@
 ---
-name: pocock-reviewer-smol
+name: pocock-lens-standards
 description: "Read-only рецензент Pocock для назначенной линзы проверки."
-model: "@smol"
+model: "@pocock-lens-standards"
 tools: [read, grep, glob, lsp]
 spawns: []
 blocking: true

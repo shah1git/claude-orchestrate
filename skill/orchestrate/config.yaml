@@ -11,10 +11,12 @@
 #   2. При содержательной правке подними `version` на единицу. Забытый бамп
 #      не страшен: телеметрия штампует записи отпечатком v<version>+<sha256:7>,
 #      и хеш выдаст незабампленную правку.
-#   3. Активная нативная политика `omp` ниже не пинует конкретные модели: lanes
-#      ссылаются только на роли OMP `@smol`/`@task`/`@advisor`/`@slow`. Архивные
-#      `cross_provider`/`availability` действуют только для явного воспроизведения
-#      прежнего `run_lane` и не имеют полномочий публичной диспетчеризации.
+#   3. Активная нативная политика `omp` ниже не пинует конкретные модели: слоты
+#      ссылаются только на роли OMP `@pocock-*`, объявленные в основном конфиге
+#      OMP (`$(omp config path)/config.yml`). Какая модель стоит за ролью и чем она подменяется при
+#      недоступности — решает OMP, не контур. Архивные `cross_provider`/
+#      `availability` действуют только для явного воспроизведения прежнего
+#      `run_lane` и не имеют полномочий публичной диспетчеризации.
 #   4. Capability-контракт ролей живёт во фронтматтере `.omp/agents/pocock-*.md`;
 #      `omp.agents` ниже только связывает класс работы с этими именами. Адаптер
 #      хеширует эффективные manifests и отклоняет project-shadow либо дрейф
@@ -26,7 +28,13 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 40
+version: 41
+# v41 (2026-08-04): контур перестал знать модели. Ось «вендор/семейство»,
+#      белый список `known_vendors`, ранговые лейны, `critic_min_rank` и
+#      `standards_non_claude` упразднены; вместо них — двенадцать слотов,
+#      то есть имён ролей OMP, шесть основных и шесть запасных. Независимость
+#      линз держится непересечением множеств слотов, а замена модели внутри
+#      роли отдана OMP целиком.
 # v40 (2026-08-02): разбирательство с нерешёнными решениями идёт через полный
 #      Pocock spine; `cross_provider` и `availability` явно помечены как
 #      исторический архив `run_lane`, не как нативная OMP-политика.
@@ -1527,50 +1535,75 @@ telemetry:
 # prose and the OMP adapter receive only its metadata, never routing authority.
 # -----------------------------------------------------------------------------
 omp:
-  lanes:
-    smol:    {alias: "@smol",    rank: 0}
-    task:    {alias: "@task",    rank: 1}
-    advisor: {alias: "@advisor", rank: 2}
-    slow:    {alias: "@slow",    rank: 3}
+  # Слот Pocock — это ИМЯ РОЛИ OMP и ничего больше. Контур никогда не называет
+  # модель: назначение моделей ролям живёт в основном конфиге OMP, а
+  # замена модели ВНУТРИ роли целиком принадлежит OMP (retry.fallbackChains) и
+  # контуру не видна. У каждого слота есть парный `-backup` — на него контур
+  # переходит, когда основной слот исчерпан.
+  slots:
+    scout:                 {alias: "@pocock-scout"}
+    scout-backup:          {alias: "@pocock-scout-backup"}
+    builder:               {alias: "@pocock-builder"}
+    builder-backup:        {alias: "@pocock-builder-backup"}
+    architect:             {alias: "@pocock-architect"}
+    architect-backup:      {alias: "@pocock-architect-backup"}
+    lens-standards:        {alias: "@pocock-lens-standards"}
+    lens-standards-backup: {alias: "@pocock-lens-standards-backup"}
+    lens-spec:             {alias: "@pocock-lens-spec"}
+    lens-spec-backup:      {alias: "@pocock-lens-spec-backup"}
+    lens-critic:           {alias: "@pocock-lens-critic"}
+    lens-critic-backup:    {alias: "@pocock-lens-critic-backup"}
 
+  # Класс тикета -> слот продюсера. Раньше соответствие было размазано между
+  # кодом (CLASS_ROLE, EFFORT) и ранговым подбором слота; теперь оно однозначно
+  # и целиком здесь.
+  producers:
+    mechanical: {capability: scout,     slot: scout,     backup: scout-backup,     effort: lo}
+    skilled:    {capability: builder,   slot: builder,   backup: builder-backup,   effort: med}
+    judgment:   {capability: architect, slot: architect, backup: architect-backup, effort: hi}
+
+  # Линза -> слот. Поиск независимого рецензента упразднён вместе с осью
+  # «вендор/семейство». Независимость держится на двух проверках, и ни одна из
+  # них не знает моделей: (1) слоты продюсеров и слоты линз не пересекаются,
+  # слоты трёх линз попарно различны, primary != backup — проверяется на
+  # конфиге; (2) перед раздачей линз ядро отклоняет волну, если разрешённая
+  # модель линзы совпала строка-в-строку с разрешённой моделью продюсера этой
+  # волны. Вторая проверка — сравнение непрозрачных строк, а не таблица.
+  lenses:
+    names: [Standards, Spec, Critic]
+    capability: reviewer
+    slots:
+      Standards: {slot: lens-standards, backup: lens-standards-backup, effort: med}
+      Spec:      {slot: lens-spec,      backup: lens-spec-backup,      effort: med}
+      Critic:    {slot: lens-critic,    backup: lens-critic-backup,    effort: hi}
+
+  # Слот -> агент. Этот же перечень читает отпечаток доверенных манифестов
+  # (trusted_manifest_fingerprint), поэтому у каждого слота обязан быть агент.
   roles:
     scout:
       writer: false
       agents:
-        smol: pocock-scout-smol
-        task: pocock-scout-task
-        advisor: pocock-scout-advisor
-        slow: pocock-scout-slow
+        scout: pocock-scout
+        scout-backup: pocock-scout-backup
     builder:
       writer: true
       agents:
-        task: pocock-builder-task
-        advisor: pocock-builder-advisor
-        slow: pocock-builder-slow
+        builder: pocock-builder
+        builder-backup: pocock-builder-backup
     architect:
       writer: false
       agents:
-        advisor: pocock-architect-advisor
-        slow: pocock-architect-slow
+        architect: pocock-architect
+        architect-backup: pocock-architect-backup
     reviewer:
       writer: false
       agents:
-        smol: pocock-reviewer-smol
-        task: pocock-reviewer-task
-        advisor: pocock-reviewer-advisor
-        slow: pocock-reviewer-slow
-
-  # Every resolved role must belong to a known provider. Capability control is
-  # native OMP: agent tool allowlists plus core-sealed isolation options apply
-  # uniformly to every provider, so no vendor-specific wrapper or attestation
-  # is permitted.
-  known_vendors: [anthropic, openai, google, xai, moonshot]
-
-  lenses:
-    names: [Standards, Spec, Critic]
-    reviewer_role: reviewer
-    critic_min_rank: 1
-    standards_non_claude: true
+        lens-standards: pocock-lens-standards
+        lens-standards-backup: pocock-lens-standards-backup
+        lens-spec: pocock-lens-spec
+        lens-spec-backup: pocock-lens-spec-backup
+        lens-critic: pocock-lens-critic
+        lens-critic-backup: pocock-lens-critic-backup
 
   pre_gate:
     command_timeout_seconds: 600

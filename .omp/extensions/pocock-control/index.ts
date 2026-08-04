@@ -40,7 +40,6 @@ type RuntimeContext = {
 	};
 	models: {
 		resolve(spec: string): unknown;
-		family(model: unknown): string;
 	};
 };
 
@@ -65,18 +64,16 @@ interface ModelWitness {
 	provider: string;
 	id: string;
 	resolvedModel: string;
-	vendor: string;
-	family: string;
 	resolvedModelIsFallback: false;
 }
 
-interface LaneModel extends Omit<ModelWitness, "id"> {
+interface SlotModel extends Omit<ModelWitness, "id"> {
 	role: string;
 }
 
 interface DeclaredAgent {
 	agent: string;
-	lane: string | null;
+	slot: string | null;
 	role: string | null;
 	resolvedModel: string | null;
 }
@@ -98,7 +95,7 @@ interface ManifestWitness {
 interface ActiveRun {
 	sessionId: string;
 	card: StateCard;
-	laneModels: Record<string, LaneModel>;
+	slotModels: Record<string, SlotModel>;
 	agents: Map<string, DeclaredAgent>;
 	manifestFingerprint: string;
 	dispatch?: SealedDispatch;
@@ -386,83 +383,57 @@ function isTerminal(card: StateCard): boolean {
 	return TERMINAL_PHASES[card.phase] === true;
 }
 
-function classifyVendor(provider: string, id: string): string | undefined {
-	// Model identity takes precedence: a Claude model served through a Google
-	// account remains Anthropic for independence checks, and likewise for GPT.
-	const model = id.toLowerCase();
-	const transport = provider.toLowerCase();
-	if (model.includes("claude")) return "Anthropic";
-	if (model.includes("gpt") || /^o[1-9]([-.]|$)/.test(model) || model.includes("codex")) return "OpenAI";
-	if (model.includes("gemini")) return "Google";
-	if (model.includes("grok")) return "xAI";
-	if (model.includes("kimi")) return "Moonshot";
-	if (transport.includes("anthropic") || transport.includes("claude")) return "Anthropic";
-	if (transport.includes("openai") || transport.includes("codex")) return "OpenAI";
-	if (transport.includes("google") || transport.includes("gemini")) return "Google";
-	if (transport.includes("xai") || transport.includes("grok")) return "xAI";
-	if (transport.includes("moonshot") || transport.includes("kimi")) return "Moonshot";
-	return undefined;
-}
-
-function observeModel(model: unknown, models: RuntimeContext["models"]): ModelWitness {
+function observeModel(model: unknown): ModelWitness {
 	const record = isRecord(model) ? model : undefined;
 	const provider = record && nonEmptyString(record.provider);
 	const id = record && nonEmptyString(record.id);
 	if (!provider || !id) throw new PocockError("OMP did not expose a provider/id for a required model role");
-	const vendor = classifyVendor(provider, id);
-	if (!vendor) throw new PocockError(`OMP model ${provider}/${id} has no deterministic Pocock vendor classification`);
-	const family = nonEmptyString(models.family(model));
-	if (!family) throw new PocockError(`OMP model ${provider}/${id} has no family witness`);
 	return {
 		provider,
 		id,
 		resolvedModel: `${provider}/${id}`,
-		vendor,
-		family,
 		resolvedModelIsFallback: false,
 	};
 }
 
-function metadataLanes(metadata: JsonRecord): JsonRecord {
+function metadataSlots(metadata: JsonRecord): JsonRecord {
 	const omp = isRecord(metadata.omp) ? metadata.omp : undefined;
-	const lanes = (omp && isRecord(omp.lanes) ? omp.lanes : undefined) ?? (isRecord(metadata.lanes) ? metadata.lanes : undefined);
-	if (!lanes || Object.keys(lanes).length === 0) throw new PocockError("Pocock metadata contains no OMP lane aliases");
-	return lanes;
+	const slots = (omp && isRecord(omp.slots) ? omp.slots : undefined) ?? (isRecord(metadata.slots) ? metadata.slots : undefined);
+	if (!slots || Object.keys(slots).length === 0) throw new PocockError("Pocock metadata contains no OMP slot aliases");
+	return slots;
 }
 
-function resolveLaneModels(metadata: JsonRecord, context: RuntimeContext): Record<string, LaneModel> {
-	const laneModels: Record<string, LaneModel> = {};
-	for (const [lane, definition] of Object.entries(metadataLanes(metadata))) {
+function resolveSlotModels(metadata: JsonRecord, context: RuntimeContext): Record<string, SlotModel> {
+	const slotModels: Record<string, SlotModel> = {};
+	for (const [slot, definition] of Object.entries(metadataSlots(metadata))) {
 		const alias = isRecord(definition) ? nonEmptyString(definition.alias) : undefined;
-		if (!alias) throw new PocockError(`Pocock metadata lane ${lane} has no role alias`);
+		if (!alias) throw new PocockError(`Pocock metadata slot ${slot} has no role alias`);
 		const resolved = context.models.resolve(alias);
 		if (!resolved) throw new PocockError(`OMP cannot resolve required Pocock role ${alias}`);
-		const observed = observeModel(resolved, context.models);
-		laneModels[lane] = {
+		const observed = observeModel(resolved);
+		slotModels[slot] = {
 			role: alias,
 			provider: observed.provider,
 			resolvedModel: observed.resolvedModel,
-			vendor: observed.vendor,
-			family: observed.family,
 			resolvedModelIsFallback: false,
 		};
 	}
-	return laneModels;
+	return slotModels;
 }
 
 function addDeclaredAgents(
 	target: Map<string, DeclaredAgent>,
 	capability: string,
 	mapping: unknown,
-	laneModels: Record<string, LaneModel>,
+	slotModels: Record<string, SlotModel>,
 ): void {
 	if (!isRecord(mapping)) return;
-	for (const [lane, agent] of Object.entries(mapping)) {
+	for (const [slot, agent] of Object.entries(mapping)) {
 		if (typeof agent !== "string" || agent.length === 0) continue;
-		const model = laneModels[lane];
+		const model = slotModels[slot];
 		target.set(agent, {
 			agent,
-			lane: model ? lane : null,
+			slot: model ? slot : null,
 			role: model?.role ?? null,
 			resolvedModel: model?.resolvedModel ?? null,
 		});
@@ -470,7 +441,7 @@ function addDeclaredAgents(
 }
 
 /** Accept the two metadata layouts used by the runtime while retaining no policy here. */
-function declaredAgents(metadata: JsonRecord, laneModels: Record<string, LaneModel>): Map<string, DeclaredAgent> {
+function declaredAgents(metadata: JsonRecord, slotModels: Record<string, SlotModel>): Map<string, DeclaredAgent> {
 	const declared = new Map<string, DeclaredAgent>();
 	const omp = isRecord(metadata.omp) ? metadata.omp : undefined;
 	const roles = (omp && isRecord(omp.roles) ? omp.roles : undefined) ?? (isRecord(metadata.roles) ? metadata.roles : undefined);
@@ -479,12 +450,12 @@ function declaredAgents(metadata: JsonRecord, laneModels: Record<string, LaneMod
 	for (const [capability, value] of Object.entries(roles)) {
 		if (capability === "agents") continue;
 		if (!isRecord(value)) continue;
-		addDeclaredAgents(declared, capability, value.agents ?? value, laneModels);
+		addDeclaredAgents(declared, capability, value.agents ?? value, slotModels);
 	}
 	const nested = isRecord(roles.agents) ? roles.agents : undefined;
 	if (nested) {
 		for (const [capability, mapping] of Object.entries(nested)) {
-			addDeclaredAgents(declared, capability, mapping, laneModels);
+			addDeclaredAgents(declared, capability, mapping, slotModels);
 		}
 	}
 	return declared;
@@ -659,7 +630,7 @@ function projectedDispatchActors(card: StateCard): JsonRecord[] {
 			role: value.role,
 			lens: value.lens,
 			attemptOrdinal: value.attemptOrdinal,
-			laneAlias: value.laneAlias,
+			slotRole: value.slotRole,
 			declaredModel: value.declaredModel,
 			observedModel: value.observedModel,
 			modelWitness: value.modelWitness,
@@ -703,14 +674,14 @@ function renderDispatchActor(actor: JsonRecord): string[] {
 	const role = displayValue(actor.role);
 	const lens = displayValue(actor.lens);
 	const attemptOrdinal = displayValue(actor.attemptOrdinal);
-	const laneAlias = displayValue(actor.laneAlias);
+	const slotRole = displayValue(actor.slotRole);
 	const declaredModel = displayValue(actor.declaredModel);
 	const observedModel = displayValue(actor.observedModel);
 	const modelWitness = displayValue(actor.modelWitness);
 	const status = displayValue(actor.status);
 	const tokens = displayValue(actor.tokens);
 	return [
-		`${dispatchName} → ticket ${ticketId} · role ${role} · lens ${lens} · attempt ${attemptOrdinal} · lane ${laneAlias}`,
+		`${dispatchName} → ticket ${ticketId} · role ${role} · lens ${lens} · attempt ${attemptOrdinal} · slot ${slotRole}`,
 		`  declared ${declaredModel} · observed ${observedModel} · witness ${modelWitness}`
 			+ ` · status ${renderDispatchStatus(status)} · tokens ${tokens}`,
 	];
@@ -728,8 +699,8 @@ function updateDispatchWidget(pi: ExtensionAPI, context: RuntimeContext | undefi
 		const lines = [`Pocock dispatch participation · ${actors.length} ${noun}`];
 		for (const actor of actors) lines.push(...renderDispatchActor(actor));
 		lines.push("RUNTIME/PENDING is not a settled witness · SETTLED is not ACCEPTED");
-		if (actors.some(actor => actor.laneAlias === "@advisor")) {
-			lines.push("lane @advisor is a worker lane, not the Watchdog Advisor role");
+		if (actors.some(actor => actor.slotRole === "@advisor")) {
+			lines.push("slot @advisor is a worker slot, not the Watchdog Advisor role");
 		}
 		context.ui.setWidget(DISPATCH_WIDGET, lines, { placement: "aboveEditor" });
 	} catch (error) {
@@ -767,7 +738,7 @@ function commitCard(
 	card: StateCard,
 	options: {
 		expectedRunId?: string;
-		laneModels?: Record<string, LaneModel>;
+		slotModels?: Record<string, SlotModel>;
 		agents?: Map<string, DeclaredAgent>;
 		resetDispatch?: boolean;
 		manifestFingerprint?: string;
@@ -789,7 +760,7 @@ function commitCard(
 	activeRun = {
 		sessionId,
 		card,
-		laneModels: options.laneModels ?? previous?.laneModels ?? {},
+		slotModels: options.slotModels ?? previous?.slotModels ?? {},
 		agents: options.agents ?? previous?.agents ?? new Map(),
 		manifestFingerprint: options.manifestFingerprint ?? previous?.manifestFingerprint ?? card.manifestFingerprint,
 		dispatch: reset ? undefined : previous?.dispatch,
@@ -829,14 +800,14 @@ async function observeManifest(
 	context: RuntimeContext,
 	signal?: AbortSignal,
 ): Promise<{
-	laneModels: Record<string, LaneModel>;
+	slotModels: Record<string, SlotModel>;
 	agents: Map<string, DeclaredAgent>;
 	manifestFingerprint: string;
 }> {
 	const metadata = await invokeCore(pi, context, "metadata", {}, signal);
-	const laneModels = resolveLaneModels(metadata, context);
-	const agents = declaredAgents(metadata, laneModels);
-	return { laneModels, agents, manifestFingerprint: manifestWitness(agents, context.cwd).fingerprint };
+	const slotModels = resolveSlotModels(metadata, context);
+	const agents = declaredAgents(metadata, slotModels);
+	return { slotModels, agents, manifestFingerprint: manifestWitness(agents, context.cwd).fingerprint };
 }
 
 function requireCurrentManifest(run: ActiveRun, context: RuntimeContext): void {
@@ -881,7 +852,7 @@ async function hydrateSession(pi: ExtensionAPI, context: RuntimeContext): Promis
 			}
 			commitCard(pi, context, card, {
 				expectedRunId: mirror.card!.runId,
-				laneModels: manifest.laneModels,
+				slotModels: manifest.slotModels,
 				agents: manifest.agents,
 				manifestFingerprint: manifest.manifestFingerprint,
 				resetDispatch: true,
@@ -941,7 +912,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 						);
 					}
 					const manifest = await observeManifest(pi, runtime, signal);
-					const laneModels = manifest.laneModels;
+					const slotModels = manifest.slotModels;
 					const start = await invokeCore(
 						pi,
 						runtime,
@@ -951,14 +922,14 @@ export default function pocockControl(pi: ExtensionAPI): void {
 							entry: params.entry,
 							objective: params.objective,
 							sessionId: runtime.sessionManager.getSessionId(),
-							models: laneModels,
+							models: slotModels,
 							manifestFingerprint: manifest.manifestFingerprint,
 						},
 						signal,
 					);
 					const card = requireCard(start, "start");
 					commitCard(pi, runtime, card, {
-						laneModels,
+						slotModels,
 						agents: manifest.agents,
 						manifestFingerprint: manifest.manifestFingerprint,
 						resetDispatch: true,
@@ -1153,7 +1124,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 					}
 					commitCard(pi, runtime, card, {
 						expectedRunId: runId ?? card.runId,
-						laneModels: manifest.laneModels,
+						slotModels: manifest.slotModels,
 						agents: manifest.agents,
 						manifestFingerprint: manifest.manifestFingerprint,
 						resetDispatch: true,

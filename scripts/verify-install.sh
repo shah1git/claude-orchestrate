@@ -53,7 +53,7 @@ OMP_AGENTS_DIR="${OMP_BASE_DIR}/agents"
 OMP_EXTENSION_DIR="${OMP_BASE_DIR}/extensions"
 OMP_AGENTS_SOURCE="${ORCH_DIR}/.omp/agents"
 OMP_EXTENSION_SOURCE="${ORCH_DIR}/.omp/extensions/pocock-control"
-OMP_CONFIG_SOURCE="${ORCH_DIR}/.omp/config.yml"
+OMP_CONFIG_FILE="${OMP_BASE_DIR}/config.yml"
 
 
 FAILS=0
@@ -103,6 +103,29 @@ verify_omp_file() {
   fi
 }
 
+# verify_no_retired_pocock_agents
+# OMP must not discover retired copy- or link-mode manifests alongside the
+# current checkout. The `pocock-` namespace is project-owned; all other user
+# agents are deliberately outside this check.
+verify_no_retired_pocock_agents() {
+  local entry name retired=0
+  [ -d "${OMP_AGENTS_DIR}" ] || {
+    bad "каталог OMP agents отсутствует: ${OMP_AGENTS_DIR}"
+    return
+  }
+  for entry in "${OMP_AGENTS_DIR}"/pocock-*.md; do
+    [[ -f "${entry}" || -L "${entry}" ]] || continue
+    name="$(basename "${entry}")"
+    if [ ! -f "${OMP_AGENTS_SOURCE}/${name}" ]; then
+      bad "OMP agent ${name}: лишний устаревший Pocock-манифест в ${OMP_AGENTS_DIR}"
+      retired=$((retired + 1))
+    fi
+  done
+  [ "${retired}" -eq 0 ] && ok "в ${OMP_AGENTS_DIR} нет лишних Pocock-манифестов"
+}
+
+
+
 # verify_omp_tree SOURCE DEST LABEL
 # Extensions and skill heads are directories; exclude the same mutable runtime
 # state as the legacy skill verification above.
@@ -131,8 +154,9 @@ verify_omp_tree() {
 }
 
 # yaml_section_value SECTION KEY EXPECTED FILE
-# The repository config has a deliberately small, fixed shape; checking these
-# scalar settings needs no global PyYAML dependency and stays offline-safe.
+# The required part of the main OMP config has a deliberately small, fixed
+# shape; checking these scalar settings needs no global PyYAML dependency and
+# stays offline-safe.
 yaml_section_value() {
   local section="$1" key="$2" expected="$3" file="$4"
   awk -v section="${section}" -v key="${key}" -v expected="${expected}" '
@@ -173,10 +197,10 @@ yaml_task_isolation_mode_isolated() {
 verify_omp_config() {
   local file="$1"
   if [ ! -f "${file}" ]; then
-    bad "нет обязательного репозиторного .omp/config.yml"
+    bad "основной конфиг OMP не найден: ${file}"
     return
   fi
-  ok "репозиторный .omp/config.yml найден"
+  ok "основной конфиг OMP найден: ${file}"
 
   if yaml_section_value async enabled false "${file}"; then ok "async.enabled: false"; else bad "async.enabled должен быть false"; fi
   if yaml_section_value display showTokenUsage true "${file}"; then ok "display.showTokenUsage: true"; else bad "display.showTokenUsage должен быть true"; fi
@@ -208,6 +232,71 @@ verify_effective_omp_config() {
     bad "глобальные OMP task-инварианты несовместимы: ${report}"
   fi
 }
+
+# verify_effective_pocock_roles
+# `omp config list --json` is the effective merged inventory used by OMP,
+# including custom modelRoles; inspecting it requires no model invocation.
+verify_effective_pocock_roles() {
+  local settings report
+  if ! command -v omp >/dev/null 2>&1; then
+    bad "роли Pocock не проверены: OMP CLI не найден"
+    return
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    bad "роли Pocock не проверены: python3 не найден"
+    return
+  fi
+  if ! settings="$(cd /tmp && guard 30 omp config list --json 2>&1)"; then
+    bad "не удалось прочитать эффективный конфиг OMP для ролей Pocock: ${settings}"
+    return
+  fi
+  if ! report="$(
+    printf '%s' "${settings}" | python3 -c '
+import json
+import sys
+from pathlib import Path
+
+try:
+    settings = json.load(sys.stdin)
+except json.JSONDecodeError as error:
+    raise SystemExit(f"invalid OMP settings JSON: {error}")
+if not isinstance(settings, dict):
+    raise SystemExit("OMP settings inventory is not an object")
+
+# `omp config list --json` wraps every setting as {value, type, description}.
+roles_entry = settings.get("modelRoles")
+configured_roles = roles_entry.get("value") if isinstance(roles_entry, dict) else None
+if not isinstance(configured_roles, dict):
+    raise SystemExit("OMP settings inventory exposes no modelRoles record")
+chains_entry = settings.get("retry.fallbackChains")
+configured_chains = chains_entry.get("value") if isinstance(chains_entry, dict) else None
+if not isinstance(configured_chains, dict):
+    raise SystemExit("OMP settings inventory exposes no retry.fallbackChains record")
+
+roles = sorted(
+    manifest.stem
+    for manifest in Path(sys.argv[1]).glob("pocock-*.md")
+    if manifest.is_file()
+)
+if not roles:
+    raise SystemExit(f"no Pocock agent manifests in {sys.argv[1]}")
+
+missing_roles = [role for role in roles if not str(configured_roles.get(role) or "").strip()]
+missing_chains = [role for role in roles if not configured_chains.get(role)]
+if missing_roles:
+    raise SystemExit("missing Pocock modelRoles: " + ", ".join(missing_roles))
+if missing_chains:
+    raise SystemExit("missing Pocock fallbackChains: " + ", ".join(missing_chains))
+print(f"{len(roles)} modelRoles and {len(roles)} fallbackChains")
+' "${OMP_AGENTS_SOURCE}"
+  )"; then
+    bad "эффективный конфиг OMP не содержит полный маршрут Pocock: ${report}"
+    return
+  fi
+  ok "эффективный конфиг OMP содержит ${report}"
+}
+
+
 
 # --- A. Чекаут ---------------------------------------------------------------
 echo "== Чекаут =="
@@ -349,10 +438,11 @@ done
 # task agents and global extensions from separate registries.  These checks are
 # deliberately local: --offline must never require a network connection.
 echo "== Нативный контур OMP =="
-verify_omp_config "${OMP_CONFIG_SOURCE}"
+verify_omp_config "${OMP_CONFIG_FILE}"
 verify_effective_omp_config
+verify_effective_pocock_roles
 cat <<'EOF'
-  Дефолт и инварианты изоляции задач в .omp/config.yml:
+  Дефолт и инварианты изоляции задач в основном конфиге OMP:
     async.enabled: false
     display.showTokenUsage: true
     task.batch: true; task.enableEffort: true; task.showResolvedModelBadge: true
@@ -388,6 +478,7 @@ if [ -d "${OMP_AGENTS_SOURCE}" ]; then
 else
   bad "исходный каталог OMP agents отсутствует: ${OMP_AGENTS_SOURCE}"
 fi
+verify_no_retired_pocock_agents
 
 if [ -d "${OMP_EXTENSION_SOURCE}" ]; then
   verify_omp_tree "${OMP_EXTENSION_SOURCE}" "${OMP_EXTENSION_DIR}/pocock-control" "OMP extension pocock-control"

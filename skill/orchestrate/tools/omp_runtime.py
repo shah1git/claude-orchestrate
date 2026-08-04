@@ -35,8 +35,6 @@ from typing import Any, Callable
 
 import yaml
 
-from dispatch_ledger import select_candidate
-
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = SKILL_DIR / "config.yaml"
@@ -55,8 +53,6 @@ TICKET_FIELDS = (
 TERMINAL_PHASES = {"completed", "cancelled"}
 REPLACEMENT_STAGING_PHASE = "replacement_staging"
 CLASS_ORDER = {"mechanical": 0, "skilled": 1, "judgment": 2}
-CLASS_ROLE = {"mechanical": "scout", "skilled": "builder", "judgment": "architect"}
-EFFORT = {"mechanical": "lo", "skilled": "med", "judgment": "hi"}
 RUNTIME_CHANGED_MESSAGE = (
     "effective Pocock runtime differs from the runtime that created this run; "
     "inspect it with status and start a new run"
@@ -114,6 +110,74 @@ def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
+def slot_pair(mapping: Any, key: str, label: str) -> tuple[str, str]:
+    """The primary and backup slot a producer class or a lens is bound to.
+
+    Every field is required. A missing `backup` used to surface only when the
+    primary slot failed — that is, in the one situation where the run can least
+    afford a configuration error — so it is refused here instead.
+    """
+    definition = mapping.get(key) if isinstance(mapping, dict) else None
+    fail(not isinstance(definition, dict), "config_invalid", f"{label} declares no slot mapping")
+    values = []
+    for field in ("slot", "backup"):
+        value = definition.get(field)
+        fail(not isinstance(value, str) or not value, "config_invalid", f"{label} declares no {field}")
+        values.append(value)
+    fail(values[0] == values[1], "config_invalid", f"{label} uses one slot as both primary and backup: {values[0]}")
+    for field in ("effort",):
+        fail(not isinstance(definition.get(field), str) or not definition[field], "config_invalid", f"{label} declares no {field}")
+    return values[0], values[1]
+
+
+def validate_slot_disjointness(omp: dict[str, Any]) -> None:
+    """The config invariant that replaces the whole vendor/family apparatus.
+
+    A review is independent because the lens runs on a slot no producer can
+    occupy and no other lens shares. That is a statement about slot names
+    alone, so it is settled here once instead of being recomputed per wave from
+    model metadata. It does not, and cannot, catch two slots that resolve to the
+    same model; `assert_reviewers_are_not_producers` does that at dispatch.
+    """
+    producers: set[str] = set()
+    producer_map = omp.get("producers")
+    fail(not isinstance(producer_map, dict) or not producer_map, "config_invalid", "omp.producers declares no classes")
+    for cls in producer_map:
+        capability = producer_map[cls].get("capability") if isinstance(producer_map[cls], dict) else None
+        fail(not isinstance(capability, str) or not capability, "config_invalid", f"omp.producers.{cls} declares no capability")
+        producers.update(slot_pair(producer_map, cls, f"omp.producers.{cls}"))
+
+    lens_config = omp.get("lenses")
+    fail(not isinstance(lens_config, dict), "config_invalid", "omp.lenses is missing")
+    fail(
+        not isinstance(lens_config.get("capability"), str) or not lens_config["capability"],
+        "config_invalid",
+        "omp.lenses declares no reviewer capability",
+    )
+    lens_map = lens_config.get("slots")
+    fail(not isinstance(lens_map, dict) or not lens_map, "config_invalid", "omp.lenses.slots declares no lenses")
+    lenses: set[str] = set()
+    for lens in lens_map:
+        pair = slot_pair(lens_map, lens, f"omp.lenses.slots.{lens}")
+        clash = sorted(lenses.intersection(pair))
+        fail(
+            bool(clash),
+            "config_invalid",
+            f"lens {lens} shares a slot with another lens: {', '.join(clash)}",
+        )
+        lenses.update(pair)
+
+    overlap = sorted(producers & lenses)
+    fail(
+        bool(overlap),
+        "config_invalid",
+        f"producer and lens slots must be disjoint; shared: {', '.join(overlap)}",
+    )
+    declared = set(omp.get("slots", {}))
+    missing = sorted((producers | lenses) - declared)
+    fail(bool(missing), "config_invalid", f"slots are not declared in omp.slots: {', '.join(missing)}")
+
+
 def load_config() -> dict[str, Any]:
     try:
         raw = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
@@ -122,6 +186,7 @@ def load_config() -> dict[str, Any]:
     fail(not isinstance(raw, dict), "config_invalid", "config.yaml must contain a mapping")
     omp = raw.get("omp")
     fail(not isinstance(omp, dict), "config_invalid", "config.yaml lacks the required omp policy block")
+    validate_slot_disjointness(omp)
     return raw
 
 
@@ -129,10 +194,6 @@ def config_fingerprint(config: dict[str, Any]) -> str:
     version = config.get("version")
     raw = CONFIG_PATH.read_bytes()
     return f"v{version}+{hashlib.sha256(raw).hexdigest()[:7]}"
-
-
-def normalize_vendor(value: Any) -> str:
-    return str(value or "").strip().lower()
 
 
 def state_base(cwd: Path, explicit: str | None) -> Path:
@@ -417,9 +478,12 @@ def create_replacement_transaction(
 
 
 def runtime_fingerprint() -> str:
+    # Only files the native contour actually executes. `dispatch_ledger.py` was
+    # dropped when slot binding replaced round-robin slot claiming: hashing an
+    # archived module would invalidate live runs for an edit that cannot reach
+    # them.
     files = (
         Path(__file__).resolve(),
-        Path(__file__).resolve().parent / "dispatch_ledger.py",
         TELEMETRY_TOOL.resolve(),
         CONFIG_PATH.resolve(),
     )
@@ -730,6 +794,77 @@ def set_retry_lens_names(state: dict[str, Any], lenses: set[str]) -> None:
     state["retryLensNames"] = ordered_lens_names(lenses)
 
 
+def retry_backup_ticket_ids(state: dict[str, Any]) -> set[str]:
+    """Tickets whose next attempt must run on the backup slot of their class."""
+    raw = state.get("retryBackupTicketIds", [])
+    fail(
+        not isinstance(raw, list) or any(not isinstance(ticket_id_value, str) or not ticket_id_value for ticket_id_value in raw),
+        "state_corrupt",
+        "retryBackupTicketIds is invalid",
+    )
+    return set(raw)
+
+
+def retry_backup_lens_names(state: dict[str, Any]) -> set[str]:
+    """Lenses whose next review must run on their backup slot."""
+    raw = state.get("retryBackupLensNames", [])
+    fail(
+        not isinstance(raw, list)
+        or any(not isinstance(lens, str) or lens not in LENS_NAMES for lens in raw)
+        or len(raw) != len(set(raw)),
+        "state_corrupt",
+        "retryBackupLensNames is invalid",
+    )
+    return set(raw)
+
+
+def route_ticket_retry(state: dict[str, Any], attempts: dict[str, dict[str, Any]], kind: str) -> list[str]:
+    """Bind each failed ticket to the axis its own failure calls for.
+
+    Two axes, never confused. Insufficient depth is answered with depth: the
+    ticket class rises and the class selects a deeper slot. An undelivered slot
+    is answered with the paired backup slot, which is equal depth in another
+    model. A writing ticket may never become `judgment` — that is the
+    decomposition invariant — so at `skilled` it has no depth left and takes the
+    backup instead.
+
+    Returns the tickets that have neither axis left; the caller blocks them
+    rather than spending their last attempt on an identical dispatch.
+    """
+    exhausted: list[str] = []
+    backups: set[str] = set()
+    floors = state.setdefault("classFloor", {})
+    for ticket_id_value, attempt in attempts.items():
+        status = attempt.get("status")
+        if kind == "capability" and status in {"pregate_failed", "review_failed"}:
+            current = str(attempt.get("class") or "mechanical")
+            ticket_body = attempt.get("ticket")
+            writes = isinstance(ticket_body, dict) and bool(ticket_body.get("write"))
+            deeper = next(
+                (
+                    name
+                    for name, order in sorted(CLASS_ORDER.items(), key=lambda item: item[1])
+                    if order > CLASS_ORDER.get(current, 0) and not (writes and name == "judgment")
+                ),
+                None,
+            )
+            if deeper is not None:
+                floors[ticket_id_value] = max(
+                    deeper,
+                    str(floors.get(ticket_id_value) or deeper),
+                    key=lambda name: CLASS_ORDER[name],
+                )
+            elif writes:
+                backups.add(ticket_id_value)
+            else:
+                exhausted.append(ticket_id_value)
+        elif kind == "availability" and status == "availability_failed":
+            backups.add(ticket_id_value)
+    if backups:
+        state["retryBackupTicketIds"] = sorted(retry_backup_ticket_ids(state) | backups)
+    return sorted(exhausted)
+
+
 def latest_completed_lens_attempts(state: dict[str, Any], wave_id: str) -> dict[str, dict[str, Any]]:
     latest: dict[str, dict[str, Any]] = {}
     for assignment in state.get("lensAttempts", {}).values():
@@ -743,19 +878,6 @@ def latest_completed_lens_attempts(state: dict[str, Any], wave_id: str) -> dict[
             latest[lens] = assignment
     return latest
 
-
-def producer_vendor_family(producers: list[dict[str, Any]]) -> tuple[str, str]:
-    fail(not producers, "state_corrupt", "wave has no producer attempts")
-    identities = {
-        (normalize_vendor(producer.get("vendor")), normalize_vendor(producer.get("family")))
-        for producer in producers
-    }
-    fail(
-        len(identities) != 1 or not next(iter(identities))[0] or not next(iter(identities))[1],
-        "producer_wave_not_homogeneous",
-        "all producers in a wave must share one vendor/family; split the wave before dispatch",
-    )
-    return next(iter(identities))
 
 def ticket_failure_count(state: dict[str, Any], ticket_id: str) -> int:
     return int(state.get("qualityFailures", {}).get(ticket_id, 0)) + int(state.get("availabilityFailures", {}).get(ticket_id, 0))
@@ -789,6 +911,9 @@ def schedule_lens_retry(
         state["phase"] = "blocked"
         state["blockedReason"] = f"lens retry limit reached for wave {wave_id}: {', '.join(exhausted)}"
     else:
+        # A lens that could not be settled retries on its backup slot: the
+        # primary one has just demonstrated it cannot deliver this review.
+        state["retryBackupLensNames"] = ordered_lens_names(retry_backup_lens_names(state) | failed_lenses)
         state["phase"] = "lens_prepare_pending"
         state["blockedReason"] = reason
     state["lastFailureKind"] = "availability"
@@ -914,7 +1039,7 @@ def compact_actor(attempt: dict[str, Any], kind: str) -> dict[str, Any]:
         "role": nullable_text(attempt.get("role")),
         "lens": nullable_text(attempt.get("lens")),
         "attemptOrdinal": exact_nonnegative_integer(ordinal),
-        "laneAlias": nullable_text(attempt.get("laneAlias")),
+        "slotRole": nullable_text(attempt.get("slotRole")),
         "declaredModel": nullable_text(attempt.get("declaredModel")),
         "observedModel": nullable_text(attempt.get("observedModel")),
         "modelWitness": attempt_model_witness(attempt),
@@ -1166,16 +1291,14 @@ def command_start(cwd: Path, explicit_state_dir: str | None, request: dict[str, 
     requested_manifest_fingerprint = require_text(request.get("manifestFingerprint"), "manifestFingerprint")
     fail("lead" in request, "invalid_request", "lead is no longer accepted")
     models = require_mapping(request.get("models"), "models")
-    fail(not models, "model_manifest_invalid", "OMP supplied no resolved Pocock lane models")
+    fail(not models, "model_manifest_invalid", "OMP supplied no resolved Pocock role models")
 
-    omp_lanes = config["omp"].get("lanes", {})
-    fail(set(models) != set(omp_lanes), "model_manifest_invalid", "resolved lane set differs from config", expected=sorted(omp_lanes), observed=sorted(models))
-    known = {normalize_vendor(v) for v in config["omp"].get("known_vendors", [])}
-    for lane, witness in models.items():
-        fail(not isinstance(witness, dict), "model_manifest_invalid", f"lane {lane} witness is not an object")
-        for field in ("role", "provider", "resolvedModel", "vendor", "family"):
-            require_text(witness.get(field), f"models.{lane}.{field}")
-        fail(normalize_vendor(witness["vendor"]) not in known, "model_manifest_invalid", f"lane {lane} has an unknown vendor")
+    omp_slots = config["omp"].get("slots", {})
+    fail(set(models) != set(omp_slots), "model_manifest_invalid", "resolved slot set differs from config", expected=sorted(omp_slots), observed=sorted(models))
+    for slot, witness in models.items():
+        fail(not isinstance(witness, dict), "model_manifest_invalid", f"slot {slot} witness is not an object")
+        for field in ("role", "provider", "resolvedModel"):
+            require_text(witness.get(field), f"models.{slot}.{field}")
     manifest_fingerprint = trusted_manifest_fingerprint(cwd, config)
     fail(
         requested_manifest_fingerprint != manifest_fingerprint,
@@ -1212,11 +1335,12 @@ def command_start(cwd: Path, explicit_state_dir: str | None, request: dict[str, 
             "currentWave": None,
             "qualityFailures": {},
             "availabilityFailures": {},
-            "retryFloor": {},
+            "classFloor": {},
+            "retryBackupTicketIds": [],
+            "retryBackupLensNames": [],
             "retryTicketIds": [],
             "retryLensNames": [],
             "frontierExhausted": False,
-            "dispatchCounts": {},
             "evidenceChallenges": {},
             "attempts": {},
             "lensAttempts": {},
@@ -1379,7 +1503,10 @@ def command_transition(cwd: Path, explicit_state_dir: str | None, request: dict[
 
         if phase == "repair_pending" and action == "retry":
             diagnosis = payload if isinstance(payload, dict) else {}
-            kind = str(diagnosis.get("diagnosis", "effort")).lower()
+            # A bare `retry` must not silently pick the one diagnosis that
+            # changes nothing. The core already recorded why the wave failed,
+            # so that recorded kind is the default.
+            kind = str(diagnosis.get("diagnosis") or state.get("lastFailureKind") or "effort").lower()
             fail(kind not in {"effort", "capability", "availability", "clarification"}, "invalid_diagnosis", "retry diagnosis must be effort, capability, availability, or clarification")
             max_attempts = int(load_config().get("routing", {}).get("escalation", {}).get("max_attempts_per_subtask", 2))
             attempted_tickets = retry_ticket_ids(state)
@@ -1401,11 +1528,20 @@ def command_transition(cwd: Path, explicit_state_dir: str | None, request: dict[
                 state["phase"] = "blocked"
                 state["blockedReason"] = f"retry limit reached for: {', '.join(exhausted)}"
                 return
-            if kind == "capability":
-                for attempt in state.get("attempts", {}).values():
-                    if attempt.get("status") in {"pregate_failed", "review_failed"} and attempt.get("ticketId") in attempted_tickets:
-                        ticket = attempt["ticketId"]
-                        state["retryFloor"][ticket] = max(int(state["retryFloor"].get(ticket, 0)), int(attempt["rank"]) + 1)
+            attempted_again = {
+                str(attempt["ticketId"]): attempt
+                for attempt in state.get("attempts", {}).values()
+                if attempt.get("ticketId") in attempted_tickets
+            }
+            exhausted_depth = route_ticket_retry(state, attempted_again, kind)
+            if exhausted_depth:
+                state["phase"] = "blocked"
+                state["blockedReason"] = (
+                    "capability escalation is exhausted at the deepest class for: "
+                    f"{', '.join(exhausted_depth)}; decompose them instead"
+                )
+                state["lastRetry"] = {"diagnosis": kind, "payload": diagnosis}
+                return
             state["lastRetry"] = {"diagnosis": kind, "payload": diagnosis}
             state["authorizedNextTickets"] = sorted(attempted_tickets)
             state["pendingDispatch"] = None
@@ -2040,7 +2176,7 @@ def require_sweep_integrity(state: dict[str, Any]) -> dict[str, Any]:
 
 
 
-def classify_ticket(ticket: dict[str, Any], config: dict[str, Any]) -> str:
+def classify_ticket(ticket: dict[str, Any], config: dict[str, Any], floor: str | None = None) -> str:
     classes = config.get("routing", {}).get("classes", {})
     normalized = {str(signal).strip().lower() for signal in ticket["signals"]}
     pools = {name: {str(signal).strip().lower() for signal in definition.get("signals", [])} for name, definition in classes.items() if isinstance(definition, dict)}
@@ -2057,43 +2193,45 @@ def classify_ticket(ticket: dict[str, Any], config: dict[str, Any]) -> str:
         fail(requested not in CLASS_ORDER, "ticket_invalid", f"ticket {ticket['ticketId']} has an unknown class")
         fail(CLASS_ORDER[requested] < CLASS_ORDER[derived], "under_routing", f"ticket {ticket['ticketId']} requests {requested} below derived {derived}")
         derived = requested
+    if floor is not None:
+        fail(floor not in CLASS_ORDER, "state_corrupt", f"ticket {ticket['ticketId']} carries an unknown class floor")
+        if CLASS_ORDER[floor] > CLASS_ORDER[derived]:
+            derived = floor
     fail(ticket["write"] and derived == "judgment", "ticket_needs_decomposition", f"ticket {ticket['ticketId']} combines judgment with production writes; split design from implementation")
     return derived
 
 
-def role_candidates(state: dict[str, Any], config: dict[str, Any], role: str, minimum_rank: int) -> list[dict[str, Any]]:
+def bind_slot(state: dict[str, Any], config: dict[str, Any], capability: str, slot: str) -> dict[str, Any]:
+    """Resolve one Pocock slot into the agent and model witness sealed at start.
+
+    There is no search here on purpose. A slot IS an OMP role name; which model
+    stands behind it, and which model replaces it when that one is unavailable,
+    are decisions that belong to the OMP config and to OMP's own retry, not to
+    this contour.
+    """
     omp = config["omp"]
-    role_def = omp.get("roles", {}).get(role, {})
+    role_def = omp.get("roles", {}).get(capability, {})
     agents = role_def.get("agents", {}) if isinstance(role_def, dict) else {}
-    known = {normalize_vendor(v) for v in omp.get("known_vendors", [])}
-    candidates = []
-    for lane, agent in agents.items():
-        lane_def = omp.get("lanes", {}).get(lane, {})
-        witness = state.get("models", {}).get(lane)
-        if not isinstance(lane_def, dict) or not isinstance(witness, dict):
-            continue
-        rank = int(lane_def.get("rank", -1))
-        vendor = normalize_vendor(witness.get("vendor"))
-        if rank < minimum_rank or vendor not in known:
-            continue
-        candidates.append({
-            "lane": lane,
-            "agent": agent,
-            "rank": rank,
-            "witness": witness,
-        })
-    return sorted(candidates, key=lambda item: (item["rank"], item["lane"]))
+    agent = agents.get(slot)
+    fail(
+        not isinstance(agent, str) or not agent,
+        "config_invalid",
+        f"capability {capability} declares no agent for slot {slot}",
+    )
+    fail(slot not in omp.get("slots", {}), "config_invalid", f"slot {slot} is not declared in omp.slots")
+    witness = state.get("models", {}).get(slot)
+    fail(not isinstance(witness, dict), "route_unavailable", f"no model witness was sealed for slot {slot}")
+    return {"slot": slot, "agent": agent, "witness": witness}
 
 
-def claim_candidate(state: dict[str, Any], candidates: list[dict[str, Any]], role: str) -> dict[str, Any]:
-    fail(not candidates, "route_unavailable", f"no known OMP lane is available for role {role}")
-    lowest_rank = candidates[0]["rank"]
-    equal = [item for item in candidates if item["rank"] == lowest_rank]
-    counts = state.setdefault("dispatchCounts", {})
-    selected_lane = select_candidate([item["lane"] for item in equal], counts)
-    selected = next(item for item in equal if item["lane"] == selected_lane)
-    counts[selected_lane] = int(counts.get(selected_lane, 0)) + 1
-    return selected
+def slot_for(config: dict[str, Any], mapping: dict[str, Any], key: str, use_backup: bool) -> dict[str, Any]:
+    """Pick a slot definition and, when the primary is spent, its backup pair."""
+    definition = mapping.get(key)
+    fail(not isinstance(definition, dict), "config_invalid", f"no slot mapping is declared for {key}")
+    field = "backup" if use_backup else "slot"
+    slot = definition.get(field)
+    fail(not isinstance(slot, str) or not slot, "config_invalid", f"slot mapping for {key} declares no {field}")
+    return {"slot": slot, "definition": definition}
 
 
 def budget_check(state: dict[str, Any], config: dict[str, Any], projection: int) -> None:
@@ -2177,11 +2315,14 @@ def command_prepare(cwd: Path, explicit_state_dir: str | None, request: dict[str
         attempt_ids = []
         prepared_attempts = []
         for index, ticket in enumerate(tickets):
-            cls = classify_ticket(ticket, config)
-            role = CLASS_ROLE[cls]
-            floor = int(state.get("retryFloor", {}).get(ticket["ticketId"], 0))
-            allowed_min = {"scout": 0, "builder": 1, "architect": 2}[role]
-            selected = claim_candidate(state, role_candidates(state, config, role, max(floor, allowed_min)), role)
+            floor = state.get("classFloor", {}).get(ticket["ticketId"])
+            cls = classify_ticket(ticket, config, floor if isinstance(floor, str) else None)
+            producers_map = config["omp"].get("producers", {})
+            use_backup = ticket["ticketId"] in retry_backup_ticket_ids(state)
+            picked = slot_for(config, producers_map, cls, use_backup)
+            capability = picked["definition"].get("capability")
+            fail(not isinstance(capability, str) or not capability, "config_invalid", f"producer class {cls} declares no capability")
+            selected = bind_slot(state, config, capability, picked["slot"])
             quality_no = ticket_attempt_count(state, ticket["ticketId"]) + 1
             attempt_id = f"{state['runId']}.w{wave_no}.{ticket['ticketId']}.a{quality_no}.{uuid.uuid4().hex[:6]}"
             dispatch_name = f"P{wave_no}T{index + 1}A{quality_no}"
@@ -2193,15 +2334,13 @@ def command_prepare(cwd: Path, explicit_state_dir: str | None, request: dict[str
                 "attemptOrdinal": quality_no,
                 "ticket": ticket,
                 "class": cls,
-                "role": role,
-                "lane": selected["lane"],
-                "laneAlias": config["omp"]["lanes"][selected["lane"]]["alias"],
-                "rank": selected["rank"],
+                "role": capability,
+                "slot": selected["slot"],
+                "slotRole": config["omp"]["slots"][selected["slot"]]["alias"],
+                "slotIsBackup": use_backup,
                 "agent": selected["agent"],
                 "declaredAgent": selected["agent"],
                 "declaredModel": selected["witness"]["resolvedModel"],
-                "vendor": selected["witness"]["vendor"],
-                "family": selected["witness"]["family"],
                 "status": "prepared",
                 "tokens": None,
                 "observedAgent": None,
@@ -2227,13 +2366,12 @@ def command_prepare(cwd: Path, explicit_state_dir: str | None, request: dict[str
                 "name": dispatch_name,
                 "agent": selected["agent"],
                 "task": text_for_ticket(ticket),
-                "effort": EFFORT[cls],
+                "effort": require_text(picked["definition"].get("effort"), f"omp.producers.{cls}.effort"),
                 "outputSchema": producer_schema(),
                 "schemaMode": "strict",
                 "isolated": True,
             })
 
-        producer_vendor, producer_family = producer_vendor_family(prepared_attempts)
         for attempt in prepared_attempts:
             state["attempts"][attempt["attemptId"]] = attempt
             challenge = attempt.get("evidenceChallenge")
@@ -2262,8 +2400,7 @@ def command_prepare(cwd: Path, explicit_state_dir: str | None, request: dict[str
             "failedAttemptIds": [],
             "status": "prepared",
             "baseSha": base_sha,
-            "producerVendor": producer_vendor,
-            "producerFamily": producer_family,
+            "producerSlots": sorted({attempt["slot"] for attempt in prepared_attempts}),
         }
         if sweep is not None:
             wave.update({
@@ -2907,6 +3044,7 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
         availability_ticket_ids: list[str] = []
         quality_ticket_ids: list[str] = []
         failed_lenses: set[str] = set()
+        settled_backup_lenses: set[str] = set()
         failure_reasons: list[str] = []
         patch_bytes_max = int(config.get("omp", {}).get("pre_gate", {}).get("patch_bytes_max", DEFAULT_PATCH_BYTES_MAX))
 
@@ -3054,6 +3192,10 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
                     validate_lens_result(data, attempt)
                     attempt["status"] = "completed"
                     attempt["result"] = data
+                    # The backup slot has now delivered this lens, so the marker
+                    # is spent. Leaving it set would pin the lens to its backup
+                    # for every later wave of the run.
+                    settled_backup_lenses.add(str(attempt["lens"]))
             except RuntimeFailure as exc:
                 if exc.code == "state_corrupt":
                     raise
@@ -3084,6 +3226,17 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
             set_retry_ticket_ids(state, set(wave["failedTicketIds"]))
 
             if successful_producer_ids:
+                # Partial success: the wave moves on, so the failed siblings
+                # never reach the explicit `retry` transition. Route them here
+                # by their own recorded failure kind, or their next attempt
+                # repeats the identical dispatch and burns the retry budget.
+                if failed_producer_ids:
+                    failed_by_ticket = {
+                        str(collection[attempt_id]["ticketId"]): collection[attempt_id]
+                        for attempt_id in failed_producer_ids
+                    }
+                    route_ticket_retry(state, failed_by_ticket, "availability")
+                    route_ticket_retry(state, failed_by_ticket, "capability")
                 state_path, _lock_path = state_paths(cwd, explicit_state_dir, state["runId"])
                 applied_patch = apply_patch_batch(
                     cwd,
@@ -3127,6 +3280,7 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
                 f"wave is missing completed lens reports: {', '.join(ordered_lens_names(missing_lenses))}",
             )
             return
+        state["retryBackupLensNames"] = ordered_lens_names(retry_backup_lens_names(state) - settled_backup_lenses)
         set_retry_lens_names(state, set())
         state["phase"] = "adjudication_pending"
         state["blockedReason"] = None
@@ -3381,6 +3535,19 @@ def command_pregate(cwd: Path, explicit_state_dir: str | None, request: dict[str
             set_retry_ticket_ids(state, failed_tickets)
 
         if passed_attempt_ids:
+            if failed_attempt_ids:
+                # The wave proceeds to the lenses on its passing subset, so the
+                # failed tickets skip the explicit `retry` transition. A failed
+                # pre-gate is a capability verdict, so route them on that axis.
+                route_ticket_retry(
+                    state,
+                    {
+                        str(attempt["ticketId"]): attempt
+                        for attempt in attempts
+                        if attempt["attemptId"] in failed_attempt_ids
+                    },
+                    "capability",
+                )
             wave["status"] = "pregate_passed" if not failed_attempt_ids else "pregate_partial"
             state["phase"] = "lens_prepare_pending"
             state["blockedReason"] = None
@@ -3394,89 +3561,61 @@ def command_pregate(cwd: Path, explicit_state_dir: str | None, request: dict[str
     return output(state)
 
 
-def reviewer_candidates(
-    state: dict[str, Any],
-    config: dict[str, Any],
-    producer_vendor: str,
-    producer_family: str,
-    lens: str,
-) -> list[dict[str, Any]]:
-    minimum = int(config["omp"].get("lenses", {}).get("critic_min_rank", 1)) if lens == "Critic" else 0
-    candidates = role_candidates(state, config, config["omp"].get("lenses", {}).get("reviewer_role", "reviewer"), minimum)
-    eligible = [
-        item
-        for item in candidates
-        if normalize_vendor(item["witness"].get("vendor")) != producer_vendor
-        and normalize_vendor(item["witness"].get("family")) != producer_family
-    ]
-    if lens == "Standards" and config["omp"].get("lenses", {}).get("standards_non_claude"):
-        eligible = [
-            item
-            for item in eligible
-            if normalize_vendor(item["witness"].get("vendor")) != "anthropic"
-            and normalize_vendor(item["witness"].get("family")) != "claude"
-        ]
-    fail(
-        not eligible,
-        "independent_reviewer_unavailable",
-        f"no independent trusted reviewer is available for the {lens} wave lens",
-    )
-    return sorted(eligible, key=lambda item: (item["rank"], item["lane"]))
-
-
 def select_wave_reviewers(
     state: dict[str, Any],
     config: dict[str, Any],
-    producers: list[dict[str, Any]],
     lenses: list[str],
-    excluded_lanes: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
+    """Bind each lens to its own slot — primary, or backup when it is spent.
+
+    No search and no independence arithmetic: `omp.lenses.slots` and
+    `omp.producers` name disjoint slot sets, and `validate_slot_disjointness`
+    proves it once at config load. Which model is behind a slot, and what
+    replaces it when that model is unavailable, is OMP's business.
+    """
     fail(not lenses or len(lenses) != len(set(lenses)) or any(lens not in LENS_NAMES for lens in lenses), "state_corrupt", "lens dispatch has invalid names")
-    producer_vendor, producer_family = producer_vendor_family(producers)
-    candidates = {
-        lens: reviewer_candidates(state, config, producer_vendor, producer_family, lens)
-        for lens in lenses
-    }
-    selections: list[dict[str, dict[str, Any]]] = []
-
-    def choose(index: int, selected: dict[str, dict[str, Any]]) -> None:
-        if index == len(lenses):
-            selections.append(dict(selected))
-            return
-        lens = lenses[index]
-        for candidate in candidates[lens]:
-            if (excluded_lanes is not None and candidate["lane"] in excluded_lanes) or candidate["lane"] in {
-                choice["lane"] for choice in selected.values()
-            }:
-                continue
-            selected[lens] = candidate
-            choose(index + 1, selected)
-            selected.pop(lens)
-
-    choose(0, {})
-    fail(
-        not selections,
-        "independent_reviewer_unavailable",
-        "no set of distinct independent reviewer lanes is available for this producer wave",
-    )
-    counts = state.setdefault("dispatchCounts", {})
-
-    def selection_key(selected: dict[str, dict[str, Any]]) -> tuple[Any, ...]:
-        critic_rank = selected["Critic"]["rank"] if "Critic" in selected else 0
-        non_critic_rank = sum(item["rank"] for lens, item in selected.items() if lens != "Critic")
-        dispatch_load = sum(int(counts.get(item["lane"], 0)) for item in selected.values())
-        return (
-            -critic_rank,
-            non_critic_rank,
-            dispatch_load,
-            tuple(selected[lens]["lane"] for lens in lenses),
-        )
-
-    chosen = min(selections, key=selection_key)
+    lens_config = config["omp"].get("lenses", {})
+    capability = lens_config.get("capability")
+    fail(not isinstance(capability, str) or not capability, "config_invalid", "omp.lenses declares no reviewer capability")
+    mapping = lens_config.get("slots", {})
+    use_backup = retry_backup_lens_names(state)
+    chosen: dict[str, dict[str, Any]] = {}
     for lens in lenses:
-        lane = chosen[lens]["lane"]
-        counts[lane] = int(counts.get(lane, 0)) + 1
+        picked = slot_for(config, mapping, lens, lens in use_backup)
+        bound = bind_slot(state, config, capability, picked["slot"])
+        bound["definition"] = picked["definition"]
+        bound["isBackup"] = lens in use_backup
+        chosen[lens] = bound
     return chosen
+
+
+def assert_reviewers_are_not_producers(
+    chosen: dict[str, dict[str, Any]],
+    producers: list[dict[str, Any]],
+) -> None:
+    """Refuse a wave where a lens and a producer resolved to the same model.
+
+    Disjoint slots guarantee different roles, not different models: the owner
+    may point two roles at one model, and a backup substitution can land a lens
+    on the model a producer is already using. This is the fail-closed backstop
+    for that, and it needs no knowledge of models — only string equality on the
+    opaque witnesses OMP reported.
+    """
+    producing = {
+        str(producer.get("declaredModel") or "")
+        for producer in producers
+        if producer.get("declaredModel")
+    }
+    collisions = sorted(
+        f"{lens} ({bound['witness']['resolvedModel']})"
+        for lens, bound in chosen.items()
+        if str(bound["witness"]["resolvedModel"]) in producing
+    )
+    fail(
+        bool(collisions),
+        "independent_reviewer_unavailable",
+        "a lens resolved to a model this wave's producers already used: " + ", ".join(collisions),
+    )
 
 
 def lens_task_text(lens: str, producers: list[dict[str, Any]], state: dict[str, Any]) -> str:
@@ -3531,13 +3670,6 @@ def command_prepare_lenses(cwd: Path, explicit_state_dir: str | None, request: d
         )
         producers = [state["attempts"][attempt_id] for attempt_id in passed_ids]
         fail(any(producer.get("status") != "completed" for producer in producers), "pregate_required", "a passed producer is no longer completed")
-        producer_vendor, producer_family = producer_vendor_family(producers)
-        fail(
-            normalize_vendor(wave.get("producerVendor")) != producer_vendor
-            or normalize_vendor(wave.get("producerFamily")) != producer_family,
-            "state_corrupt",
-            "wave producer vendor/family binding drifted",
-        )
         configured_names = config["omp"].get("lenses", {}).get("names")
         fail(
             not isinstance(configured_names, list) or tuple(configured_names) != LENS_NAMES,
@@ -3547,27 +3679,16 @@ def command_prepare_lenses(cwd: Path, explicit_state_dir: str | None, request: d
         requested_retry_names = retry_lens_names(state)
         lens_names = ordered_lens_names(requested_retry_names) if requested_retry_names else list(LENS_NAMES)
         wave_id = require_text(wave.get("waveId"), "wave.waveId")
-        completed_lenses = latest_completed_lens_attempts(state, wave_id)
-        reserved_lanes = {
-            str(assignment["lane"])
-            for lens, assignment in completed_lenses.items()
-            if lens not in requested_retry_names
-        }
         projection_each = int(config["omp"].get("budget_projection", {}).get("lens_per_ticket", 0))
         projection = projection_each * len(lens_names) * len(producers)
         budget_check(state, config, projection)
-        reviewer_role = config["omp"].get("lenses", {}).get("reviewer_role", "reviewer")
-        selected_reviewers = select_wave_reviewers(
-            state,
-            config,
-            producers,
-            lens_names,
-            excluded_lanes=reserved_lanes,
-        )
+        capability = config["omp"].get("lenses", {}).get("capability")
+        selected_reviewers = select_wave_reviewers(state, config, lens_names)
+        assert_reviewers_are_not_producers(selected_reviewers, producers)
 
         items = []
         lens_ids = []
-        reviewer_lanes = wave.setdefault("reviewerLanes", {})
+        reviewer_slots = wave.setdefault("reviewerSlots", {})
         for index, lens in enumerate(lens_names):
             selected = selected_reviewers[lens]
             review_no = lens_attempt_count(state, wave_id, lens) + 1
@@ -3580,17 +3701,15 @@ def command_prepare_lenses(cwd: Path, explicit_state_dir: str | None, request: d
                 "producerAttemptIds": list(passed_ids),
                 "ticketIds": [producer["ticketId"] for producer in producers],
                 "lens": lens,
-                "role": reviewer_role,
+                "role": capability,
                 "reviewAttemptOrdinal": review_no,
                 "attemptOrdinal": review_no,
-                "lane": selected["lane"],
-                "laneAlias": config["omp"]["lanes"][selected["lane"]]["alias"],
-                "rank": selected["rank"],
+                "slot": selected["slot"],
+                "slotRole": config["omp"]["slots"][selected["slot"]]["alias"],
+                "slotIsBackup": selected["isBackup"],
                 "agent": selected["agent"],
                 "declaredAgent": selected["agent"],
                 "declaredModel": selected["witness"]["resolvedModel"],
-                "vendor": selected["witness"]["vendor"],
-                "family": selected["witness"]["family"],
                 "status": "prepared",
                 "tokens": None,
                 "observedAgent": None,
@@ -3600,12 +3719,12 @@ def command_prepare_lenses(cwd: Path, explicit_state_dir: str | None, request: d
             }
             state["lensAttempts"][lens_id] = assignment
             lens_ids.append(lens_id)
-            reviewer_lanes[lens] = selected["lane"]
+            reviewer_slots[lens] = selected["slot"]
             items.append({
                 "name": dispatch_name,
                 "agent": selected["agent"],
                 "task": lens_task_text(lens, producers, state),
-                "effort": "hi" if lens == "Critic" else "med",
+                "effort": require_text(selected["definition"].get("effort"), f"omp.lenses.slots.{lens}.effort"),
                 "outputSchema": lens_schema(),
                 "schemaMode": "strict",
                 "isolated": True,

@@ -64,10 +64,14 @@ producer's own reasoning, drafts, and self-reports stay excluded exactly as befo
 ## 3. Current wave-level lens contract
 
 After deterministic pre-gate, the core takes exactly the producer attempts that passed
-it and creates one wave-level review task. All producers in the wave share a sealed
-vendor/family. The task has exactly three distinct independent reviewer agents:
-**Standards**, **Spec**, and **Critic**, each selected independently from every producer
-vendor/family. It is one shared task for the passed subset, not a ticket-scoped trio.
+it and creates one wave-level review task. A wave may mix `mechanical`, `skilled`, and
+`judgment` producer attempts on their respective slots. Configuration makes producer and
+lens slot sets disjoint, the three lens slots pairwise distinct, and every primary slot
+distinct from its backup. Before dispatching lenses, the core fails closed with
+`independent_reviewer_unavailable` if a lens's opaque `resolvedModel` string exactly
+matches that of any producer in the wave; it does not classify vendors or families. The
+task has exactly three distinct reviewer slots: **Standards**, **Spec**, and **Critic**.
+It is one shared task for the passed subset, not a ticket-scoped trio.
 
 Every lens returns exactly this structure:
 
@@ -81,9 +85,13 @@ only verdict. Acceptance also requires no surviving blocking finding introduced 
 Standards or Spec.
 
 An execution or schema failure safely attributable to one lens retries only that lens;
-valid reports from the other lenses stay bound to their producer attempts. Adjudication is
-partial: producer tickets that already pass retain acceptance, and only affected attempts
-return to the card-authorized repair path.
+valid reports from the other lenses stay bound to their producer attempts. A successful
+backup-slot lens clears its backup marker. A missing retry diagnosis uses
+`lastFailureKind`; `capability` deepens the ticket class (writers stop at `skilled`,
+exhausted `judgment` blocks as `escalation_exhausted`) while `availability` moves to the
+paired backup. Adjudication is partial: producer tickets that already pass retain
+acceptance, and each rejected ticket routes directly from its recorded rejection cause,
+without a separate `retry` step.
 
 ### 3a. Finding scope and the decision-context pack
 
@@ -153,10 +161,12 @@ creates a new sealed attempt for that failed lens only. It does not redispatch t
 lenses, revive a settled native task, or discard valid producer results.
 
 When findings require repair, the current state card identifies only the affected producer
-attempts. Their repair is a new sealed producer attempt followed by its deterministic
-pre-gate and review binding; accepted tickets in the same wave remain accepted. The lead
-cannot turn a recoverable failure into automatic cancellation or a new run: attempt limits,
-budget, and authorization stay with the durable run.
+attempts. During partial acceptance the core routes each one directly from its recorded
+rejection cause, rather than exposing a separate `retry` step. Their repair is a new
+sealed producer attempt followed by its deterministic pre-gate and review binding;
+accepted tickets in the same wave remain accepted. The lead cannot turn a recoverable
+failure into automatic cancellation or a new run: attempt limits, budget, and
+authorization stay with the durable run.
 
 **Proportionality stop.** When cumulative gate + fix spend crosses the configured ratio
 to the producer's build spend (config `gates.review_loop.proportionality_stop`; token

@@ -14,19 +14,32 @@ providers:
     anthropic: 3
     kimi-code: 3
     xai-oauth: 1
+    alibaba-token-plan: 3
   autoThinkingMaxEffort: xhigh
 modelRoles:
-  default: anthropic/claude-opus-5:high
+  default: alibaba-token-plan/qwen3.8-max
   smol: google-antigravity/gemini-3.6-flash:medium
   slow: anthropic/claude-fable-5:max
   free: google-antigravity/claude-opus-4-6:high
-  plan: anthropic/claude-fable-5:max
+  plan: alibaba-token-plan/qwen3.8-max
   vision: openai-codex/gpt-5.6-sol:high
   designer: openai-codex/gpt-5.6-sol:high
   commit: google-antigravity/gemini-3.6-flash:medium
   tiny: google-antigravity/gemini-3.6-flash:medium
   task: openai-codex/gpt-5.6-terra:high
   advisor: xai-oauth/grok-4.5:high
+  pocock-scout: openai-codex/gpt-5.6-luna:low
+  pocock-builder: openai-codex/gpt-5.6-terra:high
+  pocock-architect: openai-codex/gpt-5.6-sol:max
+  pocock-lens-standards: google-antigravity/gemini-3.6-flash:high
+  pocock-lens-spec: kimi-code/k3:high
+  pocock-lens-critic: anthropic/claude-fable-5:max
+  pocock-scout-backup: alibaba-token-plan/qwen3.8-max
+  pocock-builder-backup: alibaba-token-plan/qwen3.8-max
+  pocock-architect-backup: alibaba-token-plan/qwen3.8-max
+  pocock-lens-standards-backup: xai-oauth/grok-4.5:high
+  pocock-lens-spec-backup: xai-oauth/grok-4.5:high
+  pocock-lens-critic-backup: xai-oauth/grok-4.5:xhigh
 modelTags:
   free:
     name: AG Opus
@@ -34,6 +47,7 @@ modelTags:
 modelProviderOrder:
   - openai-codex
   - anthropic
+  - alibaba-token-plan
   - xai-oauth
   - google-antigravity
   - kimi-code
@@ -66,13 +80,16 @@ retry:
       - openai-codex/gpt-5.6-luna:high
       - kimi-code/kimi-for-coding-highspeed:high
       - anthropic/claude-haiku-4-5:high
+      - alibaba-token-plan/qwen3.8-max
     slow:
+      - alibaba-token-plan/qwen3.8-max
       - anthropic/claude-opus-5:high
       - openai-codex/gpt-5.6-sol:max
       - xai-oauth/grok-4.5:high
       - kimi-code/k3:max
       - google-antigravity/gemini-3.1-pro:high
     free:
+      - alibaba-token-plan/qwen3.8-max
       - google-antigravity/gemini-3.1-pro:high
     plan:
       - openai-codex/gpt-5.6-sol:max
@@ -86,6 +103,7 @@ retry:
       - kimi-code/k3:high
     designer:
       - anthropic/claude-opus-5:high
+      - alibaba-token-plan/qwen3.8-max
       - xai-oauth/grok-4.5:high
       - google-antigravity/gemini-3.1-pro:high
       - kimi-code/k3:high
@@ -93,20 +111,36 @@ retry:
       - openai-codex/gpt-5.6-luna:low
       - kimi-code/kimi-for-coding-highspeed:low
       - anthropic/claude-haiku-4-5:low
+      - alibaba-token-plan/qwen3.8-max
     tiny:
       - openai-codex/gpt-5.6-luna:low
       - kimi-code/kimi-for-coding-highspeed:minimal
       - anthropic/claude-haiku-4-5:minimal
+      - alibaba-token-plan/qwen3.8-max
     task:
+      - alibaba-token-plan/qwen3.8-max
       - anthropic/claude-opus-5:high
       - xai-oauth/grok-4.5:high
       - google-antigravity/claude-opus-4-6:high
       - kimi-code/k3:high
     advisor:
       - google-antigravity/gemini-3.6-flash:high
+      - alibaba-token-plan/qwen3.8-max
       - anthropic/claude-opus-5:high
       - openai-codex/gpt-5.6-terra:high
       - kimi-code/k3:high
+    pocock-scout: [openai-codex/gpt-5.4-mini:low, openai-codex/gpt-5.5:low]
+    pocock-builder: [openai-codex/gpt-5.6-sol:high, openai-codex/gpt-5.5:high]
+    pocock-architect: [openai-codex/gpt-5.6-terra:max, openai-codex/gpt-5.4:xhigh]
+    pocock-lens-standards: [google-antigravity/gemini-3.1-pro:high, google-antigravity/gemini-3.5-flash:high]
+    pocock-lens-spec: [kimi-code/k3-256k:high, kimi-code/kimi-k2.5:high]
+    pocock-lens-critic: [anthropic/claude-opus-5:high, anthropic/claude-sonnet-5:high]
+    pocock-scout-backup: [xai-oauth/grok-4.5:high]
+    pocock-builder-backup: [xai-oauth/grok-4.5:high]
+    pocock-architect-backup: [xai-oauth/grok-4.5:xhigh]
+    pocock-lens-standards-backup: [xai-oauth/grok-4.5:high]
+    pocock-lens-spec-backup: [xai-oauth/grok-4.5:high]
+    pocock-lens-critic-backup: [xai-oauth/grok-4.5:xhigh]
 task:
   eager: preferred
   maxConcurrency: 6
@@ -114,13 +148,6 @@ task:
   maxRuntimeMs: 1800000
   enableEffort: true
   maxEffort: max
-  agentModelOverrides:
-    scout: "google-antigravity/gemini-3.6-flash:high,openai-codex/gpt-5.6-luna:low,kimi-code/kimi-for-coding-highspeed:low"
-    sonic: "google-antigravity/gemini-3.6-flash:high,openai-codex/gpt-5.6-luna:low,kimi-code/kimi-for-coding-highspeed:minimal"
-    librarian: "anthropic/claude-sonnet-5:medium,google-antigravity/gemini-3.1-pro:high,openai-codex/gpt-5.6-terra:medium,kimi-code/k3:high"
-    reviewer: "anthropic/claude-fable-5:max,xai-oauth/grok-4.5:high,openai-codex/gpt-5.6-sol:max,google-antigravity/claude-opus-4-6:high,kimi-code/k3:max"
-    designer: "openai-codex/gpt-5.6-sol:high,anthropic/claude-opus-5:high,xai-oauth/grok-4.5:high,google-antigravity/gemini-3.1-pro:high,kimi-code/k3:high"
-    task: "openai-codex/gpt-5.6-terra:high,anthropic/claude-opus-5:high,xai-oauth/grok-4.5:high,google-antigravity/claude-opus-4-6:high,kimi-code/k3:high"
   batch: true
   isolation:
     mode: auto

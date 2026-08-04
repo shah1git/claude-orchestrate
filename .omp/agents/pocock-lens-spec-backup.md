@@ -1,7 +1,7 @@
 ---
-name: pocock-reviewer-task
-description: "Read-only рецензент Pocock для назначенной линзы проверки."
-model: "@task"
+name: pocock-lens-spec-backup
+description: "Read-only рецензент Pocock для назначенной линзы проверки. Запасной слот."
+model: "@pocock-lens-spec-backup"
 tools: [read, grep, glob, lsp]
 spawns: []
 blocking: true

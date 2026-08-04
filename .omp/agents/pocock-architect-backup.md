@@ -1,7 +1,7 @@
 ---
-name: pocock-architect-slow
-description: "Read-only архитектор Pocock для проектирования решения по билету."
-model: "@slow"
+name: pocock-architect-backup
+description: "Read-only архитектор Pocock для проектирования решения по билету. Запасной слот."
+model: "@pocock-architect-backup"
 tools: [read, grep, glob, lsp]
 spawns: []
 blocking: true

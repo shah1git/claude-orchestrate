@@ -86,25 +86,40 @@ flowchart LR
 
 ### Маршрутизация без привязки к моделям
 
-Скиллы и runtime не содержат имён конкретных моделей. Они оперируют четырьмя ролями
-OMP:
+Скиллы и runtime не маршрутизируют по именам конкретных моделей и не
+классифицируют их по поставщикам или семействам. Они оперируют слотами — именами
+ролей OMP:
 
-| Роль | Назначение |
-|---|---|
-| `@smol` | дешёвая механическая разведка и простые проверки |
-| `@task` | стандартная реализация по полной спецификации |
-| `@advisor` | сложная реализация или архитектурная работа |
-| `@slow` | верхний уровень сложности и состязательная проверка |
+| Слот | Запасной | Назначение |
+|---|---|---|
+| `@pocock-scout` | `@pocock-scout-backup` | дешёвая механическая разведка |
+| `@pocock-builder` | `@pocock-builder-backup` | реализация по полной спецификации |
+| `@pocock-architect` | `@pocock-architect-backup` | архитектурная работа и суждение |
+| `@pocock-lens-standards` | `@pocock-lens-standards-backup` | линза Standards |
+| `@pocock-lens-spec` | `@pocock-lens-spec-backup` | линза Spec |
+| `@pocock-lens-critic` | `@pocock-lens-critic-backup` | линза Critic |
 
-Файлы [`.omp/agents/pocock-*.md`](.omp/agents/) связывают класс работы с ролью и
-объявляют допустимые инструменты. Конкретную модель каждой роли выбирает профиль OMP.
-Эффективный профиль разрешает fallback (`retry.modelFallback: true`), поэтому OMP может
-разрешить для роли другую модель. Адаптер передаёт `observedModel`
-(`provider/id/family`) и `modelFallback`, а runtime сохраняет их в live-карточке и
-settlement как оперативную телеметрию; fallback или несовпадение с объявленной моделью
-сами по себе не отклоняют попытку и не влияют на гейты приёмки.
+Какая модель стоит за ролью — решает владелец в основном конфиге OMP
+(`$(omp config path)/config.yml`).
+Замена модели **внутри** роли при недоступности принадлежит целиком OMP
+(`retry.fallbackChains`) и контуру не видна. Замена **Слота** — уровень контура:
+он переходит на парный `-backup`, когда это требует сохранённая диагностика.
 
-Маршрут выводится из сигналов тикета:
+Независимость трёх Линз обеспечена структурно: множество Слотов Производителей и
+множество Слотов Линз не пересекаются, Слоты трёх Линз попарно различны, а
+основной Слот не равен запасному; это проверяется при загрузке конфигурации
+(`validate_slot_disjointness`). Перед раздачей Линз runtime дополнительно
+fail-closed сравнивает непрозрачные строки `resolvedModel`: точное совпадение
+модели Линзы с моделью любого Производителя Волны даёт
+`independent_reviewer_unavailable`. Это не классификация поставщика или
+семейства и не таблица вендоров.
+
+Файлы [`.omp/agents/pocock-*.md`](.omp/agents/) объявляют способности Слота и
+допустимые инструменты. Адаптер передаёт `observedModel` и `modelFallback`, а
+runtime сохраняет их как оперативную телеметрию; маршрут задаётся Слотом, а
+точное сравнение `resolvedModel` применяется только перед раздачей Линз.
+
+Маршрут выводится из сигналов Тикета:
 
 - **mechanical** — все шаги перечислимы заранее, решений не осталось, результат легко
   проверить;
@@ -113,9 +128,14 @@ settlement как оперативную телеметрию; fallback или �
 - **judgment** — остаётся пространство решений, неоднозначность, риск или требуется
   архитектурная оценка.
 
-Явно заниженный класс отклоняется. Ретраи не являются скрытым повтором: runtime
-учитывает причину провала, число качественных попыток и минимально допустимый следующий
-уровень.
+Явно заниженный класс отклоняется. Если в payload повтора нет диагноза, runtime
+использует сохранённый `lastFailureKind`. `capability` поднимает класс
+`mechanical` → `skilled` → `judgment` и выбирает более глубокий Слот; пишущий
+Тикет останавливается на `skilled` и переходит на запасной Слот, а исчерпавший
+глубину `judgment` блокируется с `escalation_exhausted`. `availability`
+переводит Тикет на парный запасной Слот. При частичной приёмке отклонённый
+Тикет маршрутизируется сразу по записанной причине отказа, без отдельного шага
+`retry`.
 
 ### Сохраняемое состояние и fail-closed поведение
 
@@ -186,15 +206,20 @@ runtime/config/manifests. Устаревшая ревизия, повреждё�
   успешным host-assert над наблюдаемым результатом.
 
 Затем для **всей Волны** и только её прошедшего pre-gate подмножества запускается
-один пакет из трёх различных независимых Линз. Все Производители Волны имеют
-общий запечатанный поставщик/семейство, а Standards, Spec и Critic независимы от
-него. Каждая Линза возвращает
+один пакет из трёх различных независимых Линз. Волна может законно смешивать
+Тикеты классов `mechanical`, `skilled` и `judgment` на соответствующих Слотах.
+Непересечение Слотов Производителей и Линз, попарное различие трёх Линз и
+различие основного и запасного Слотов проверяются при загрузке конфигурации.
+Перед раздачей runtime fail-closed отклоняет Волну с
+`independent_reviewer_unavailable`, если непрозрачная строка `resolvedModel`
+любой Линзы в точности совпала со строкой любого Производителя; поставщик и
+семейство при этом не выводятся. Каждая Линза возвращает
 `{lens, summary, reports:[{attemptId, summary, findings, verdict}]}` с отчётом
 для каждой прошедшей producer attempt. Standards и Spec дают `NO_VERDICT`;
 только Critic даёт `PASS`/`FAIL`. Ошибка одной Линзы повторяет только её, а не
-всю Волну. Приёмка сохраняет уже прошедшие Тикеты и для каждого нового требует
-`Critic=PASS` и отсутствия выживших блокирующих замечаний, внесённых текущей
-работой.
+всю Волну; успешная Линза на запасном Слоте снимает свою метку запасного Слота.
+Приёмка сохраняет уже прошедшие Тикеты и для каждого нового требует `Critic=PASS`
+и отсутствия выживших блокирующих замечаний, внесённых текущей работой.
 
 ### Установка
 
@@ -235,8 +260,9 @@ cd /opt/claude-orchestrate
 ./install.sh --configure-omp
 ```
 
-Обычная установка **не меняет** глобальную конфигурацию OMP. Флаг
-`--configure-omp` осознанно устанавливает:
+Обычная установка записывает в основной конфиг OMP только именные роли
+`pocock-*` и их `retry.fallbackChains`, сохраняя остальные настройки. Флаг
+`--configure-omp` дополнительно устанавливает глобальные task-инварианты:
 
 ```yaml
 async.enabled: false
@@ -318,11 +344,14 @@ direct path 不创建 Pocock run、状态卡或 lenses，也绝不接收 frontie
 
 ### 与模型解耦
 
-路由只使用 OMP 角色 `@smol`、`@task`、`@advisor`、`@slow`。具体模型由 OMP
-配置决定；技能中没有固定的 GPT、Gemini、Claude 或 Grok 名称。有效 OMP 配置启用
-`retry.modelFallback: true`，允许 OMP 为角色解析不同模型。适配器将实际
-`provider/id/family`、`observedModel` 和 `modelFallback` 记录为运行时遥测；
-fallback 或与声明模型不一致本身不会拒绝一次尝试，也不影响验收门。
+路由只使用槽位，即 OMP 角色名 `@pocock-scout`、`@pocock-builder`、
+`@pocock-architect` 与三个镜头槽位 `@pocock-lens-*`，每个槽位都有配对的
+`-backup`。具体模型由 OMP 主配置（`$(omp config path)/config.yml`）决定；代码中没有任何
+GPT、Gemini、Claude、Grok 或 Qwen 名称，也没有供应商白名单。角色**内部**的模型替换
+完全属于 OMP（`retry.fallbackChains`）；**角色本身**的替换属于编排回路：槽位耗尽时
+切换到配对的 `-backup`。三个镜头的独立性由结构保证——生产者槽位集合与镜头槽位集合
+互不相交，配置加载时即校验。适配器将 `observedModel` 和 `modelFallback` 记录为运行时
+遥测；它们本身不会拒绝一次尝试，也不影响验收门。
 
 ### 状态、隔离与质量门
 
@@ -395,13 +424,18 @@ Native batched OMP `task` is the only Pocock worker transport.
 
 ### Model-independent routing
 
-Routing targets OMP roles `@smol`, `@task`, `@advisor`, and `@slow`; the OMP profile
-selects the concrete model behind each role. The effective profile enables
-`retry.modelFallback: true`, so OMP may resolve a different model for a role. Agent
+Routing targets slots — that is, OMP role names: `@pocock-scout`, `@pocock-builder`,
+`@pocock-architect`, and the three lens slots `@pocock-lens-*`, each paired with a
+`-backup`. The model behind a role is chosen in the main OMP config
+(`$(omp config path)/config.yml`);
+the contour holds no model names and no provider allowlist, so admitting a model from a
+new provider is a config edit alone. Replacing a model *within* a role belongs entirely
+to OMP (`retry.fallbackChains`); replacing the *role* belongs to the contour, which
+moves to the paired `-backup` once a slot is spent. Lens independence is structural:
+producer slots and lens slots are disjoint sets, checked at config load. Agent
 definitions in [`.omp/agents/`](.omp/agents/) declare capabilities and tool allowlists.
-The adapter passes the resolved `provider/id/family`, `observedModel`, and
-`modelFallback` to the runtime for live-card and settlement operational telemetry; a
-fallback or declared-model mismatch alone neither rejects an attempt nor affects acceptance gates.
+The adapter passes `observedModel` and `modelFallback` to the runtime as operational
+telemetry; neither rejects an attempt nor affects acceptance gates.
 
 ### Durable state, isolation, and gates
 
@@ -454,8 +488,10 @@ cd /opt/claude-orchestrate
 bash scripts/verify-install.sh --offline
 ```
 
-A normal install copies one detached snapshot of the skills, OMP agents, and extension
-without changing global OMP settings. Use `--link` only for live-checkout development.
+A normal install copies one detached snapshot of the skills, OMP agents, and extension,
+then writes only the namespaced `pocock-*` roles and their `retry.fallbackChains` to the
+main OMP config. It preserves every unrelated setting. Use `--link` only for
+live-checkout development.
 Invoke `/orchestrate <task>` for raw or decision-bearing work, or for the narrowly
 eligible direct ordinary task described above; all other `/orchestrate` inputs enter
 Pocock. `/orchestrate-frontier` is always for a prepared published frontier and
@@ -470,7 +506,6 @@ historical reproduction; no public head calls it.
 ## Repository layout
 
 ```text
-.omp/config.yml                         repository OMP task invariants
 .omp/agents/pocock-*.md                 native capability-agent definitions
 .omp/extensions/pocock-control/         thin OMP adapter and dispatch seal
 skill/orchestrate/SKILL.md               full orchestration head
@@ -483,6 +518,7 @@ benchmark/                               cheat-resistant role polygon
 docs/adr/                                architectural decisions
 install.sh                               link/copy installer; optional OMP configuration
 scripts/verify-install.sh                offline installation verifier
+scripts/omp-portable-profile.yml         portable bootstrap snapshot of the main OMP config
 ```
 
 ## License

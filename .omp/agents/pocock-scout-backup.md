@@ -1,7 +1,7 @@
 ---
-name: pocock-scout-smol
-description: "Быстрый read-only разведчик для запечатанного билета Pocock."
-model: "@smol"
+name: pocock-scout-backup
+description: "Быстрый read-only разведчик для запечатанного билета Pocock. Запасной слот."
+model: "@pocock-scout-backup"
 tools: [read, grep, glob, lsp]
 spawns: []
 blocking: true

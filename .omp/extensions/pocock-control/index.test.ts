@@ -50,7 +50,7 @@ test("a runtime-mismatched mirror can be replaced by a new run", async () => {
 				},
 			};
 		}
-		if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+		if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
 		if (command === "start") return { card: { ...card("new-run", 0, "frontier_admission"), manifestFingerprint } };
 		throw new Error(`Unexpected core command ${command}: ${JSON.stringify(request)}`);
 	});
@@ -79,7 +79,7 @@ test("status without a mirrored run hydrates the core-owned active run", async (
 			expect(request).toEqual({ manifestFingerprint });
 			return { card: { ...card("durable-run", 7, "ready"), manifestFingerprint } };
 		}
-		if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+		if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
 		throw new Error(`Unexpected core command ${command}: ${JSON.stringify(request)}`);
 	});
 
@@ -92,7 +92,7 @@ test("status without a mirrored run hydrates the core-owned active run", async (
 
 test("status without a mirrored run reports an empty workspace", async () => {
 	const harness = adapterHarness((command, request) => {
-		if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+		if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
 		if (command === "status") {
 			expect(request).toEqual({
 				manifestFingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -180,7 +180,6 @@ function adapterHarness(respond?: CoreResponder) {
 		},
 		models: {
 			resolve: () => ({ provider: "openai", id: "gpt-5" }),
-			family: () => "gpt-5",
 		},
 	};
 	const pi = {
@@ -210,7 +209,7 @@ function adapterHarness(respond?: CoreResponder) {
 			requests.push({ command, request });
 			const response = respond?.(command, request) ?? (
 				command === "metadata"
-					? { omp: { lanes: { producer: { alias: "producer" } } } }
+					? { omp: { slots: { scout: { alias: "@pocock-scout" } } } }
 					: command === "start"
 						? card(`${request.entry}-run`, 0, "producer_dispatch_pending")
 						: card(String(request.runId), Number(request.revision) + 1, "completed")
@@ -297,7 +296,7 @@ describe("Pocock live dispatch observability", () => {
 			role: "reviewer",
 			lens: "security",
 			attemptOrdinal: 0,
-			laneAlias: "@advisor",
+			slotRole: "@advisor",
 			declaredModel: "openai/gpt-5",
 			observedModel: "anthropic/claude-4",
 			modelWitness: "witness-42",
@@ -314,7 +313,7 @@ describe("Pocock live dispatch observability", () => {
 		};
 		let manifestFingerprint = "";
 		const harness = adapterHarness((command, request) => {
-			if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
 			if (command === "start") {
 				manifestFingerprint = String(request.manifestFingerprint);
 				return { ...card("projection-run", 0, "producer_dispatch_pending"), manifestFingerprint };
@@ -355,7 +354,7 @@ describe("Pocock live dispatch observability", () => {
 		for (const expected of [
 			actor.dispatchName,
 			actor.ticketId,
-			actor.laneAlias,
+			actor.slotRole,
 			actor.declaredModel,
 			actor.observedModel,
 			actor.modelWitness,
@@ -367,7 +366,7 @@ describe("Pocock live dispatch observability", () => {
 		for (const projected of [
 			actor.dispatchName,
 			actor.ticketId,
-			actor.laneAlias,
+			actor.slotRole,
 			actor.declaredModel,
 			actor.observedModel,
 			actor.modelWitness,
@@ -389,7 +388,7 @@ describe("Pocock live dispatch observability", () => {
 				actors: [{
 					dispatchName: "P/L clear",
 					ticketId: "T-clear",
-					laneAlias: "producer",
+					slotRole: "@pocock-scout",
 					declaredModel: "openai/gpt-5",
 					observedModel: "openai/gpt-5",
 					modelWitness: "clear-witness",
@@ -399,7 +398,7 @@ describe("Pocock live dispatch observability", () => {
 		};
 		let transitions = 0;
 		const harness = adapterHarness(command => {
-			if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
 			if (command === "start") return card("clear-run", 0, "producer_dispatch_pending");
 			if (command === "transition") {
 				transitions += 1;
@@ -451,7 +450,7 @@ describe("Pocock live dispatch observability", () => {
 		};
 		let manifestFingerprint = "";
 		const harness = adapterHarness((command, request) => {
-			if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
 			if (command === "start") {
 				manifestFingerprint = String(request.manifestFingerprint);
 				return { ...card("result-run", 0, "producer_dispatch_pending"), manifestFingerprint };
@@ -518,7 +517,7 @@ describe("Pocock live dispatch observability", () => {
 	test("gates nonterminal sessions but allows terminal sessions to stop", async () => {
 		const runId = "stop-run";
 		const harness = adapterHarness(command => {
-			if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
 			if (command === "start") return card(runId, 0, "ready");
 			if (command === "transition") return card(runId, 1, "completed");
 			throw new Error(`Unexpected core command ${command}`);
@@ -555,7 +554,7 @@ describe("Pocock live dispatch observability", () => {
 describe("Hub lifecycle guard", () => {
 	test("blocks every Hub operation only for this session's nonterminal Pocock run", async () => {
 		const harness = adapterHarness(command => {
-			if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
 			if (command === "start") return card("hub-guard-run", 0, "producer_dispatch_pending");
 			if (command === "transition") return card("hub-guard-run", 1, "completed");
 			throw new Error(`Unexpected core command ${command}`);
@@ -596,7 +595,7 @@ describe("Hub lifecycle guard", () => {
 		};
 		let manifestFingerprint = "";
 		const harness = adapterHarness((command, request) => {
-			if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
 			if (command === "start") {
 				manifestFingerprint = String(request.manifestFingerprint);
 				return { ...card("hub-fail-closed", 0, "producer_dispatch_pending"), manifestFingerprint };
@@ -646,7 +645,7 @@ describe("Hub lifecycle guard", () => {
 
 	test("status without runId replaces a terminal mirror with the core-owned active run", async () => {
 		const harness = adapterHarness((command, request) => {
-			if (command === "metadata") return { omp: { lanes: { producer: { alias: "producer" } } } };
+			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
 			if (command === "start") return card("finished-run", 0, "ready");
 			if (command === "transition") return card("finished-run", 1, "completed");
 			if (command === "status") {

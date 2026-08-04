@@ -29,7 +29,7 @@ OMP_AGENTS_DIR="${OMP_BASE_DIR}/agents"
 OMP_EXTENSION_DIR="${OMP_BASE_DIR}/extensions"
 OMP_AGENTS_SOURCE="${REPO_DIR}/.omp/agents"
 OMP_EXTENSION_SOURCE="${REPO_DIR}/.omp/extensions/pocock-control"
-OMP_CONFIG_SOURCE="${REPO_DIR}/.omp/config.yml"
+POCOCK_PROFILE_SOURCE="${REPO_DIR}/scripts/omp-portable-profile.yml"
 INSTALL_BACKUP_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/claude-orchestrate/install-backups"
 
 report_omp_isolation() {
@@ -50,8 +50,8 @@ EOF
 require_omp_sources() {
   local missing=0 agent_seen=0 src
 
-  [ -f "${OMP_CONFIG_SOURCE}" ] || {
-    echo "missing required repository OMP config: ${OMP_CONFIG_SOURCE}" >&2
+  [ -f "${POCOCK_PROFILE_SOURCE}" ] || {
+    echo "missing portable OMP profile: ${POCOCK_PROFILE_SOURCE}" >&2
     missing=1
   }
   [ -d "${OMP_EXTENSION_SOURCE}" ] || {
@@ -77,11 +77,10 @@ require_omp_sources() {
 
 # configure_omp_runtime
 # This opt-in action is used only with --configure-omp. The public heads can be
-# invoked from any repository, so their control-plane invariants cannot depend
-# on this checkout's project-local .omp/config.yml. OMP owns its global
-# configuration writer; using it preserves unrelated user settings while making
-# batch transport and isolation settings effective elsewhere while enabling
-# fallback model resolution.
+# invoked from any repository, so their control-plane invariants live in the
+# main OMP config. OMP owns its configuration writer; using it preserves
+# unrelated user settings while making batch transport and isolation settings
+# effective everywhere and enabling fallback model resolution.
 configure_omp_runtime() {
   command -v omp >/dev/null 2>&1 || {
     echo "OMP CLI is required for the native Pocock contour" >&2
@@ -227,6 +226,30 @@ prune_retired() {
   done
 }
 
+# prune_retired_pocock_agents
+# The OMP agent registry owns the `pocock-` namespace. Unlike generic stale
+# checkout links, prior copy-mode installations leave ordinary manifests there;
+# preserve those files in the regular install backup before removing them from
+# OMP discovery. A stale link has no content of its own and can be removed.
+prune_retired_pocock_agents() {
+  local entry
+  [ -d "${OMP_AGENTS_DIR}" ] || return 0
+  for entry in "${OMP_AGENTS_DIR}"/pocock-*.md; do
+    [[ -f "${entry}" || -L "${entry}" ]] || continue
+    [ -f "${OMP_AGENTS_SOURCE}/$(basename "${entry}")" ] && continue
+    if [ -L "${entry}" ]; then
+      rm -f "${entry}"
+      echo "убрано  ${entry} (устаревшая ссылка на Pocock agent)"
+    else
+      LAST_BACKUP=""
+      backup_existing "${entry}"
+      echo "убрано  ${entry} (устаревший Pocock agent; резервная копия: ${LAST_BACKUP})"
+    fi
+  done
+}
+
+
+
 # install_heads
 # OMP discovers public skills in the shared ~/.agents/skills registry. Derive
 # the head set from the checkout so renames cannot leave a hand-maintained list.
@@ -295,8 +318,10 @@ retire_legacy_harness_links() {
   done
 }
 
-# OMP-native artifacts live in their own registries. Only project-owned stale
-# symlinks are pruned; user-created files or unrelated links are never removed.
+# OMP-native artifacts live in their own registries. Generic stale checkout
+# symlinks are pruned there, while obsolete `pocock-*.md` manifests are removed
+# from the agent registry regardless of whether the prior install used copies
+# or links.
 install_omp_native() {
   local src
   mkdir -p "${OMP_AGENTS_DIR}" "${OMP_EXTENSION_DIR}"
@@ -310,7 +335,45 @@ install_omp_native() {
   relocate_legacy_backups "${OMP_EXTENSION_DIR}/pocock-control"
 
   prune_retired "${OMP_AGENTS_DIR}"
+  prune_retired_pocock_agents
   prune_retired "${OMP_EXTENSION_DIR}"
+}
+
+# install_pocock_model_roles
+# The `pocock-*` model roles are part of the contour, not of one checkout: the
+# public heads run in any repository, so the assignments live in the main OMP
+# config. The portable profile supplies installation defaults only. Roles are
+# namespaced and therefore do not belong behind --configure-omp, which gates
+# global task invariants. Only `pocock-*` keys are written; every other setting
+# in the user's main config is preserved verbatim.
+install_pocock_model_roles() {
+  python3 - "${POCOCK_PROFILE_SOURCE}" "${OMP_BASE_DIR}/config.yml" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+source_path, target_path = (Path(argument) for argument in sys.argv[1:3])
+source = yaml.safe_load(source_path.read_text(encoding="utf-8")) or {}
+target_file = Path(target_path)
+target = yaml.safe_load(target_file.read_text(encoding="utf-8")) if target_file.is_file() else {}
+target = target or {}
+
+roles = {key: value for key, value in (source.get("modelRoles") or {}).items() if key.startswith("pocock-")}
+chains = {
+    key: value
+    for key, value in ((source.get("retry") or {}).get("fallbackChains") or {}).items()
+    if key.startswith("pocock-")
+}
+if roles:
+    target.setdefault("modelRoles", {}).update(roles)
+if chains:
+    target.setdefault("retry", {}).setdefault("fallbackChains", {}).update(chains)
+
+target_file.parent.mkdir(parents=True, exist_ok=True)
+target_file.write_text(yaml.safe_dump(target, allow_unicode=True, sort_keys=False), encoding="utf-8")
+print(f"installed {len(roles)} Pocock model roles and {len(chains)} fallback chains in {target_file}")
+PY
 }
 
 require_omp_sources
@@ -321,6 +384,7 @@ else
 fi
 
 install_omp_native
+install_pocock_model_roles
 
 install_heads
 retire_legacy_harness_links

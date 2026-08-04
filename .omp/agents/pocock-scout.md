@@ -1,7 +1,7 @@
 ---
-name: pocock-scout-task
-description: "Read-only разведчик Pocock для исследования запечатанного билета."
-model: "@task"
+name: pocock-scout
+description: "Быстрый read-only разведчик для запечатанного билета Pocock."
+model: "@pocock-scout"
 tools: [read, grep, glob, lsp]
 spawns: []
 blocking: true

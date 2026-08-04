@@ -1,7 +1,7 @@
 ---
-name: pocock-builder-task
-description: "Пишущий исполнитель Pocock для реализации запечатанного билета."
-model: "@task"
+name: pocock-builder-backup
+description: "Пишущий исполнитель Pocock для реализации запечатанного билета. Запасной слот."
+model: "@pocock-builder-backup"
 tools: [read, grep, glob, write, edit, bash, lsp]
 spawns: []
 blocking: true

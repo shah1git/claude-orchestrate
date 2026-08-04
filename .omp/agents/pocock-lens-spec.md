@@ -1,7 +1,7 @@
 ---
-name: pocock-reviewer-slow
+name: pocock-lens-spec
 description: "Read-only рецензент Pocock для назначенной линзы проверки."
-model: "@slow"
+model: "@pocock-lens-spec"
 tools: [read, grep, glob, lsp]
 spawns: []
 blocking: true

@@ -12,7 +12,7 @@ from the conversation.
 
 This head owns triage, clarification, the Pocock spine, plan approval, and publication
 of tickets. It may finish one narrowly eligible ordinary task on the direct path before
-there is a Pocock run. The runtime owns routing, lane selection, attempt state, evidence,
+there is a Pocock run. The runtime owns routing, slot selection, attempt state, evidence,
 verification, quality decisions, and acceptance for every Pocock run. Do not turn prose
 into a second policy engine.
 
@@ -118,7 +118,7 @@ forbidden otherwise. `INPUTS` must be a complete inline contract, a resolvable r
 path, a full URL, a fully qualified `issue://owner/repo/N`, or an accepted upstream
 artifact—not `#123`, `Issue #123`, or an instruction to read tracker or IRC prose. The
 core reports such an incomplete source as `incomplete_tracker_reference`. Do not
-name a route, lane, worker, or quality outcome in a ticket; the core derives those from
+name a route, slot, worker, or quality outcome in a ticket; the core derives those from
 the ticket and its policy. The exact field meanings are in the
 [ticket-writing reference](references/delegation.md#the-ticket-field-by-field).
 
@@ -145,7 +145,7 @@ pocock_prepare
   → lens_dispatch_pending: one wave-level fixed three-lens task
     → if one lens alone fails execution or schema validation, retry only that lens
     → adjudication_pending: pocock_adjudicate
-      → repair_pending for affected producer attempts: pocock_transition(retry)
+      → repair_pending for affected producer attempts: core routes each by its recorded rejection cause (no separate retry)
         → pocock_prepare
       or accepted producer tickets: pocock_accept
 → pocock_transition(continue_wave) only in the form the current card authorizes:
@@ -185,17 +185,27 @@ another attempt do not satisfy it. Then request `pocock_pregate`.
 `pocock_pregate` executes the sealed direct-argv checks and determines which producer
 attempts enter review. `pocock_prepare_lenses` creates exactly three distinct
 wave-level reviewers—Standards, Spec, and Critic—over precisely that pre-gate-passed
-subset. The core seals one shared producer vendor/family for the wave and chooses every
-reviewer independently from it. Each lens returns
-`{lens, summary, reports:[{attemptId, summary, findings, verdict}]}` with a report for
-every passed producer attempt. Standards and Spec emit `NO_VERDICT`; Critic alone emits
-`PASS` or `FAIL`. If a lens alone fails execution or schema validation, only that lens
-receives a new sealed attempt. `pocock_adjudicate` is the only place reports are
-adjudicated: it preserves already accepted producer tickets and accepts another only with
-a Critic `PASS` and zero surviving blocking findings introduced by Standards or Spec. The
-lead cannot waive either condition. On repair, request `retry` from the current card and
-return to preparation; on acceptance, request `pocock_accept`. Attempt eligibility,
-retry limits, gate conditions, and the decision to accept remain code-owned.
+subset. A wave may mix `mechanical`, `skilled`, and `judgment` producer attempts on
+their respective slots. Configuration makes producer and lens slot sets disjoint, the
+three lens slots pairwise distinct, and every primary slot distinct from its backup.
+Before dispatching lenses, the core fails closed with
+`independent_reviewer_unavailable` if a lens's opaque `resolvedModel` string exactly
+matches that of any producer in the wave; it does not classify vendors or families.
+Each lens returns `{lens, summary, reports:[{attemptId, summary, findings, verdict}]}`
+with a report for every passed producer attempt. Standards and Spec emit `NO_VERDICT`;
+Critic alone emits `PASS` or `FAIL`. If a lens alone fails execution or schema
+validation, only that lens receives a new sealed attempt; a lens that then succeeds on
+its backup slot clears its backup marker. `pocock_adjudicate` is the only place reports
+are adjudicated: it preserves already accepted producer tickets and accepts another only
+with a Critic `PASS` and zero surviving blocking findings introduced by Standards or Spec.
+Retry routing remains code-owned: a missing diagnosis uses `lastFailureKind`;
+`capability` raises the ticket class from `mechanical` through `skilled` to `judgment`,
+except that a writer stops at `skilled` and moves to its backup, while an exhausted
+`judgment` ticket blocks as `escalation_exhausted`; `availability` moves to the paired
+backup. During partial acceptance, the core routes each rejected ticket directly from
+its recorded rejection cause, without a separate `retry` transition. The lead cannot
+waive these conditions; attempt eligibility, retry limits, gate conditions, and the
+decision to accept remain code-owned.
 
 Synthesize only after the runtime authorizes `begin_synthesis`, then request `complete`
 from the resulting card. A nonterminal run is never completed merely because a session

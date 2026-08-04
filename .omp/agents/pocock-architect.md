@@ -1,7 +1,7 @@
 ---
-name: pocock-architect-advisor
+name: pocock-architect
 description: "Read-only архитектор Pocock для проектирования решения по билету."
-model: "@advisor"
+model: "@pocock-architect"
 tools: [read, grep, glob, lsp]
 spawns: []
 blocking: true

@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 import omp_runtime as runtime
 
@@ -28,25 +29,21 @@ PROVENANCE = {
 }
 
 
-def model_manifest(*, smol_vendor: str = "Google", fallback: bool = False) -> dict[str, dict[str, object]]:
-    definitions = {
-        "smol": ("@smol", "google", "gemini-fixture", smol_vendor, "gemini"),
-        "task": ("@task", "openai", "gpt-fixture", "OpenAI", "gpt"),
-        "advisor": ("@advisor", "xai", "grok-fixture", "xAI", "grok"),
-        "slow": ("@slow", "anthropic", "claude-fixture", "Anthropic", "claude"),
-    }
-    if smol_vendor == "xAI":
-        definitions["smol"] = ("@smol", "xai", "grok-small-fixture", "xAI", "grok-small")
+def model_manifest(*, fallback: bool = False) -> dict[str, dict[str, object]]:
+    """One witness per declared slot, exactly as the adapter reports them.
+
+    The fixture derives its keys from `omp.slots` so a new slot cannot be added
+    to the config without the tests seeing it.
+    """
+    slots = runtime.load_config()["omp"]["slots"]
     return {
-        lane: {
-            "role": role,
-            "provider": provider,
-            "resolvedModel": f"{provider}/{model}",
-            "vendor": vendor,
-            "family": family,
+        slot: {
+            "role": definition["alias"],
+            "provider": "fixture",
+            "resolvedModel": f"fixture/{slot}-model",
             "resolvedModelIsFallback": fallback,
         }
-        for lane, (role, provider, model, vendor, family) in definitions.items()
+        for slot, definition in slots.items()
     }
 
 
@@ -660,11 +657,31 @@ def test_copy_reinstall_preserves_live_telemetry(tmp_path):
     legacy_frontier = home / ".agents" / "skills" / "pocock-frontier"
     legacy_frontier.mkdir()
     (legacy_frontier / "SKILL.md").write_text("name: pocock-frontier\n", encoding="utf-8")
+    omp_config = home / ".omp" / "agent" / "config.yml"
+    omp_config.parent.mkdir(parents=True)
+    omp_config.write_text("ownerSetting:\n  preserved: true\n", encoding="utf-8")
     command = ["bash", str(repo_root / "install.sh")]
     first = subprocess.run(command, cwd=repo_root, env=env, text=True, capture_output=True, check=False)
     assert first.returncode == 0, first.stderr
     assert not legacy_run.exists()
     assert not legacy_frontier.exists()
+    assert not (repo_root / ".omp" / "config.yml").exists()
+    installed_config = yaml.safe_load(omp_config.read_text(encoding="utf-8"))
+    expected_roles = {
+        manifest.stem
+        for manifest in (repo_root / ".omp" / "agents").glob("pocock-*.md")
+    }
+    assert installed_config["ownerSetting"] == {"preserved": True}
+    assert {
+        role
+        for role in installed_config["modelRoles"]
+        if role.startswith("pocock-")
+    } == expected_roles
+    assert {
+        role
+        for role in installed_config["retry"]["fallbackChains"]
+        if role.startswith("pocock-")
+    } == expected_roles
 
     installed = home / ".agents" / "skills" / "orchestrate"
     telemetry = installed / "telemetry"
@@ -771,6 +788,10 @@ def test_lost_settlement_can_be_abandoned_fail_closed_and_retry_is_bounded(tmp_p
     second_state = authoritative(cwd, state_dir, second["card"]["runId"])
     second_attempt = second_state["attempts"][second_state["pendingDispatch"]["attemptIds"][0]]
     assert second_attempt["qualityAttempt"] == 2
+    # An unavailable slot is precisely what the paired backup slot exists for.
+    assert second_attempt["slotIsBackup"] is True
+    assert second_attempt["slot"] == "scout-backup"
+    assert second_attempt["agent"] == "pocock-scout-backup"
 
     sealed_again = seal(cwd, state_dir, second, "producer")
     response = transition(
@@ -900,13 +921,23 @@ def test_runtime_drift_blocks_hydration_and_mutation_but_not_status(tmp_path, cw
     assert status["card"]["runtimeMismatch"] == {"expected": pinned, "observed": changed}
 
 
-def test_known_vendor_uses_same_native_agent_contract_without_attestation(tmp_path, cwd, config):
-    state_dir, response = start(tmp_path, cwd, config, "frontier", models=model_manifest(smol_vendor="xAI"))
+def test_run_starts_on_a_model_the_contour_has_never_heard_of(tmp_path, cwd, config):
+    """The whole point of the slot model: a new provider needs no code change.
+
+    Before slots, an unrecognised model was refused outright by a hand-written
+    vendor table. Now the contour only ever sees a slot name and an opaque
+    resolved-model string, so an unknown provider dispatches like any other.
+    """
+    exotic = model_manifest()
+    for slot, witness in exotic.items():
+        witness["provider"] = "brand-new-cloud"
+        witness["resolvedModel"] = f"brand-new-cloud/unheard-of-{slot}"
+    state_dir, response = start(tmp_path, cwd, config, "frontier", models=exotic)
     response = prepare(cwd, state_dir, admit_frontier(cwd, state_dir, response), config)
     state = authoritative(cwd, state_dir, response["card"]["runId"])
     assignment = state["attempts"][state["pendingDispatch"]["attemptIds"][0]]
-    assert assignment["vendor"] == "xAI"
-    assert assignment["agent"] == "pocock-scout-smol"
+    assert assignment["agent"] == "pocock-scout"
+    assert assignment["declaredModel"].startswith("brand-new-cloud/")
     assert seal(cwd, state_dir, response, "producer")["card"]["phase"] == "producer_running"
 
 
@@ -934,7 +965,7 @@ def test_executed_input_is_rejected_and_fallback_result_preserves_live_witness(t
     assert settled["card"]["phase"] == "pregate_pending"
     persisted = authoritative(cwd, state_dir, settled["card"]["runId"])
     attempt = persisted["attempts"][assignment["attemptId"]]
-    assert persisted["models"][assignment["lane"]]["resolvedModelIsFallback"] is True
+    assert persisted["models"][assignment["slot"]]["resolvedModelIsFallback"] is True
     assert "lead" not in persisted
     assert persisted["tokensSpent"] == 7
     assert (
@@ -1082,11 +1113,13 @@ def test_router_uses_alias_roles_and_rejects_under_routing(tmp_path, cwd, config
     response = prepare(cwd, state_dir, response, config, skilled)
     state = authoritative(cwd, state_dir, response["card"]["runId"])
     attempt = state["attempts"][state["pendingDispatch"]["attemptIds"][0]]
-    assert (attempt["class"], attempt["agent"], attempt["declaredModel"]) == (
+    assert (attempt["class"], attempt["agent"], attempt["slot"]) == (
         "skilled",
-        "pocock-builder-task",
-        "openai/gpt-fixture",
+        "pocock-builder",
+        "builder",
     )
+    assert attempt["declaredModel"] == state["models"]["builder"]["resolvedModel"]
+    assert attempt["slotIsBackup"] is False
     assert state["pendingDispatch"]["taskInput"]["tasks"][0]["isolated"] is True
 
     other_state_dir, other = start(tmp_path / "other", cwd, config, "frontier")
@@ -1302,7 +1335,8 @@ def test_pregate_keeps_passed_candidates_and_retries_only_failed_tickets(tmp_pat
     assert len(prepared_lenses["card"]["dispatch"]["actors"]) == 3
 
 
-def test_initial_wave_lenses_use_exactly_three_distinct_independent_lanes(tmp_path, cwd, config):
+def test_lenses_occupy_three_slots_a_producer_can_never_hold(tmp_path, cwd, config):
+    """Independence, restated in slot terms and checked as such."""
     state_dir, response = start(tmp_path, cwd, config, "frontier")
     response = admit_frontier(cwd, state_dir, response)
     response = prepare_tickets(cwd, state_dir, response, config, [ticket_named("T1"), ticket_named("T2")])
@@ -1311,42 +1345,257 @@ def test_initial_wave_lenses_use_exactly_three_distinct_independent_lanes(tmp_pa
     prepared = prepare_lenses(cwd, state_dir, response, config)
     state = authoritative(cwd, state_dir, prepared["card"]["runId"])
     assignments = [state["lensAttempts"][attempt_id] for attempt_id in state["pendingDispatch"]["attemptIds"]]
-    wave = state["waves"][-1]
     producer_ids = state["pregate"]["passedAttemptIds"]
-    producer_vendor = wave["producerVendor"]
-    producer_family = wave["producerFamily"]
+    producer_slots = {state["attempts"][attempt_id]["slot"] for attempt_id in producer_ids}
+    lens_slots = {assignment["slot"] for assignment in assignments}
 
     assert len(assignments) == 3
     assert {assignment["lens"] for assignment in assignments} == {"Standards", "Spec", "Critic"}
-    assert len({assignment["lane"] for assignment in assignments}) == 3
+    assert len(lens_slots) == 3
+    assert not (lens_slots & producer_slots)
     assert all(assignment["producerAttemptIds"] == producer_ids for assignment in assignments)
-    assert all(
-        assignment["vendor"].lower() != producer_vendor
-        and assignment["family"].lower() != producer_family
-        for assignment in assignments
-    )
-    standards = next(assignment for assignment in assignments if assignment["lens"] == "Standards")
-    critic = next(assignment for assignment in assignments if assignment["lens"] == "Critic")
-    assert standards["vendor"].lower() != "anthropic"
-    assert standards["family"].lower() != "claude"
-    assert critic["rank"] >= config["omp"]["lenses"]["critic_min_rank"]
+    assert all(assignment["slotIsBackup"] is False for assignment in assignments)
     assert prepared["card"]["dispatch"]["kind"] == "lenses"
     assert len(prepared["card"]["dispatch"]["actors"]) == 3
 
 
-def test_prepare_rejects_a_mixed_producer_vendor_family_wave_before_dispatch(tmp_path, cwd, config):
+def test_one_wave_may_mix_ticket_classes_and_each_lands_on_its_own_slot(tmp_path, cwd, config):
+    """A wave is not required to be slot-homogeneous.
+
+    Independence no longer depends on the wave having a single producer
+    identity, so a mechanical and a judgment ticket may share one wave.
+    """
     state_dir, response = start(tmp_path, cwd, config, "frontier")
     response = admit_frontier(cwd, state_dir, response)
     architect_ticket = ticket_named("T2")
     architect_ticket["class"] = "judgment"
-
-    with pytest.raises(runtime.RuntimeFailure) as error:
-        prepare_tickets(cwd, state_dir, response, config, [ticket_named("T1"), architect_ticket])
-
-    assert error.value.code == "producer_wave_not_homogeneous"
+    response = prepare_tickets(cwd, state_dir, response, config, [ticket_named("T1"), architect_ticket])
     state = authoritative(cwd, state_dir, response["card"]["runId"])
-    assert state["attempts"] == {}
-    assert state.get("pendingDispatch") is None
+    by_ticket = {
+        attempt["ticketId"]: attempt
+        for attempt in state["attempts"].values()
+    }
+    assert by_ticket["T2"]["class"] == "judgment"
+    assert by_ticket["T2"]["slot"] == "architect"
+    assert by_ticket["T2"]["agent"] == "pocock-architect"
+    assert by_ticket["T1"]["slot"] != by_ticket["T2"]["slot"]
+
+
+def test_config_refuses_a_lens_slot_a_producer_could_also_hold(config):
+    """The single invariant that replaced the vendor/family apparatus."""
+    omp = copy.deepcopy(config["omp"])
+    omp["lenses"]["slots"]["Spec"]["slot"] = omp["producers"]["skilled"]["slot"]
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.validate_slot_disjointness(omp)
+    assert error.value.code == "config_invalid"
+    assert "disjoint" in error.value.message
+
+
+def test_config_refuses_a_slot_that_names_no_omp_role(config):
+    omp = copy.deepcopy(config["omp"])
+    omp["producers"]["skilled"]["backup"] = "no-such-slot"
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.validate_slot_disjointness(omp)
+    assert error.value.code == "config_invalid"
+    assert "omp.slots" in error.value.message
+
+
+def test_config_refuses_two_lenses_on_one_slot(config):
+    """Three lenses on two slots would be a two-lens gate wearing three names."""
+    omp = copy.deepcopy(config["omp"])
+    omp["lenses"]["slots"]["Spec"]["slot"] = omp["lenses"]["slots"]["Standards"]["slot"]
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.validate_slot_disjointness(omp)
+    assert error.value.code == "config_invalid"
+    assert "shares a slot" in error.value.message
+
+
+def test_config_refuses_a_backup_equal_to_its_primary(config):
+    omp = copy.deepcopy(config["omp"])
+    omp["producers"]["skilled"]["backup"] = omp["producers"]["skilled"]["slot"]
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.validate_slot_disjointness(omp)
+    assert error.value.code == "config_invalid"
+    assert "both primary and backup" in error.value.message
+
+
+def test_config_refuses_a_lens_without_a_backup(config):
+    """A missing backup must not wait until the primary slot has already failed."""
+    omp = copy.deepcopy(config["omp"])
+    del omp["lenses"]["slots"]["Critic"]["backup"]
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.validate_slot_disjointness(omp)
+    assert error.value.code == "config_invalid"
+    assert "declares no backup" in error.value.message
+
+
+def test_capability_retry_deepens_the_class_instead_of_taking_the_backup(tmp_path, cwd, config):
+    """A model that was not deep enough is answered with depth, not with a peer.
+
+    The backup slot is the answer to unavailability; insufficient capability is
+    answered by raising the ticket class, which selects a deeper slot.
+    """
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    response = prepare(cwd, state_dir, response, config)
+    state = authoritative(cwd, state_dir, response["card"]["runId"])
+    first = state["attempts"][state["pendingDispatch"]["attemptIds"][0]]
+    assert (first["class"], first["slot"]) == ("mechanical", "scout")
+
+    runtime.mutate(
+        cwd,
+        state_dir,
+        reference(response["card"]),
+        lambda current: current["attempts"][first["attemptId"]].update({"status": "pregate_failed"})
+        or current.update({"phase": "repair_pending", "retryTicketIds": ["T1"], "pendingDispatch": None}),
+    )
+    response = runtime.command_status(cwd, state_dir, {"runId": response["card"]["runId"]})
+    response = transition(cwd, state_dir, response, "retry", {"diagnosis": "capability"})
+    second = prepare(cwd, state_dir, response, config)
+    second_state = authoritative(cwd, state_dir, second["card"]["runId"])
+    retried = second_state["attempts"][second_state["pendingDispatch"]["attemptIds"][0]]
+    assert second_state["classFloor"]["T1"] == "skilled"
+    assert (retried["class"], retried["slot"]) == ("skilled", "builder")
+    assert retried["slotIsBackup"] is False
+
+
+def test_capability_retry_of_a_writing_ticket_takes_the_backup_at_its_depth_ceiling(tmp_path, cwd, config):
+    """The commonest retry in the system: a `skilled` writer failed the pre-gate.
+
+    It cannot be deepened — a writing ticket may never become `judgment`, that
+    is the decomposition invariant — so the escalation must move along the other
+    axis and take the paired backup slot, not die with an unrelated
+    `ticket_needs_decomposition`.
+    """
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    ticket = writer_ticket("T1", "fixture.txt")
+    response = prepare(cwd, state_dir, response, config, ticket)
+    state = authoritative(cwd, state_dir, response["card"]["runId"])
+    first = state["attempts"][state["pendingDispatch"]["attemptIds"][0]]
+    assert (first["class"], first["slot"], first["slotIsBackup"]) == ("skilled", "builder", False)
+
+    runtime.mutate(
+        cwd,
+        state_dir,
+        reference(response["card"]),
+        lambda current: current["attempts"][first["attemptId"]].update({"status": "pregate_failed"})
+        or current.update({"phase": "repair_pending", "retryTicketIds": ["T1"], "pendingDispatch": None}),
+    )
+    response = runtime.command_status(cwd, state_dir, {"runId": response["card"]["runId"]})
+    response = transition(cwd, state_dir, response, "retry", {"diagnosis": "capability"})
+    second = prepare(cwd, state_dir, response, config, ticket)
+    second_state = authoritative(cwd, state_dir, second["card"]["runId"])
+    retried = second_state["attempts"][second_state["pendingDispatch"]["attemptIds"][0]]
+    assert "T1" not in second_state.get("classFloor", {})
+    assert (retried["class"], retried["slot"]) == ("skilled", "builder-backup")
+    assert retried["agent"] == "pocock-builder-backup"
+    assert retried["slotIsBackup"] is True
+
+
+def test_capability_retry_blocks_a_judgment_ticket_instead_of_sidestepping(tmp_path, cwd, config):
+    """`judgment` is the deepest class; a backup would be an equal-depth peer.
+
+    Spending the last attempt on the same depth cannot answer a depth verdict,
+    so the run blocks and says what the owner must do instead.
+    """
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    ticket = ticket_named("T1")
+    ticket["class"] = "judgment"
+    response = prepare(cwd, state_dir, response, config, ticket)
+    state = authoritative(cwd, state_dir, response["card"]["runId"])
+    first = state["attempts"][state["pendingDispatch"]["attemptIds"][0]]
+    assert (first["class"], first["slot"]) == ("judgment", "architect")
+
+    runtime.mutate(
+        cwd,
+        state_dir,
+        reference(response["card"]),
+        lambda current: current["attempts"][first["attemptId"]].update({"status": "pregate_failed"})
+        or current.update({"phase": "repair_pending", "retryTicketIds": ["T1"], "pendingDispatch": None}),
+    )
+    response = runtime.command_status(cwd, state_dir, {"runId": response["card"]["runId"]})
+    response = transition(cwd, state_dir, response, "retry", {"diagnosis": "capability"})
+    assert response["card"]["phase"] == "blocked"
+    assert "escalation is exhausted" in response["card"]["blockedReason"]
+    blocked = authoritative(cwd, state_dir, response["card"]["runId"])
+    assert "T1" not in blocked.get("retryBackupTicketIds", [])
+
+
+def test_bare_retry_uses_the_recorded_failure_kind(tmp_path, cwd, config):
+    """A retry without a payload must not silently pick the inert diagnosis.
+
+    The core already recorded why the wave failed; that recorded kind is the
+    default, so an availability failure still reaches its backup slot.
+    """
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    sealed = seal(cwd, state_dir, prepare(cwd, state_dir, response, config), "producer")
+    response = transition(
+        cwd,
+        state_dir,
+        sealed,
+        "abandon_dispatch",
+        {"confirmedLostSettlement": True, "reason": "session process disappeared and no result exists"},
+    )
+    assert authoritative(cwd, state_dir, response["card"]["runId"])["lastFailureKind"] == "availability"
+    response = transition(cwd, state_dir, response, "retry")
+    second = prepare(cwd, state_dir, response, config)
+    retried = authoritative(cwd, state_dir, second["card"]["runId"])
+    attempt = retried["attempts"][retried["pendingDispatch"]["attemptIds"][0]]
+    assert attempt["slot"] == "scout-backup"
+    assert attempt["slotIsBackup"] is True
+
+
+def test_partial_pregate_routes_the_failed_ticket_without_an_explicit_retry(tmp_path, cwd, config):
+    """A passing sibling carries the wave onward, so the failure never sees `retry`.
+
+    Its escalation therefore has to happen where the failure is recorded, or the
+    next attempt repeats the identical dispatch.
+    """
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    response = prepare_tickets(cwd, state_dir, response, config, [ticket_named("T1"), ticket_named("T2")])
+    response = seal(cwd, state_dir, response, "producer")
+    response = settle_producer(tmp_path, cwd, state_dir, response, config)
+    state = authoritative(cwd, state_dir, response["card"]["runId"])
+    doomed = next(
+        attempt for attempt in state["attempts"].values() if attempt["ticketId"] == "T2"
+    )
+    runtime.mutate(
+        cwd,
+        state_dir,
+        reference(response["card"]),
+        lambda current: current["attempts"][doomed["attemptId"]]["ticket"]["verification"].__setitem__(
+            0, {"argv": ["python3", "-c", "raise SystemExit(1)"], "cwd": ".", "timeoutSeconds": 10}
+        ),
+    )
+    response = runtime.command_status(cwd, state_dir, {"runId": response["card"]["runId"]})
+    response = pregate(cwd, state_dir, response, config)
+    after = authoritative(cwd, state_dir, response["card"]["runId"])
+    assert after["waves"][-1]["status"] == "pregate_partial"
+    assert after["classFloor"]["T2"] == "skilled"
+    assert "T1" not in after.get("classFloor", {})
+
+
+def test_lens_resolving_to_a_producer_model_fails_the_wave_closed(tmp_path, cwd, config):
+    """Disjoint slots guarantee different roles, not different models.
+
+    The owner may point two roles at one model, so the last word is a string
+    comparison of the witnesses OMP reported — no model knowledge involved.
+    """
+    collided = model_manifest()
+    collided["lens-critic"]["resolvedModel"] = collided["scout"]["resolvedModel"]
+    state_dir, response = start(tmp_path, cwd, config, "frontier", models=collided)
+    response = admit_frontier(cwd, state_dir, response)
+    response = prepare(cwd, state_dir, response, config)
+    response = seal(cwd, state_dir, response, "producer")
+    response = pregate(cwd, state_dir, settle_producer(tmp_path, cwd, state_dir, response, config), config)
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        prepare_lenses(cwd, state_dir, response, config)
+    assert error.value.code == "independent_reviewer_unavailable"
+    assert "Critic" in error.value.message
 
 
 def test_lens_settlement_retries_only_the_failed_wave_lens(tmp_path, cwd, config):
@@ -1402,10 +1651,17 @@ def test_lens_settlement_retries_only_the_failed_wave_lens(tmp_path, cwd, config
     assert len(prepared_retry["card"]["dispatch"]["actors"]) == 1
     retry_state = authoritative(cwd, state_dir, prepared_retry["card"]["runId"])
     assert retry_state["pendingDispatch"]["lensNames"] == [failed_lens]
-    assert len(set(retry_state["waves"][-1]["reviewerLanes"].values())) == 3
+    assert retry_state["retryBackupLensNames"] == [failed_lens]
+    retried = retry_state["lensAttempts"][retry_state["pendingDispatch"]["attemptIds"][0]]
+    assert retried["slotIsBackup"] is True
+    assert retried["slot"].endswith("-backup")
+    assert len(set(retry_state["waves"][-1]["reviewerSlots"].values())) == 3
     retry_sealed = seal(cwd, state_dir, prepared_retry, "lenses")
     response = settle_lenses(tmp_path, cwd, state_dir, retry_sealed, config)
     assert response["card"]["phase"] == "adjudication_pending"
+    # The backup delivered, so the marker is spent: leaving it set would pin
+    # this lens to its backup for every later wave of the run.
+    assert authoritative(cwd, state_dir, response["card"]["runId"])["retryBackupLensNames"] == []
     response = runtime.command_adjudicate(cwd, state_dir, reference(response["card"]))
     assert response["card"]["phase"] == "accepted"
 
@@ -2403,7 +2659,7 @@ def test_dispatch_card_exposes_one_opaque_pending_actor_without_renaming_sealed_
         "role",
         "lens",
         "attemptOrdinal",
-        "laneAlias",
+        "slotRole",
         "declaredModel",
         "observedModel",
         "modelWitness",
@@ -2412,7 +2668,7 @@ def test_dispatch_card_exposes_one_opaque_pending_actor_without_renaming_sealed_
     }
     assert actor["dispatchName"] == input_name
     assert actor["dispatchName"] != assignment["ticket"]["OBJECTIVE"]
-    assert actor["laneAlias"] == config["omp"]["lanes"][assignment["lane"]]["alias"]
+    assert actor["slotRole"] == config["omp"]["slots"][assignment["slot"]]["alias"]
     assert actor["declaredModel"] == assignment["declaredModel"]
     assert actor["modelWitness"] == "DECLARED_ONLY"
     assert actor["status"] == "prepared"
