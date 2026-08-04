@@ -54,6 +54,7 @@ OMP_EXTENSION_DIR="${OMP_BASE_DIR}/extensions"
 OMP_AGENTS_SOURCE="${ORCH_DIR}/.omp/agents"
 OMP_EXTENSION_SOURCE="${ORCH_DIR}/.omp/extensions/pocock-control"
 OMP_CONFIG_FILE="${OMP_BASE_DIR}/config.yml"
+OMP_RUNTIME_CONFIG_VALIDATOR="${ORCH_DIR}/scripts/validate_omp_runtime_config.py"
 
 
 FAILS=0
@@ -153,66 +154,18 @@ verify_omp_tree() {
   fi
 }
 
-# yaml_section_value SECTION KEY EXPECTED FILE
-# The required part of the main OMP config has a deliberately small, fixed
-# shape; checking these scalar settings needs no global PyYAML dependency and
-# stays offline-safe.
-yaml_section_value() {
-  local section="$1" key="$2" expected="$3" file="$4"
-  awk -v section="${section}" -v key="${key}" -v expected="${expected}" '
-    $0 == section ":" { active=1; next }
-    active && /^[^[:space:]#]/ { exit }
-    active && $0 ~ "^[[:space:]]+" key ":[[:space:]]*" expected "([[:space:]]*(#.*)?)?$" {
-      found=1; exit
-    }
-    END { exit !found }
-  ' "${file}"
-}
-
-# yaml_task_isolation_value KEY EXPECTED FILE
-yaml_task_isolation_value() {
-  local key="$1" expected="$2" file="$3"
-  awk -v key="${key}" -v expected="${expected}" '
-    $0 == "task:" { in_task=1; next }
-    in_task && /^[^[:space:]#]/ { exit }
-    in_task && /^  isolation:[[:space:]]*$/ { in_isolation=1; next }
-    in_isolation && /^  [^[:space:]#]/ { exit }
-    in_isolation && $0 ~ "^    " key ":[[:space:]]*" expected "([[:space:]]*(#.*)?)?$" {
-      found=1; exit
-    }
-    END { exit !found }
-  ' "${file}"
-}
-
-yaml_task_isolation_mode_isolated() {
-  local file="$1" mode
-  for mode in auto apfs btrfs zfs linux-reflink overlayfs windows-blockclone projfs rcopy worktree fuse-overlay fuse-projfs; do
-    if yaml_task_isolation_value mode "${mode}" "${file}"; then
-      return 0
-    fi
-  done
-  return 1
-}
-
 verify_omp_config() {
-  local file="$1"
+  local file="$1" report
   if [ ! -f "${file}" ]; then
     bad "основной конфиг OMP не найден: ${file}"
     return
   fi
   ok "основной конфиг OMP найден: ${file}"
-
-  if yaml_section_value async enabled false "${file}"; then ok "async.enabled: false"; else bad "async.enabled должен быть false"; fi
-  if yaml_section_value display showTokenUsage true "${file}"; then ok "display.showTokenUsage: true"; else bad "display.showTokenUsage должен быть true"; fi
-  if yaml_section_value task batch true "${file}"; then ok "task.batch: true"; else bad "task.batch должен быть true"; fi
-  if yaml_section_value task enableEffort true "${file}"; then ok "task.enableEffort: true"; else bad "task.enableEffort должен быть true"; fi
-  if yaml_section_value task showResolvedModelBadge true "${file}"; then ok "task.showResolvedModelBadge: true"; else bad "task.showResolvedModelBadge должен быть true"; fi
-  if yaml_task_isolation_mode_isolated "${file}"; then ok "task.isolation.mode включает штатный backend"; else bad "task.isolation.mode должен включать известный backend OMP и не может быть none"; fi
-  if yaml_task_isolation_value apply false "${file}"; then ok "task.isolation.apply: false"; else bad "task.isolation.apply должен быть false"; fi
-  if yaml_task_isolation_value merge patch "${file}"; then ok "task.isolation.merge: patch"; else bad "task.isolation.merge должен быть patch"; fi
-  if yaml_section_value task maxRecursionDepth 1 "${file}"; then ok "task.maxRecursionDepth: 1"; else bad "task.maxRecursionDepth должен быть 1"; fi
-  if yaml_section_value task maxConcurrency 6 "${file}"; then ok "task.maxConcurrency: 6"; else bad "task.maxConcurrency должен быть 6"; fi
-  if yaml_section_value retry modelFallback true "${file}"; then ok "retry.modelFallback: true"; else bad "retry.modelFallback должен быть true"; fi
+  if report="$(python3 "${OMP_RUNTIME_CONFIG_VALIDATOR}" "${file}" 2>&1)"; then
+    ok "${report}"
+  else
+    bad "основной конфиг OMP нарушает обязательные инварианты: ${report}"
+  fi
 }
 
 verify_effective_omp_config() {

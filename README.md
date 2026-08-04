@@ -105,19 +105,19 @@ flowchart LR
 (`retry.fallbackChains`) и контуру не видна. Повтор Pocock сохраняет Слот и не
 создаёт второй механизм замены модели.
 
-Независимость трёх Линз обеспечена структурно: множество Слотов Производителей и
-множество Слотов Линз не пересекаются, а Слоты трёх Линз попарно различны; это
-проверяется при загрузке конфигурации
-(`validate_slot_disjointness`). Перед раздачей Линз runtime дополнительно
-fail-closed сравнивает непрозрачные строки `resolvedModel`: точное совпадение
-модели Линзы с моделью любого Производителя Волны даёт
-`independent_reviewer_unavailable`. Это не классификация поставщика или
-семейства и не таблица вендоров.
+Независимость трёх Линз начинается со структуры: множество Слотов
+Производителей и множество Слотов Линз не пересекаются, а Слоты трёх Линз
+попарно различны; это проверяется при загрузке конфигурации
+(`validate_slot_disjointness`). Перед раздачей Линз runtime сравнивает
+разрешённые модели Линз с фактическими `observedModel` Производителей и друг с
+другом. После выполнения Линз runtime повторяет сравнение по их фактическим
+`observedModel`. Совпадение даёт `independent_reviewer_unavailable`. Это не
+классификация поставщика или семейства и не таблица вендоров.
 
 Файлы [`.omp/agents/pocock-*.md`](.omp/agents/) объявляют способности Слота и
-допустимые инструменты. Адаптер передаёт `observedModel` и `modelFallback`, а
-runtime сохраняет их как оперативную телеметрию; маршрут задаётся Слотом, а
-точное сравнение `resolvedModel` применяется только перед раздачей Линз.
+допустимые инструменты. Адаптер передаёт `observedModel` и `modelFallback`.
+Runtime сохраняет их как оперативную телеметрию и использует `observedModel`
+только для гейта независимости; маршрут по-прежнему задаётся Слотом.
 
 Маршрут выводится из сигналов Тикета:
 
@@ -210,10 +210,11 @@ runtime/config/manifests. Устаревшая ревизия, повреждё�
 Тикеты классов `mechanical`, `skilled` и `judgment` на соответствующих Слотах.
 Непересечение Слотов Производителей и Линз и попарное различие трёх Линз
 проверяются при загрузке конфигурации.
-Перед раздачей runtime fail-closed отклоняет Волну с
-`independent_reviewer_unavailable`, если непрозрачная строка `resolvedModel`
-любой Линзы в точности совпала со строкой любого Производителя; поставщик и
-семейство при этом не выводятся. Каждая Линза возвращает
+Перед раздачей runtime fail-closed сравнивает разрешённые модели Линз с
+фактическими `observedModel` Производителей и друг с другом. После выполнения
+Линз runtime повторяет проверку по их фактическим `observedModel`; совпадение
+даёт `independent_reviewer_unavailable`. Поставщик и семейство при этом не
+выводятся. Каждая Линза возвращает
 `{lens, summary, reports:[{attemptId, summary, findings, verdict}]}` с отчётом
 для каждой прошедшей producer attempt. Standards и Spec дают `NO_VERDICT`;
 только Critic даёт `PASS`/`FAIL`. Ошибка одной Линзы повторяет только её, а не
@@ -431,11 +432,12 @@ role is chosen in the main OMP config
 the contour holds no model names and no provider allowlist, so admitting a model from a
 new provider is a config edit alone. Replacing a model *within* a role belongs entirely
 to OMP (`retry.fallbackChains`); Pocock retries keep the same slot and do not create a
-second model-fallback mechanism. Lens independence is structural:
-producer slots and lens slots are disjoint sets, checked at config load. Agent
-definitions in [`.omp/agents/`](.omp/agents/) declare capabilities and tool allowlists.
-The adapter passes `observedModel` and `modelFallback` to the runtime as operational
-telemetry; neither rejects an attempt nor affects acceptance gates.
+second model-fallback mechanism. Producer slots and lens slots are disjoint sets,
+checked at config load. Before lens dispatch, the runtime compares each resolved lens
+model with the producers' observed models and with the other lens models. After the
+batch settles, it repeats the comparison using every lens's observed model, so a runtime
+fallback collision cannot reach acceptance. Agent definitions in
+[`.omp/agents/`](.omp/agents/) declare capabilities and tool allowlists.
 
 ### Durable state, isolation, and gates
 

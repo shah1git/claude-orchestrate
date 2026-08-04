@@ -128,7 +128,9 @@ def validate_slot_disjointness(omp: dict[str, Any]) -> None:
     occupy and no other lens shares. That is a statement about slot names
     alone, so it is settled here once instead of being recomputed per wave from
     model metadata. It does not, and cannot, catch two slots that resolve to the
-    same model; `assert_reviewers_are_not_producers` does that at dispatch.
+    same model; `assert_reviewers_are_independent` checks the known witnesses at
+    dispatch and `observed_reviewer_collisions` checks runtime fallbacks after
+    settlement.
     """
     producers: set[str] = set()
     producer_map = omp.get("producers")
@@ -3080,6 +3082,11 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
                     "model_mismatch",
                     f"declared model differs from sealed model for {expected_id}",
                 )
+                fail(
+                    nullable_text(observed_model) is None,
+                    "model_witness_missing",
+                    f"observed model is missing for successful result {expected_id}",
+                )
                 artifact = hash_artifact(raw_result.get("outputPath"), f"result {expected_id}.outputPath")
                 attempt["artifact"] = artifact
                 patch_path = raw_result.get("patchPath")
@@ -3205,6 +3212,16 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
             return
 
         wave = current_wave(state)
+        completed_lenses = latest_completed_lens_attempts(state, require_text(wave.get("waveId"), "wave.waveId"))
+        missing_lenses = set(LENS_NAMES) - set(completed_lenses)
+        if not failed_lenses and not missing_lenses:
+            for lens, reason in observed_reviewer_collisions(state, completed_lenses).items():
+                record_failure(
+                    completed_lenses[lens],
+                    code="independent_reviewer_unavailable",
+                    reason=reason,
+                    failure_kind="invalid",
+                )
         if failed_lenses:
             schedule_lens_retry(
                 cwd,
@@ -3214,8 +3231,6 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
                 "; ".join(failure_reasons) or "one or more lens reports could not be settled",
             )
             return
-        completed_lenses = latest_completed_lens_attempts(state, require_text(wave.get("waveId"), "wave.waveId"))
-        missing_lenses = set(LENS_NAMES) - set(completed_lenses)
         if missing_lenses:
             schedule_lens_retry(
                 cwd,
@@ -3531,32 +3546,81 @@ def select_wave_reviewers(
     return chosen
 
 
-def assert_reviewers_are_not_producers(
+def observed_attempt_model(attempt: dict[str, Any], label: str) -> str:
+    """Return the host-observed model used by a successfully settled attempt."""
+    observed = nullable_text(attempt.get("observedModel"))
+    fail(observed is None, "model_witness_missing", f"{label} has no observed model witness")
+    return model_base(observed)
+
+
+def assert_reviewers_are_independent(
     chosen: dict[str, dict[str, Any]],
     producers: list[dict[str, Any]],
 ) -> None:
-    """Refuse a wave where a lens and a producer resolved to the same model.
+    """Refuse a wave with a known producer/reviewer or reviewer collision.
 
     Disjoint slots guarantee different roles, not different models: the owner
-    may point two roles at one model. This is the fail-closed backstop for that,
-    and it needs no knowledge of models — only string equality on the opaque
-    witnesses OMP reported.
+    may point two roles at one model. Producer results have already settled, so
+    their observed witnesses are authoritative. Reviewer witnesses are the
+    models OMP resolves before dispatch; runtime fallback is checked again when
+    the reviewer results settle.
     """
     producing = {
-        str(producer.get("declaredModel") or "")
+        observed_attempt_model(producer, f"producer {producer.get('attemptId', 'unknown')}")
         for producer in producers
-        if producer.get("declaredModel")
     }
-    collisions = sorted(
+    reviewer_models = {
+        lens: model_base(str(bound["witness"]["resolvedModel"]))
+        for lens, bound in chosen.items()
+    }
+    producer_collisions = sorted(
         f"{lens} ({bound['witness']['resolvedModel']})"
         for lens, bound in chosen.items()
-        if str(bound["witness"]["resolvedModel"]) in producing
+        if reviewer_models[lens] in producing
     )
+    reviewers_by_model: dict[str, list[str]] = {}
+    for lens, model in reviewer_models.items():
+        reviewers_by_model.setdefault(model, []).append(lens)
+    reviewer_collisions = sorted(
+        f"{', '.join(sorted(lenses))} ({model})"
+        for model, lenses in reviewers_by_model.items()
+        if len(lenses) > 1
+    )
+    collisions = producer_collisions + reviewer_collisions
     fail(
         bool(collisions),
         "independent_reviewer_unavailable",
-        "a lens resolved to a model this wave's producers already used: " + ", ".join(collisions),
+        "reviewer model independence is unavailable: " + "; ".join(collisions),
     )
+
+
+def observed_reviewer_collisions(
+    state: dict[str, Any],
+    completed_lenses: dict[str, dict[str, Any]],
+) -> dict[str, str]:
+    """Return lens-specific failures after OMP has applied runtime fallbacks."""
+    producer_models: set[str] = set()
+    for attempt in completed_lenses.values():
+        for producer_attempt_id in attempt["producerAttemptIds"]:
+            producer = state["attempts"].get(producer_attempt_id)
+            fail(not isinstance(producer, dict), "state_corrupt", f"lens references unknown producer {producer_attempt_id}")
+            producer_models.add(observed_attempt_model(producer, f"producer {producer_attempt_id}"))
+
+    reviewers_by_model: dict[str, list[str]] = {}
+    for lens, attempt in completed_lenses.items():
+        model = observed_attempt_model(attempt, f"lens {lens}")
+        reviewers_by_model.setdefault(model, []).append(lens)
+
+    failures: dict[str, str] = {}
+    for model, lenses in reviewers_by_model.items():
+        if model in producer_models:
+            for lens in lenses:
+                failures[lens] = f"lens {lens} used producer model {model} after runtime fallback"
+        if len(lenses) > 1:
+            names = ", ".join(sorted(lenses))
+            for lens in lenses:
+                failures[lens] = f"lenses {names} used the same model {model} after runtime fallback"
+    return failures
 
 
 def lens_task_text(lens: str, producers: list[dict[str, Any]], state: dict[str, Any]) -> str:
@@ -3625,7 +3689,7 @@ def command_prepare_lenses(cwd: Path, explicit_state_dir: str | None, request: d
         budget_check(state, config, projection)
         capability = config["omp"].get("lenses", {}).get("capability")
         selected_reviewers = select_wave_reviewers(state, config, lens_names)
-        assert_reviewers_are_not_producers(selected_reviewers, producers)
+        assert_reviewers_are_independent(selected_reviewers, producers)
 
         items = []
         lens_ids = []

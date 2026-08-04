@@ -867,11 +867,15 @@ async function hydrateSession(pi: ExtensionAPI, context: RuntimeContext): Promis
 
 export default function pocockControl(pi: ExtensionAPI): void {
 	const { z } = pi.zod;
-	const cardReference = z.object({
+	// OMP injects `pi.zod` as the omptype-backed zod shim, which does not
+	// implement zod's `ZodObject.extend`. Compose schemas from shared field
+	// definitions instead of calling `.extend()` on a built object schema.
+	const cardReferenceFields = {
 		runId: z.string().min(1),
 		revision: z.number().int().nonnegative(),
 		stateHash: z.string().min(1),
-	});
+	};
+	const cardReference = z.object(cardReferenceFields);
 
 	pi.on("session_start", async (_event, context) => hydrateSession(pi, asRuntimeContext(context)));
 	pi.on("session_switch", async (_event, context) => hydrateSession(pi, asRuntimeContext(context)));
@@ -947,7 +951,8 @@ export default function pocockControl(pi: ExtensionAPI): void {
 		name: "pocock_transition",
 		label: "Pocock transition",
 		description: "Request one core-authorized Pocock state transition.",
-		parameters: cardReference.extend({
+		parameters: z.object({
+			...cardReferenceFields,
 			action: z.string().min(1),
 			payload: z.unknown().optional(),
 		}),
@@ -974,7 +979,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 		name: "pocock_prepare",
 		label: "Pocock prepare",
 		description: "Prepare deterministic producer dispatch from published tickets or the sealed local sweep ledger.",
-		parameters: cardReference.extend({ tickets: z.array(z.unknown()).optional() }),
+		parameters: z.object({ ...cardReferenceFields, tickets: z.array(z.unknown()).optional() }),
 		async execute(_toolCallId, params, signal, _onUpdate, context) {
 			try {
 				const response = await serialize(async () => {

@@ -151,12 +151,14 @@ function adapterHarness(respond?: CoreResponder) {
 	const widgets: Array<{ name: string; content: unknown; options: unknown }> = [];
 	const messages: unknown[][] = [];
 	let appendError: Error | undefined;
+	// The adapter builds schemas from shared field definitions; OMP's injected
+	// omptype-backed zod shim has no `ZodObject.extend`, so the mock mirrors only
+	// the chainable methods the adapter actually calls.
 	const schema = {
 		min: () => schema,
 		int: () => schema,
 		nonnegative: () => schema,
 		optional: () => schema,
-		extend: () => schema,
 	};
 	const z = {
 		string: () => schema,

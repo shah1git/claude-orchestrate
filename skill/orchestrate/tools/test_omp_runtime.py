@@ -353,6 +353,7 @@ def settle_lenses(
     standards_blocking: bool = False,
     critic_fail_ticket: str | None = None,
     availability_error: str | None = None,
+    observed_models: dict[str, str] | None = None,
 ) -> dict:
     state = authoritative(cwd, state_dir, sealed["card"]["runId"])
     results = []
@@ -360,6 +361,9 @@ def settle_lenses(
     for attempt_id in sealed["attemptIds"]:
         assignment = state["lensAttempts"][attempt_id]
         result = normalized_result(tmp_path, assignment)
+        if observed_models and assignment["lens"] in observed_models:
+            result["observedResolvedModel"] = observed_models[assignment["lens"]]
+            result["resolvedModelIsFallback"] = True
         if availability_error is not None:
             result["error"] = availability_error
         results.append(result)
@@ -1583,6 +1587,93 @@ def test_lens_resolving_to_a_producer_model_fails_the_wave_closed(tmp_path, cwd,
         prepare_lenses(cwd, state_dir, response, config)
     assert error.value.code == "independent_reviewer_unavailable"
     assert "Critic" in error.value.message
+
+
+def test_producer_fallback_to_a_lens_primary_model_fails_before_lens_dispatch(tmp_path, cwd, config):
+    models = model_manifest()
+    state_dir, response = start(tmp_path, cwd, config, "frontier", models=models)
+    response = admit_frontier(cwd, state_dir, response)
+    sealed = seal(cwd, state_dir, prepare(cwd, state_dir, response, config), "producer")
+    state = authoritative(cwd, state_dir, sealed["card"]["runId"])
+    assignment = state["attempts"][sealed["attemptIds"][0]]
+    result = normalized_result(tmp_path, assignment, fallback=True)
+    result["observedResolvedModel"] = models["lens-critic"]["resolvedModel"]
+    settled = runtime.command_record_result(
+        cwd,
+        state_dir,
+        {
+            **reference(sealed["card"]),
+            "dispatchId": sealed["dispatchId"],
+            "toolCallId": "producer-fallback-tool",
+            "input": sealed["taskInput"],
+            "details": {"results": [result]},
+            "content": {assignment["attemptId"]: producer_result()},
+            "isError": False,
+        },
+        config,
+    )
+    settled = pregate(cwd, state_dir, settled, config)
+
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        prepare_lenses(cwd, state_dir, settled, config)
+
+    assert error.value.code == "independent_reviewer_unavailable"
+    assert "Critic" in error.value.message
+
+
+def test_lens_fallback_collision_retries_only_the_colliding_lenses(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    sealed_lenses, _state = reach_adjudication(tmp_path, cwd, state_dir, response, config)
+
+    collided_model = "fallback/shared-review-model"
+    settled = settle_lenses(
+        tmp_path,
+        cwd,
+        state_dir,
+        sealed_lenses,
+        config,
+        observed_models={"Standards": collided_model, "Spec": collided_model},
+    )
+
+    assert settled["card"]["phase"] == "lens_prepare_pending"
+    state = authoritative(cwd, state_dir, settled["card"]["runId"])
+    assert state["retryLensNames"] == ["Standards", "Spec"]
+    assert {
+        attempt["lens"]: attempt["status"]
+        for attempt in state["lensAttempts"].values()
+    } == {
+        "Standards": "result_invalid",
+        "Spec": "result_invalid",
+        "Critic": "completed",
+    }
+
+
+def test_lens_fallback_to_the_observed_producer_model_retries_that_lens(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    sealed_lenses, state = reach_adjudication(tmp_path, cwd, state_dir, response, config)
+    producer_model = next(iter(state["attempts"].values()))["observedModel"]
+
+    settled = settle_lenses(
+        tmp_path,
+        cwd,
+        state_dir,
+        sealed_lenses,
+        config,
+        observed_models={"Critic": producer_model},
+    )
+
+    assert settled["card"]["phase"] == "lens_prepare_pending"
+    persisted = authoritative(cwd, state_dir, settled["card"]["runId"])
+    assert persisted["retryLensNames"] == ["Critic"]
+    critic = next(
+        attempt
+        for attempt in persisted["lensAttempts"].values()
+        if attempt["lens"] == "Critic"
+    )
+    assert critic["status"] == "result_invalid"
+    assert "producer model" in critic["failureReason"]
 
 
 def test_lens_settlement_retries_only_the_failed_wave_lens(tmp_path, cwd, config):

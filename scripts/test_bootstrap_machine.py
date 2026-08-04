@@ -21,6 +21,7 @@ BOOTSTRAP_MACHINE = REPOSITORY_ROOT / "bootstrap-machine.sh"
 PORTABLE_PROFILE = REPOSITORY_ROOT / "scripts" / "omp-portable-profile.yml"
 PORTABLE_WATCHDOG = REPOSITORY_ROOT / "scripts" / "omp-portable-WATCHDOG.md"
 PROFILE_VALIDATOR = REPOSITORY_ROOT / "scripts" / "validate_portable_omp_profile.py"
+RUNTIME_CONFIG_VALIDATOR = REPOSITORY_ROOT / "scripts" / "validate_omp_runtime_config.py"
 POCOCK_AGENT_MANIFESTS = REPOSITORY_ROOT / ".omp" / "agents"
 
 
@@ -279,3 +280,38 @@ def test_portable_profile_rejects_retired_pocock_backup_routes(
 
     assert validation.returncode != 0
     assert "pocock-retired-backup" in validation.stderr
+
+
+def test_runtime_config_validator_accepts_yaml_mapping_keys_with_trailing_space(tmp_path: Path) -> None:
+    profile = yaml.safe_load(PORTABLE_PROFILE.read_text(encoding="utf-8"))
+    serialized = yaml.safe_dump(profile, sort_keys=False)
+    serialized = serialized.replace("task:\n", "task: \n").replace(
+        "  isolation:\n", "  isolation: \n"
+    ).replace("retry:\n", "retry: \n")
+    config = tmp_path / "config.yml"
+    config.write_text(serialized, encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(RUNTIME_CONFIG_VALIDATOR), str(config)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "task-инварианты явно заданы" in result.stdout
+
+
+def test_runtime_config_validator_reports_missing_explicit_invariant(tmp_path: Path) -> None:
+    profile = yaml.safe_load(PORTABLE_PROFILE.read_text(encoding="utf-8"))
+    del profile["display"]["showTokenUsage"]
+    config = tmp_path / "config.yml"
+    config.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(RUNTIME_CONFIG_VALIDATOR), str(config)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "display.showTokenUsage" in result.stderr
