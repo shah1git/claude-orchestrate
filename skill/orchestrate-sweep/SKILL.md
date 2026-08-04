@@ -28,30 +28,11 @@ synthesis. Do not create a second policy engine in prose.
   is run-local, and the work has real parallel width. The ledger must never be published as
   a product backlog or continued as a frontier after this run.
 
-## State discipline
+## Обязательный протокол исполнения
 
-On a new OMP session, call `pocock_status` **without** `runId` before entering anything.
-The core finds the single active durable run for this workspace and the adapter hydrates
-its card. If that card contains `runtimeMismatch`, call `pocock_enter` with
-`entry: "sweep"` and the current objective; the core transactionally journals and stages
-the replacement before retiring the incompatible run and activating the staged
-replacement. Otherwise resume only from that card. If no active run exists, this head may
-call `pocock_enter` for sweep admission. Every successful runtime call
-returns the current
-card; retain its `runId`, newest `revision`, and `stateHash` unchanged in the next
-mutating request, and invoke only an action in `nextActions`.
-
-The core owns the one nonterminal durable run across sessions, including its budget and
-attempt counters. A failed call, witness disagreement, state-hash mismatch, or
-`blockedReason` stops dispatching and surfaces the block; it never justifies automatic
-cancel-and-re-enter recovery. Explicit owner abandonment is the only ordinary
-cancellation path. Only a core-proven `runtimeMismatch` card authorizes the replacement
-entry above; never infer it from an adapter error or retry a start rejected as
-`active_run_exists`. Never call the runtime CLI directly or issue a worker `task` outside
-the sealed dispatch.
-
-After settlement, a sealed native task is one-shot: do not wait for or revive it through
-Hub. A retry is a new sealed attempt only when the current card authorizes it.
+До первой мутации runtime прочитайте
+[единый протокол исполнения](../orchestrate/references/execution-protocol.md). После
+допуска следуйте ему без исключений; эта Голова не имеет прямого пути.
 
 ## Sweep admission
 
@@ -67,7 +48,7 @@ Hub. A retry is a new sealed attempt only when the current card authorizes it.
    contract where applicable. A writer has non-empty `writablePaths` and non-empty
    deterministic verification. `INPUTS` must name complete sources or accepted upstream
    artifacts, never `#123`, `Issue #123`, tracker, or IRC instructions; an incomplete
-   tracker reference is `incomplete_tracker_reference_in_inputs`.
+   tracker reference is `incomplete_tracker_reference`.
 3. Check the proposed ledger as facts, not aspirations: every dependency names a ledger
    ticket **and binds its accepted output**, no dependency is self-referential or cyclic,
    at least one pair is incomparable, and no two writers have overlapping `writablePaths`.
@@ -107,42 +88,16 @@ Hub. A retry is a new sealed attempt only when the current card authorizes it.
    cancellation and later use of `/orchestrate`. A core-proven `runtimeMismatch` instead
    permits the replacement `pocock_enter` described above; never edit an admitted ledger.
 
-## Shared execution loop
+## Исполнение после допуска
 
-After `admit_sweep`, call `pocock_prepare` **without** `tickets`: the runtime reads the
-sealed bodies and computes the ready wave. Then follow the
-[shared execution loop](../orchestrate/SKILL.md#shared-execution-loop) exactly, including
-the one sealed native `task` placeholder, browser evidence, pre-gate, one wave-level
-three-lens gate, isolated failed-lens retry, partial acceptance, and synthesis. Direct
-execution is unavailable after sweep admission.
+После `admit_sweep` вызовите разрешённый Карточкой `pocock_prepare` **без**
+`tickets`: runtime читает запечатанные тела и вычисляет готовую Волну. Затем
+следуйте [единому протоколу исполнения](../orchestrate/references/execution-protocol.md).
 
-The gate is exactly Standards, Spec, and Critic over the pre-gate-passed producer subset.
-A wave may mix `mechanical`, `skilled`, and `judgment` producer attempts on their
-respective slots. Configuration makes producer and lens slot sets disjoint, the three
-lens slots pairwise distinct. Before
-dispatching lenses, the core fails closed with `independent_reviewer_unavailable` if a
-lens's opaque `resolvedModel` string exactly matches that of any producer in the wave; it
-does not classify vendors or families. Each returns
-`{lens, summary, reports:[{attemptId, summary, findings, verdict}]}` for every passed
-producer attempt. Standards and Spec emit `NO_VERDICT`, Critic emits `PASS` or `FAIL`,
-and only an isolated failed lens retries on the same slot. Retry routing is core-owned:
-a missing diagnosis uses `lastFailureKind`; `capability` deepens the class (writers stop
-at `skilled`, exhausted depth blocks as `escalation_exhausted`) and `availability`
-preserves the slot while OMP owns model replacement. During partial
-acceptance each rejected ticket routes directly by its recorded rejection cause, without
-a separate `retry`.
-
-For a sweep, call `pocock_transition(action: "continue_wave")` with **no payload** after
-`pocock_accept`; `begin_synthesis` likewise omits a payload. Inspect the current runtime
-card's `acceptedTicketIds`, `remainingTicketIds`, `readyTicketIds`, and `blockedTicketIds`,
-but do not send them back as authority. The runtime advances accepted tickets and
-recomputes the sets. Only its empty remaining set can authorize `begin_synthesis`.
-
-For every terminal run, present the final ledger by ticket in the user's language.
-For each ticket, state the delivered outcome, its final acceptance state, and the factual
-acceptance evidence: the applicable sealed verification result, accepted UI evidence where
-required, and any unresolved blocker or failure. This ledger is an account of deliverables
-and acceptance, not an execution-history export: do not require or list individual attempts,
-roles, agents, declared or observed models, fallback witnesses, tokens, durations, or requests.
-`observedModel` and `modelFallback` remain operational telemetry on the live card and settlement, not a
-final-answer requirement. Never manufacture evidence.
+После `pocock_accept` запросите разрешённый `pocock_transition` с
+`action: "continue_wave"` **без payload**. `begin_synthesis` также не получает
+payload. Проверяйте в текущей Карточке `acceptedTicketIds`, `remainingTicketIds`,
+`readyTicketIds` и `blockedTicketIds`, но не передавайте их обратно как авторитет:
+runtime продвигает принятые Тикеты и пересчитывает эти наборы. Только его пустой
+remaining set может разрешить `begin_synthesis`; `complete` запрашивается только
+после разрешения Карточки.

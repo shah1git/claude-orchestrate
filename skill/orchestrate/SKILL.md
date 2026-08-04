@@ -16,32 +16,11 @@ there is a Pocock run. The runtime owns routing, slot selection, attempt state, 
 verification, quality decisions, and acceptance for every Pocock run. Do not turn prose
 into a second policy engine.
 
-## State discipline for a Pocock run
+## Обязательный протокол исполнения
 
-Use the registered `pocock_*` runtime tools for every Pocock state change. On a new OMP
-session, first call `pocock_status` **without** `runId`: the core finds the one active
-durable run for this workspace and the adapter hydrates its state card. If the returned
-card contains `runtimeMismatch`, call `pocock_enter` for the current full objective; the
-core transactionally journals and stages the replacement before retiring the incompatible
-run and activating its replacement. If there is no active run, triage the new objective;
-otherwise resume only from the returned card.
-
-Every successful call returns the current state card. Retain its `runId`, newest
-`revision`, and `stateHash`; put all three unchanged in the next mutating runtime request.
-An action is legal only when the latest card authorizes it in `nextActions`. Never guess
-a state transition, replay an old witness, choose a worker route, or call the runtime CLI
-directly.
-
-The core permits exactly one nonterminal durable run per workspace, across OMP sessions.
-Its budget reservation and attempt counters belong to that run and persist through
-hydration; opening a session cannot reset them. If a runtime call fails, the state hash
-disagrees, or the card gives a `blockedReason`, stop dispatching and surface the block.
-Never automatically cancel and re-enter after a recoverable failure. Explicit owner
-abandonment is the only ordinary cancellation path. A new `pocock_enter` may replace an
-active run only when the core itself proves `runtime_mismatch`; the core first journals
-and stages the replacement, then retires the incompatible run and activates the staged
-replacement. Never infer this condition from an adapter error or retry a start rejected
-as `active_run_exists`.
+До первой мутации runtime прочитайте
+[единый протокол исполнения](references/execution-protocol.md). После допуска
+Pocock-прогона следуйте ему без исключений; прямой путь в этот протокол не входит.
 
 ## Triage before `pocock_enter`
 
@@ -122,100 +101,9 @@ name a route, slot, worker, or quality outcome in a ticket; the core derives tho
 the ticket and its policy. The exact field meanings are in the
 [ticket-writing reference](references/delegation.md#the-ticket-field-by-field).
 
-## Shared execution loop
+## Исполнение после допуска
 
-This loop applies only after a Pocock run has been admitted; the direct path never enters
-it. After publication, and for another entry after its admission, use this exact loop
-whenever the current state card authorizes more work. Published `full` and `frontier`
-preparation supplies the current seven-field ticket set; `sweep` preparation supplies no
-tickets because the core reads its sealed ledger and selects the work itself. If the
-current card exposes a legal branch not shown in this compact diagram, the card wins: do
-not infer or substitute a transition.
-
-```text
-pocock_prepare
-→ producer_dispatch_pending: native task placeholder
-→ pregate_pending:
-  if evidenceRequests exist: browser open the issued target, then exercise the
-  issued criterion; carry only the current challenge-bound host results
-  → pocock_pregate
-→ repair_pending: pocock_transition(retry) → pocock_prepare
-  or
-  lens_prepare_pending: pocock_prepare_lenses
-  → lens_dispatch_pending: one wave-level fixed three-lens task
-    → if one lens alone fails execution or schema validation, retry only that lens
-    → adjudication_pending: pocock_adjudicate
-      → repair_pending for affected producer attempts: core routes each by its recorded rejection cause (no separate retry)
-        → pocock_prepare
-      or accepted producer tickets: pocock_accept
-→ pocock_transition(continue_wave) only in the form the current card authorizes:
-  published tickets carry tracker-observed remaining/ready/blocked sets plus evidence;
-  sweep carries no payload because the runtime-owned sealed DAG computes those sets
-→ repeat while work remains; already accepted tickets remain accepted; only an explicit
-  empty remaining set authorizes pocock_transition(begin_synthesis) → lead synthesis
-  → pocock_transition(complete)
-```
-
-For each Pocock native dispatch, make exactly one syntactically valid but semantically
-empty `task` call. Its entire raw input is only the placeholder below; the extension
-replaces it with the core-sealed task input before transport:
-
-```text
-task({
-  context: "Pocock sealed dispatch",
-  tasks: [{ task: "Pocock sealed dispatch placeholder" }]
-})
-```
-
-Do not place ticket text, routing, identities, output schemas, or results in that call.
-The sealed OMP profile keeps global `task.isolation.apply=false` and
-`task.isolation.merge=patch`; the core validates and centrally applies the returned
-patch. Once the blocking native task is settled, it is one-shot: never wait for or revive
-it through Hub. Continue only through the next card-authorized runtime command; a retry
-creates a fresh sealed attempt.
-
-For a `ui_live` attempt, use the issued `challengeToken` as the browser tab
-`name`: first `open` the exact issued target, then `run` on that same named tab.
-The `run` code must exercise the stated criterion, include that exact criterion
-in the assertion context, and call the host `assert` helper against a
-non-constant observed result. Only those challenge-bound successful host calls
-count as evidence; prose, screenshots without the challenge, and evidence from
-another attempt do not satisfy it. Then request `pocock_pregate`.
-
-`pocock_pregate` executes the sealed direct-argv checks and determines which producer
-attempts enter review. `pocock_prepare_lenses` creates exactly three distinct
-wave-level reviewers—Standards, Spec, and Critic—over precisely that pre-gate-passed
-subset. A wave may mix `mechanical`, `skilled`, and `judgment` producer attempts on
-their respective slots. Configuration makes producer and lens slot sets disjoint, the
-three lens slots pairwise distinct.
-Before dispatching lenses, the core fails closed with
-`independent_reviewer_unavailable` if a lens's opaque `resolvedModel` string exactly
-matches that of any producer in the wave; it does not classify vendors or families.
-Each lens returns `{lens, summary, reports:[{attemptId, summary, findings, verdict}]}`
-with a report for every passed producer attempt. Standards and Spec emit `NO_VERDICT`;
-Critic alone emits `PASS` or `FAIL`. If a lens alone fails execution or schema
-validation, only that lens receives a new sealed attempt on the same slot.
-`pocock_adjudicate` is the only place reports
-are adjudicated: it preserves already accepted producer tickets and accepts another only
-with a Critic `PASS` and zero surviving blocking findings introduced by Standards or Spec.
-Retry routing remains code-owned: a missing diagnosis uses `lastFailureKind`;
-`capability` raises the ticket class from `mechanical` through `skilled` to `judgment`,
-except that a writer stops at `skilled`; exhausting the permitted depth blocks as
-`escalation_exhausted`. `availability` preserves the slot and leaves model replacement
-to OMP. During partial acceptance, the core routes each rejected ticket directly from
-its recorded rejection cause, without a separate `retry` transition. The lead cannot
-waive these conditions; attempt eligibility, retry limits, gate conditions, and the
-decision to accept remain code-owned.
-
-Synthesize only after the runtime authorizes `begin_synthesis`, then request `complete`
-from the resulting card. A nonterminal run is never completed merely because a session
-ends.
-
-For every terminal run, present the final ledger by ticket in the user's language.
-For each ticket, state the delivered outcome, its final acceptance state, and the factual
-acceptance evidence: the applicable sealed verification result, accepted UI evidence where
-required, and any unresolved blocker or failure. This ledger is an account of deliverables
-and acceptance, not an execution-history export: do not require or list individual attempts,
-roles, agents, declared or observed models, fallback witnesses, tokens, durations, or requests.
-`observedModel` and `modelFallback` remain operational telemetry on the live card and settlement, not a
-final-answer requirement. Never manufacture evidence.
+После `publish_tickets` следуйте
+[единому протоколу исполнения](references/execution-protocol.md). Он определяет
+дисциплину состояния, запечатанную раздачу, UI-доказательства, pre-gate, Линзы,
+приёмку, `continue_wave`, синтез и терминальные переходы.

@@ -231,8 +231,8 @@ runtime/config/manifests. Устаревшая ревизия, повреждё�
 - `git`;
 - `gh` для работы с GitHub Issues во фронтирном входе.
 
-На новой машине весь переносимый профиль OMP, три публичные Головы, их
-capability-агенты, расширение и хребет Покока устанавливаются одной командой:
+На новой машине полный bootstrap устанавливает переносимый профиль OMP, три
+публичные Головы, capability-агенты, расширение и хребет Покока:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shah1git/claude-orchestrate/main/bootstrap-machine.sh | bash
@@ -241,9 +241,10 @@ curl -fsSL https://raw.githubusercontent.com/shah1git/claude-orchestrate/main/bo
 Скрипт клонирует или обновляет репозиторий в
 `${XDG_DATA_HOME:-~/.local/share}/claude-orchestrate`, сохраняет прежние
 `config.yml` и `WATCHDOG.md` вне реестра OMP, устанавливает переносимый профиль и
-запускает полную самопроверку. OAuth, API-ключи, согласие `dev.autoqaConsent`,
-сессии и машинное состояние не переносятся; вендоры авторизуются владельцем после
-установки.
+запускает полную самопроверку. Для полного контракта он вызывает
+`./install.sh --configure-omp --configure-pocock-roles`. OAuth, API-ключи, согласие
+`dev.autoqaConsent`, сессии и машинное состояние не переносятся; вендоры
+авторизуются владельцем после установки.
 
 Ручная установка:
 
@@ -252,6 +253,7 @@ git clone https://github.com/shah1git/claude-orchestrate /opt/claude-orchestrate
 cd /opt/claude-orchestrate
 
 # Регистрирует снимок публичных скиллов, OMP-агентов и расширения копированием.
+# Основной конфиг OMP не изменяется.
 ./install.sh
 
 # Режим разработки: живые симлинки в текущий checkout.
@@ -259,11 +261,18 @@ cd /opt/claude-orchestrate
 
 # Явно применяет обязательные глобальные инварианты native task.
 ./install.sh --configure-omp
+
+# Явно записывает роли pocock-* из переносимого профиля и их fallback chains.
+./install.sh --configure-pocock-roles
+
+# Полная ручная установка применяет оба вида конфигурации.
+./install.sh --configure-omp --configure-pocock-roles
 ```
 
-Обычная установка записывает в основной конфиг OMP только именные роли
-`pocock-*` и их `retry.fallbackChains`, сохраняя остальные настройки. Флаг
-`--configure-omp` дополнительно устанавливает глобальные task-инварианты:
+Обычная установка ставит только артефакты и не пишет конфиг OMP.
+`--configure-omp` устанавливает глобальные task-инварианты, а
+`--configure-pocock-roles` устанавливает именные роли `pocock-*` и их
+`retry.fallbackChains` из переносимого профиля:
 
 ```yaml
 async.enabled: false
@@ -371,7 +380,7 @@ attempt。Standards/Spec 给出 `NO_VERDICT`，仅 Critic 给出 `PASS`/`FAIL`�
 
 ### 安装与使用
 
-在新机器上一条命令即可安装可移植 OMP 配置、三个公共入口、capability agents、
+在新机器上，完整 bootstrap 会安装可移植 OMP 配置、三个公共入口、capability agents、
 extension 和 Pocock spine：
 
 ```bash
@@ -379,12 +388,16 @@ curl -fsSL https://raw.githubusercontent.com/shah1git/claude-orchestrate/main/bo
 ```
 
 脚本不会迁移 OAuth、API keys、用户 consent、sessions 或机器运行状态；安装完成后由
-owner 自行登录供应商。手动安装仍然可用：
+owner 自行登录供应商。完整 bootstrap 通过
+`./install.sh --configure-omp --configure-pocock-roles` 同时安装工件、全局 task
+不变量和 `pocock-*` 角色。手动安装仍然可用：
 
 ```bash
-./install.sh                 # 复制并注册技能、OMP agents 和 extension
-./install.sh --link          # 仅开发：使用指向当前 checkout 的符号链接
-./install.sh --configure-omp # 复制安装并明确写入全局 OMP task 不变量
+./install.sh                           # 仅复制并注册技能、OMP agents 和 extension；不写 OMP 配置
+./install.sh --link                    # 仅开发：使用指向当前 checkout 的符号链接
+./install.sh --configure-omp           # 显式写入全局 OMP task 不变量
+./install.sh --configure-pocock-roles  # 显式从可移植配置写入 pocock-* 角色及 fallback chains
+./install.sh --configure-omp --configure-pocock-roles # 完整手动安装
 bash scripts/verify-install.sh --offline
 ```
 
@@ -467,8 +480,8 @@ tickets.
 Requirements: `omp`, Python 3.12+ with `PyYAML`, `git`, and `gh` for GitHub-backed
 frontiers.
 
-On a new machine, install the portable OMP profile, all three public heads, their
-capability agents, the extension, and the Pocock spine with one command:
+On a new machine, the full bootstrap installs the portable OMP profile, all three public
+heads, their capability agents, the extension, and the Pocock spine:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/shah1git/claude-orchestrate/main/bootstrap-machine.sh | bash
@@ -477,23 +490,29 @@ curl -fsSL https://raw.githubusercontent.com/shah1git/claude-orchestrate/main/bo
 The script clones or updates the checkout under
 `${XDG_DATA_HOME:-~/.local/share}/claude-orchestrate`, backs up an existing
 `config.yml` and `WATCHDOG.md` outside OMP discovery, restores the portable profile,
-and runs the full verifier. It deliberately excludes OAuth, API keys, user consent,
-sessions, and machine runtime state; the owner logs in to each provider afterward.
+and runs the full verifier. For the full contract, it invokes
+`./install.sh --configure-omp --configure-pocock-roles`. It deliberately excludes
+OAuth, API keys, user consent, sessions, and machine runtime state; the owner logs in
+to each provider afterward.
 
 Manual installation:
 
 ```bash
 git clone https://github.com/shah1git/claude-orchestrate /opt/claude-orchestrate
 cd /opt/claude-orchestrate
-./install.sh
-./install.sh --configure-omp     # explicit global OMP task invariants
+./install.sh                                        # artifacts only; does not write OMP config
+./install.sh --link                                 # live-checkout development only
+./install.sh --configure-omp                        # explicit global OMP task invariants
+./install.sh --configure-pocock-roles               # explicit pocock-* roles and fallback chains
+./install.sh --configure-omp --configure-pocock-roles # full manual installation
 bash scripts/verify-install.sh --offline
 ```
 
-A normal install copies one detached snapshot of the skills, OMP agents, and extension,
-then writes only the namespaced `pocock-*` roles and their `retry.fallbackChains` to the
-main OMP config. It preserves every unrelated setting. Use `--link` only for
-live-checkout development.
+A normal install copies one detached snapshot of the skills, OMP agents, and extension
+and does not write the main OMP config. `--configure-omp` writes the global task
+invariants; `--configure-pocock-roles` writes the namespaced `pocock-*` roles and their
+`retry.fallbackChains` from the portable profile. It preserves every unrelated setting.
+Use `--link` only for live-checkout development.
 Invoke `/orchestrate <task>` for raw or decision-bearing work, or for the narrowly
 eligible direct ordinary task described above; all other `/orchestrate` inputs enter
 Pocock. `/orchestrate-frontier` is always for a prepared published frontier and

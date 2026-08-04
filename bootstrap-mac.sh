@@ -9,10 +9,11 @@
 #   3. Набор скиллов Мэтта Покока — канон в ~/.agents/skills (реальные каталоги,
 #      rsync из свежего клона апстрима). ~/.claude/skills/* и ~/.codex/skills
 #      остаются совместимыми зеркалами этого канона для самостоятельных harnesses.
-#   4. ./install.sh --configure-omp устанавливает нативных capability-агентов
-#      из .omp/agents и расширение OMP pocock-control. Общая управляющая
-#      плоскость голов Pocock — skill/orchestrate/tools/omp_runtime.py; рабочий
-#      транспорт — нативный пакетный OMP task.
+#   4. ./install.sh --configure-omp --configure-pocock-roles устанавливает
+#      нативных capability-агентов из .omp/agents и расширение OMP
+#      pocock-control. Общая управляющая плоскость голов Pocock —
+#      skill/orchestrate/tools/omp_runtime.py; рабочий транспорт — нативный
+#      пакетный OMP task.
 #   5. Телеметрия подключается к приватному репозиторию, если он доступен.
 
 #
@@ -151,7 +152,7 @@ ok "реестр Codex: ${#CODEX_LINKS[@]} симлинков в ${CODEX_SKILLS}
 
 # --- 5. Нативный контур OMP ------------------------------------------------
 echo "== Нативный контур OMP =="
-bash "${ORCH_DIR}/install.sh" --configure-omp
+bash "${ORCH_DIR}/install.sh" --configure-omp --configure-pocock-roles
 
 # --- 5.5 Телеметрия: подключение к приватному репо (если клон уже есть) ------
 # Адрес телеметрийного репо здесь сознательно не хранится (главный репозиторий

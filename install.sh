@@ -11,10 +11,12 @@ REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 MODE="copy"
 CONFIGURE_OMP=0
+CONFIGURE_POCOCK_ROLES=0
 for arg in "$@"; do
   case "${arg}" in
     --link) MODE="link" ;;
     --configure-omp) CONFIGURE_OMP=1 ;;
+    --configure-pocock-roles) CONFIGURE_POCOCK_ROLES=1 ;;
     *) echo "unknown install option: ${arg}" >&2; exit 2 ;;
   esac
 done
@@ -43,6 +45,8 @@ Repository OMP defaults and task invariants:
   task.isolation.merge: patch
   task.maxRecursionDepth: 1
   task.maxConcurrency: 6
+  task.maxRuntimeMs: 1800000
+  retry.enabled: true
   retry.modelFallback: true
 EOF
 }
@@ -97,6 +101,8 @@ configure_omp_runtime() {
   omp config set task.isolation.merge patch >/dev/null
   omp config set task.maxRecursionDepth 1 >/dev/null
   omp config set task.maxConcurrency 6 >/dev/null
+  omp config set task.maxRuntimeMs 1800000 >/dev/null
+  omp config set retry.enabled true >/dev/null
   omp config set retry.modelFallback true >/dev/null
   echo "configured OMP native task invariants in ${OMP_BASE_DIR}/config.yml"
 }
@@ -112,12 +118,12 @@ LAST_BACKUP=""
 backup_existing() {
   local dest="$1" backup_dir="${INSTALL_BACKUP_DIR}$(dirname "${1}")"
   local backup="${backup_dir}/$(basename "${dest}").bak" suffix=1
-  mkdir -p "${backup_dir}"
+  mkdir -p "${backup_dir}" || return 1
   while [ -e "${backup}" ] || [ -L "${backup}" ]; do
     backup="${backup_dir}/$(basename "${dest}").bak.${suffix}"
     suffix=$((suffix + 1))
   done
-  mv "${dest}" "${backup}"
+  mv "${dest}" "${backup}" || return 1
   LAST_BACKUP="${backup}"
   echo "backed up   ${dest} -> ${backup}"
 }
@@ -145,46 +151,198 @@ copy_is_current() {
   fi
 }
 
-# restore_runtime_state BACKUP DEST
-# A copy-mode upgrade replaces code but must not replace live routing history.
-# The just-copied telemetry entry is safe to remove: it came from SRC moments
-# earlier; the existing user's state remains intact in BACKUP until restored.
-restore_runtime_state() {
-  local backup="$1" dest="$2"
-  if [[ -e "${backup}/telemetry" || -L "${backup}/telemetry" ]]; then
-    rm -rf "${dest}/telemetry"
-    cp -Rp "${backup}/telemetry" "${dest}/telemetry"
-    echo "restored ${dest}/telemetry from ${backup}"
+# staging_root_for DEST
+# Keep incomplete artifacts outside OMP's live discovery registries while
+# retaining the same filesystem for the final rename.
+staging_root_for() {
+  local dest="$1"
+  printf '%s/.claude-orchestrate-staging\n' "$(dirname "$(dirname "${dest}")")"
+}
+
+filesystem_id() {
+  local path="$1"
+  if stat -c '%d' "${path}" >/dev/null 2>&1; then
+    stat -c '%d' "${path}" || return 1
+  else
+    stat -f '%d' "${path}" || return 1
   fi
 }
 
+# recover_interrupted_copy DEST
+# POSIX cannot atomically replace a non-empty directory. A ready marker is
+# created only after staging is complete, so the next invocation can publish a
+# copy interrupted between moving the prior artifact to backup and the rename.
+recover_interrupted_copy() {
+  local dest="$1" stage_root="" staging_prefix="" marker="" staging=""
+  stage_root="$(staging_root_for "${dest}")"
+  [ -d "${stage_root}" ] || return 0
+  staging_prefix="${stage_root}/$(basename "${dest}").staging"
 
-# install_one SRC DEST
-# Copies by default; links only in explicit `--link` development mode.
+  if [[ -e "${dest}" || -L "${dest}" ]]; then
+    for marker in "${staging_prefix}".*.ready; do
+      [ -f "${marker}" ] || continue
+      staging="${marker%.ready}"
+      rm -rf "${staging}" || return 1
+      rm -f "${marker}" || return 1
+    done
+  else
+    for marker in "${staging_prefix}".*.ready; do
+      [ -f "${marker}" ] || continue
+      staging="${marker%.ready}"
+      if [[ -e "${staging}" || -L "${staging}" ]]; then
+        if ! mv "${staging}" "${dest}"; then
+          return 1
+        fi
+        rm -f "${marker}" || return 1
+        echo "recovered interrupted copy ${staging} -> ${dest}"
+        return 0
+      fi
+      rm -f "${marker}" || return 1
+    done
+  fi
+
+  # A process can die while copying, before its ready marker exists. These
+  # incomplete artifacts are never publishable and are safe to remove.
+  for staging in "${staging_prefix}".*; do
+    [[ -e "${staging}" || -L "${staging}" ]] || continue
+    [[ "${staging}" == *.ready ]] && continue
+    [ -f "${staging}.ready" ] && continue
+    rm -rf "${staging}" || return 1
+  done
+  return 0
+}
+
+# stage_runtime_state SOURCE STAGING
+# A copy-mode upgrade replaces code but retains the existing live routing
+# history before publication. This keeps failed telemetry copies from leaving a
+# newly published artifact without its prior runtime state.
+stage_runtime_state() {
+  local source="$1" staging="$2"
+  rm -rf "${staging}/telemetry" || return 1
+  cp -Rp "${source}/telemetry" "${staging}/telemetry" || return 1
+}
+
+# install_one SRC DEST [RUNTIME_STATE_SOURCE]
+# Copies by default through a sibling staging directory, so a failed copy never
+# replaces a working artifact. Links are used only in explicit development mode.
 # Existing content is moved aside rather than deleted; an already-correct link
 # is left unchanged.
 install_one() {
-  local src="$1" dest="$2"
-  local backup=""
+  local src="$1" dest="$2" requested_runtime_state="${3:-}"
+  local backup="" stage_root="" staging="" ready_marker="" previous_link_target=""
+  local registry_dir="" registry_device="" staging_device="" runtime_state_source=""
+  local suffix=1 had_link=0 restored=0 needs_requested_runtime_state=0
 
   if [[ "${MODE}" == "copy" ]]; then
-    if [[ -e "${dest}" && ! -L "${dest}" ]] && copy_is_current "${src}" "${dest}"; then
+    if ! recover_interrupted_copy "${dest}"; then
+      return 1
+    fi
+    if [[ -d "${src}" && -n "${requested_runtime_state}" \
+        && ( -e "${requested_runtime_state}/telemetry" || -L "${requested_runtime_state}/telemetry" ) ]]; then
+      needs_requested_runtime_state=1
+    fi
+    if [[ -e "${dest}" && ! -L "${dest}" ]] \
+        && copy_is_current "${src}" "${dest}" \
+        && [ "${needs_requested_runtime_state}" -eq 0 ]; then
       echo "up to date  ${dest} (copy)"
       return
     fi
-    # A symlink at DEST points into a checkout, so removing it loses no
-    # content.  Real content is always retained under a non-conflicting backup.
+
+    registry_dir="$(dirname "${dest}")"
+    stage_root="$(staging_root_for "${dest}")"
+    if ! mkdir -p "${stage_root}"; then
+      return 1
+    fi
+    if ! registry_device="$(filesystem_id "${registry_dir}")" \
+        || ! staging_device="$(filesystem_id "${stage_root}")"; then
+      echo "cannot determine filesystem for staged install of ${dest}" >&2
+      return 1
+    fi
+    if [ "${registry_device}" != "${staging_device}" ]; then
+      echo "staging area for ${dest} is not on the destination filesystem" >&2
+      return 1
+    fi
+
+    staging="${stage_root}/$(basename "${dest}").staging.$$"
+    while [[ -e "${staging}" || -L "${staging}" ]]; do
+      staging="${stage_root}/$(basename "${dest}").staging.$$.${suffix}"
+      suffix=$((suffix + 1))
+    done
+    if ! cp -R "${src}" "${staging}"; then
+      rm -rf "${staging}"
+      return 1
+    fi
+
+    if [[ -d "${src}" ]]; then
+      if [[ -n "${requested_runtime_state}" \
+          && ( -e "${requested_runtime_state}/telemetry" || -L "${requested_runtime_state}/telemetry" ) ]]; then
+        runtime_state_source="${requested_runtime_state}"
+      elif [[ -e "${dest}" && ! -L "${dest}" \
+          && ( -e "${dest}/telemetry" || -L "${dest}/telemetry" ) ]]; then
+        runtime_state_source="${dest}"
+      fi
+      if [[ -n "${runtime_state_source}" ]] \
+          && ! stage_runtime_state "${runtime_state_source}" "${staging}"; then
+        rm -rf "${staging}"
+        return 1
+      fi
+    fi
+
+    ready_marker="${staging}.ready"
+    if ! touch "${ready_marker}"; then
+      rm -rf "${staging}"
+      return 1
+    fi
+
+    # A symlink at DEST points into a checkout, so it has no content to back
+    # up. Preserve its target until the replacement succeeds, however, so even
+    # a failed rename leaves the old destination intact.
     if [[ -e "${dest}" && ! -L "${dest}" ]]; then
       LAST_BACKUP=""
-      backup_existing "${dest}"
+      if ! backup_existing "${dest}"; then
+        rm -f "${ready_marker}"
+        rm -rf "${staging}"
+        return 1
+      fi
       backup="${LAST_BACKUP}"
     elif [[ -L "${dest}" ]]; then
-      rm -f "${dest}"
+      had_link=1
+      if ! previous_link_target="$(readlink "${dest}")"; then
+        rm -f "${ready_marker}"
+        rm -rf "${staging}"
+        return 1
+      fi
+      if ! rm -f "${dest}"; then
+        rm -f "${ready_marker}"
+        rm -rf "${staging}"
+        return 1
+      fi
     fi
-    cp -r "${src}" "${dest}"
-    if [[ -d "${src}" && -n "${backup}" ]]; then
-      restore_runtime_state "${backup}" "${dest}"
+
+    if ! mv "${staging}" "${dest}"; then
+      if [[ -n "${backup}" ]]; then
+        if mv "${backup}" "${dest}"; then
+          restored=1
+        else
+          echo "failed to restore ${dest} from ${backup}" >&2
+        fi
+      elif [ "${had_link}" -eq 1 ]; then
+        if ln -s "${previous_link_target}" "${dest}"; then
+          restored=1
+        else
+          echo "failed to restore ${dest} symlink" >&2
+        fi
+      else
+        restored=1
+      fi
+      if [ "${restored}" -eq 1 ]; then
+        rm -f "${ready_marker}"
+        rm -rf "${staging}"
+      fi
+      return 1
     fi
+
+    rm -f "${ready_marker}"
     echo "copied  ${src} -> ${dest}"
     return
   fi
@@ -254,7 +412,7 @@ prune_retired_pocock_agents() {
 # OMP discovers public skills in the shared ~/.agents/skills registry. Derive
 # the head set from the checkout so renames cannot leave a hand-maintained list.
 install_heads() {
-  local src renamed_run_backup=""
+  local src renamed_run_backup="" runtime_state_source=""
   mkdir -p "${SHARED_SKILLS_DIR}"
 
   # Pocock-prefixed aliases have no active public meaning. Archive every trace
@@ -280,11 +438,13 @@ install_heads() {
   for src in "${REPO_DIR}"/skill/*/; do
     [ -f "${src}SKILL.md" ] || continue
     relocate_legacy_backups "${SHARED_SKILLS_DIR}/$(basename "${src%/}")"
-    install_one "${src%/}" "${SHARED_SKILLS_DIR}/$(basename "${src%/}")"
+    runtime_state_source=""
+    if [[ "${MODE}" == "copy" && -n "${renamed_run_backup}" \
+        && "$(basename "${src%/}")" == "orchestrate" ]]; then
+      runtime_state_source="${renamed_run_backup}"
+    fi
+    install_one "${src%/}" "${SHARED_SKILLS_DIR}/$(basename "${src%/}")" "${runtime_state_source}"
   done
-  if [[ "${MODE}" == "copy" && -n "${renamed_run_backup}" ]]; then
-    restore_runtime_state "${renamed_run_backup}" "${SHARED_SKILLS_DIR}/orchestrate"
-  fi
   prune_retired "${SHARED_SKILLS_DIR}"
 }
 
@@ -340,25 +500,31 @@ install_omp_native() {
 }
 
 # install_pocock_model_roles
-# The `pocock-*` model roles are part of the contour, not of one checkout: the
-# public heads run in any repository, so the assignments live in the main OMP
-# config. The portable profile supplies installation defaults only. Roles are
-# namespaced and therefore do not belong behind --configure-omp, which gates
-# global task invariants. The `pocock-*` namespace is reconciled with the
-# portable profile so retired roles cannot survive an upgrade; every other
-# setting in the user's main config is preserved verbatim.
+# This opt-in action runs only with --configure-pocock-roles. The `pocock-*`
+# model roles are part of the contour, not of one checkout: the public heads
+# run in any repository, so the assignments live in the main OMP config. The
+# portable profile supplies installation defaults only. The `pocock-*`
+# namespace is reconciled with the portable profile so retired roles cannot
+# survive an upgrade. Other parsed settings retain their values, while PyYAML
+# intentionally normalizes comments, anchors, and presentation.
 install_pocock_model_roles() {
   python3 - "${POCOCK_PROFILE_SOURCE}" "${OMP_BASE_DIR}/config.yml" <<'PY'
+import os
 import sys
+import tempfile
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 import yaml
 
 source_path, target_path = (Path(argument) for argument in sys.argv[1:3])
 source = yaml.safe_load(source_path.read_text(encoding="utf-8")) or {}
 target_file = Path(target_path)
-target = yaml.safe_load(target_file.read_text(encoding="utf-8")) if target_file.is_file() else {}
-target = target or {}
+write_target = target_file.resolve(strict=False) if target_file.is_symlink() else target_file
 
 roles = {key: value for key, value in (source.get("modelRoles") or {}).items() if key.startswith("pocock-")}
 chains = {
@@ -366,20 +532,75 @@ chains = {
     for key, value in ((source.get("retry") or {}).get("fallbackChains") or {}).items()
     if key.startswith("pocock-")
 }
-target_roles = target.setdefault("modelRoles", {})
-for key in list(target_roles):
-    if key.startswith("pocock-") and key not in roles:
-        del target_roles[key]
-target_roles.update(roles)
 
-target_chains = target.setdefault("retry", {}).setdefault("fallbackChains", {})
-for key in list(target_chains):
-    if key.startswith("pocock-") and key not in chains:
-        del target_chains[key]
-target_chains.update(chains)
 
-target_file.parent.mkdir(parents=True, exist_ok=True)
-target_file.write_text(yaml.safe_dump(target, allow_unicode=True, sort_keys=False), encoding="utf-8")
+def read_target() -> tuple[bytes, dict]:
+    snapshot = write_target.read_bytes() if write_target.is_file() else b""
+    target = yaml.safe_load(snapshot.decode("utf-8")) if snapshot else {}
+    if target is None:
+        target = {}
+    if not isinstance(target, dict):
+        raise SystemExit(f"OMP config must be a mapping: {target_file}")
+    return snapshot, target
+
+
+def reconcile(target: dict) -> str:
+    target_roles = target.setdefault("modelRoles", {})
+    if not isinstance(target_roles, dict):
+        raise SystemExit(f"OMP config modelRoles must be a mapping: {target_file}")
+    for key in list(target_roles):
+        if key.startswith("pocock-") and key not in roles:
+            del target_roles[key]
+    target_roles.update(roles)
+
+    retry = target.setdefault("retry", {})
+    if not isinstance(retry, dict):
+        raise SystemExit(f"OMP config retry must be a mapping: {target_file}")
+    target_chains = retry.setdefault("fallbackChains", {})
+    if not isinstance(target_chains, dict):
+        raise SystemExit(f"OMP config retry.fallbackChains must be a mapping: {target_file}")
+    for key in list(target_chains):
+        if key.startswith("pocock-") and key not in chains:
+            del target_chains[key]
+    target_chains.update(chains)
+    return yaml.safe_dump(target, allow_unicode=True, sort_keys=False)
+
+
+write_target.parent.mkdir(parents=True, exist_ok=True)
+lock_path = write_target.with_name(f".{write_target.name}.pocock-roles.lock")
+with lock_path.open("a+", encoding="utf-8") as lock_file:
+    if fcntl is not None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    for _ in range(3):
+        snapshot, target = read_target()
+        serialized = reconcile(target)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=write_target.parent,
+                prefix=f".{write_target.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary_file:
+                temporary_path = Path(temporary_file.name)
+                temporary_file.write(serialized)
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            current = write_target.read_bytes() if write_target.is_file() else b""
+            if current != snapshot:
+                continue
+            os.replace(temporary_path, write_target)
+            break
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
+    else:
+        raise SystemExit(
+            f"OMP config changed repeatedly while reconciling Pocock routes: {target_file}; retry"
+        )
+
 print(f"reconciled {len(roles)} Pocock model roles and {len(chains)} fallback chains in {target_file}")
 PY
 }
@@ -391,10 +612,18 @@ else
   echo "OMP profile unchanged; use --configure-omp to install the required global task invariants"
 fi
 
-install_omp_native
-install_pocock_model_roles
-
+# The existing adapter accepts the additive runtime protocol. Publish heads and
+# their runtime first, then install the strict adapter only after its compatible
+# runtime is live.
 install_heads
 retire_legacy_harness_links
+
+if [ "${CONFIGURE_POCOCK_ROLES}" -eq 1 ]; then
+  install_pocock_model_roles
+else
+  echo "Pocock model roles unchanged; use --configure-pocock-roles to install portable Pocock routes"
+fi
+
+install_omp_native
 
 echo "Done (${MODE} mode)."

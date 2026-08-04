@@ -25,25 +25,11 @@ decided to `/orchestrate-sweep`; do not manufacture tracker provenance for it. N
 case authorizes direct execution: a frontier is never direct, even when its current wave
 contains only one ordinary-looking ticket.
 
-## State discipline
+## Обязательный протокол исполнения
 
-On a new OMP session, call `pocock_status` **without** `runId` before entering anything.
-The core finds the single active durable run for this workspace and the adapter hydrates
-its card. If that card contains `runtimeMismatch`, call `pocock_enter` with
-`entry: "frontier"` and the current objective; the core transactionally journals and
-stages the replacement before retiring the incompatible run and activating the staged
-replacement. Otherwise resume only from that card. If no active run exists, this head may
-call `pocock_enter` for frontier admission. Every successful
-runtime call returns a state card;
-carry its `runId`, newest `revision`, and `stateHash` unchanged into the next mutating
-request, and invoke only an action in that card's `nextActions`.
-
-The core—not a session—owns the one nonterminal durable run and its budget and attempt
-counters. A failed call, witness disagreement, or `blockedReason` stops dispatching; it
-does not justify automatic cancellation and re-entry. Explicit owner abandonment is the
-only ordinary cancellation path. Only a core-proven `runtimeMismatch` card authorizes
-the replacement entry above; never infer it from an adapter error or retry a start
-rejected as `active_run_exists`. Never call the runtime CLI directly.
+До первой мутации runtime прочитайте
+[единый протокол исполнения](../orchestrate/references/execution-protocol.md). После
+допуска следуйте ему без исключений; эта Голова не имеет прямого пути.
 
 ## Frontier admission
 
@@ -77,7 +63,7 @@ rejected as `active_run_exists`. Never call the runtime CLI directly.
    `INPUTS` must name a complete inline contract, resolvable repository path, full URL,
    fully qualified `issue://owner/repo/N`, or accepted upstream artifact. It must not use
    `#123`, `Issue #123`, or instructions to read tracker or IRC prose; the core reports
-   `incomplete_tracker_reference_in_inputs`. Do not repair missing provenance or inputs by
+   `incomplete_tracker_reference`. Do not repair missing provenance or inputs by
    inventing a ticket or choosing a route. The exact field meanings are in the
    [ticket-writing reference](../orchestrate/references/delegation.md#the-ticket-field-by-field).
 4. If the selected set is not a published frontier, a proof, field, approval, or dependency
@@ -98,79 +84,10 @@ rejected as `active_run_exists`. Never call the runtime CLI directly.
    Only after the returned card authorizes it, call `pocock_prepare` with the published
    seven-field ticket set.
 
-## Shared execution loop
+## Исполнение после допуска
 
-Use the same loop as [orchestrate](../orchestrate/SKILL.md#shared-execution-loop), without
-restating or overriding its policy. The direct exception exists only before
-`pocock_enter` in `/orchestrate`; it cannot appear in this head. If the current card
-exposes a legal branch not shown in this compact diagram, the card wins: do not infer or
-substitute a transition.
-
-```text
-pocock_prepare
-→ producer_dispatch_pending: native task placeholder
-→ pregate_pending:
-  satisfy any issued browser open + exercise challenge, then pocock_pregate
-→ repair_pending: pocock_transition(retry) → pocock_prepare
-  or lens_prepare_pending: pocock_prepare_lenses
-  → lens_dispatch_pending: one wave-level fixed three-lens task
-    → an isolated failed lens retries alone
-    → adjudication_pending: pocock_adjudicate
-      → repair_pending only for affected producer attempts: core routes each by its recorded rejection cause (no separate retry)
-        → pocock_prepare
-→ pocock_transition(continue_wave) with exact remaining/ready/blocked tracker
-  sets and evidence; accepted tickets remain accepted; repeat while work remains
-→ only an explicit empty remaining set authorizes begin_synthesis → complete
-```
-
-Each native dispatch is one syntactically valid but semantically empty `task` call. Its
-raw input contains only this placeholder, which the extension replaces with the
-core-sealed task input:
-
-```text
-task({
-  context: "Pocock sealed dispatch",
-  tasks: [{ task: "Pocock sealed dispatch placeholder" }]
-})
-```
-
-Do not put tickets, routing, identities, output schemas, or results into that call. The
-sealed OMP profile keeps global `task.isolation.apply=false` and
-`task.isolation.merge=patch`; the core validates and centrally applies each returned
-patch, records settled results, and accepts only issued host browser evidence. A settled
-native task is one-shot: never wait for or revive it through Hub; any retry is a fresh
-card-authorized sealed attempt.
-
-The core executes sealed direct-argv checks, then creates exactly three distinct
-wave-level reviewers over the pre-gate-passed producer subset. A wave may mix
-`mechanical`, `skilled`, and `judgment` producer attempts on their respective slots.
-Configuration makes producer and lens slot sets disjoint, the three lens slots pairwise
-distinct. Before dispatching lenses,
-the core fails closed with `independent_reviewer_unavailable` if a lens's opaque
-`resolvedModel` string exactly matches that of any producer in the wave; it does not
-classify vendors or families. Each lens returns
-`{lens, summary, reports:[{attemptId, summary, findings, verdict}]}` covering every passed
-producer attempt. Standards and Spec emit `NO_VERDICT`; Critic alone emits `PASS` or
-`FAIL`. Only an isolated failed lens is retried on the same slot. Retry routing is
-core-owned: a missing diagnosis uses
-`lastFailureKind`; `capability` deepens the class (writers stop at `skilled`, exhausted
-depth blocks as `escalation_exhausted`) and `availability` preserves the slot while OMP
-owns model replacement.
-During partial acceptance each rejected ticket routes directly by its recorded rejection
-cause, without a separate `retry`; adjudication preserves already accepted tickets and
-rejects any ticket with a Critic `FAIL` or surviving introduced blocking Standards or Spec
-finding.
-
-After `pocock_accept`, query the durable tracker and call `continue_wave` with exact
-`remainingTicketIds`, `nextTicketIds`, `blockedTicketIds`, and factual `evidence`.
-Continue until the runtime observes an explicit empty remaining set and authorizes
-`begin_synthesis`. A nonterminal run is never completed merely because the session ends.
-
-For every terminal run, present the final ledger by ticket in the user's language.
-For each ticket, state the delivered outcome, its final acceptance state, and the factual
-acceptance evidence: the applicable sealed verification result, accepted UI evidence where
-required, and any unresolved blocker or failure. This ledger is an account of deliverables
-and acceptance, not an execution-history export: do not require or list individual attempts,
-roles, agents, declared or observed models, fallback witnesses, tokens, durations, or requests.
-`observedModel` and `modelFallback` remain operational telemetry on the live card and settlement, not a
-final-answer requirement. Never manufacture evidence.
+После разрешённого Карточкой `pocock_prepare` с опубликованным набором Тикетов
+следуйте [единому протоколу исполнения](../orchestrate/references/execution-protocol.md).
+Для `continue_wave` эта Голова передаёт разрешённые Карточкой
+tracker-наблюдаемые `remaining`/`ready`/`blocked` наборы и фактическое доказательство;
+`begin_synthesis` и `complete` запрашиваются только когда их разрешает Карточка.

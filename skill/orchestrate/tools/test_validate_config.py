@@ -10,6 +10,9 @@ from pathlib import Path
 from textwrap import dedent
 
 VALIDATOR = Path(__file__).parent / "validate_config.py"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+PORTABLE_VALIDATOR = REPOSITORY_ROOT / "scripts" / "validate_portable_omp_profile.py"
+PORTABLE_PROFILE = REPOSITORY_ROOT / "scripts" / "omp-portable-profile.yml"
 
 # A minimal but structurally complete config.yaml: every block the validator
 # requires (SKILL.md header note + the ticket's stable-block list), correctly
@@ -381,3 +384,22 @@ def test_missing_execution_floor_is_a_violation(tmp_path):
     result = run_validator(skill_dir)
     assert result.returncode == 1
     assert "idle_default_s" in result.stderr
+
+
+def test_portable_profile_rejects_known_token_in_innocuous_scalar(tmp_path):
+    profile = tmp_path / "portable.yml"
+    profile.write_text(
+        PORTABLE_PROFILE.read_text(encoding="utf-8")
+        + "\nnotes: ghp_0123456789abcdefghijklmnopqrstuv\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(PORTABLE_VALIDATOR), str(profile)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "secret-like scalar at notes is forbidden" in completed.stderr

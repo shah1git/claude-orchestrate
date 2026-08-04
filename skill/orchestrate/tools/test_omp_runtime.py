@@ -501,7 +501,7 @@ def test_status_without_run_id_finds_the_single_active_run(tmp_path, cwd, config
 def test_status_without_run_id_reports_when_no_active_run(tmp_path, cwd):
     observed = runtime.command_status(cwd, str(tmp_path / "empty-state"), {})
 
-    assert observed == {"active": False}
+    assert observed == {"protocolVersion": runtime.PROTOCOL_VERSION, "active": False}
 
 
 def test_start_supersedes_only_a_runtime_mismatched_active_run(tmp_path, cwd, config, monkeypatch):
@@ -675,7 +675,7 @@ def test_copy_reinstall_preserves_live_telemetry(tmp_path):
         "    pocock-retired-backup: [retired/fallback]\n",
         encoding="utf-8",
     )
-    command = ["bash", str(repo_root / "install.sh")]
+    command = ["bash", str(repo_root / "install.sh"), "--configure-pocock-roles"]
     first = subprocess.run(command, cwd=repo_root, env=env, text=True, capture_output=True, check=False)
     assert first.returncode == 0, first.stderr
     assert not legacy_run.exists()
@@ -1167,6 +1167,8 @@ def test_effective_omp_settings_are_fail_closed(monkeypatch, tmp_path):
         "task.maxRecursionDepth": 1,
         "task.maxConcurrency": 6,
         "retry.modelFallback": True,
+        "retry.enabled": True,
+        "task.maxRuntimeMs": 1800000,
     }
 
     def result(values):
@@ -2770,3 +2772,75 @@ def test_successful_lenses_become_accepted_only_at_adjudication(tmp_path, cwd, c
     accepted = authoritative(cwd, state_dir, adjudicated["card"]["runId"])
     assert {attempt["status"] for attempt in accepted["attempts"].values()} == {"accepted"}
     assert {attempt["status"] for attempt in accepted["lensAttempts"].values()} == {"accepted"}
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ('assert(document.body.textContent.includes("fixture renders"), "fixture renders")', True),
+        ('assert(document.body.textContent.includes(`${value})`), "fixture renders")', True),
+        ('assert(true, "fixture renders")', False),
+        ('assert(1 === 1, "fixture renders")', False),
+        ('assert({}, "fixture renders")', False),
+        ('console.assert(document.body.textContent, "fixture renders")', False),
+        ('assert(document.body.textContent, "another criterion"); "fixture renders"', False),
+    ],
+)
+def test_ui_evidence_requires_a_criterion_bound_nonconstant_assertion(code, expected):
+    assert runtime.ui_evidence_bound(code, "fixture renders") is expected
+
+
+def test_run_diff_check_returns_a_result_for_a_completed_git_check(tmp_path):
+    repo = init_git_repo(tmp_path / "repo", {"target.txt": "old\n"})
+    (repo / "target.txt").write_text("new\n", encoding="utf-8")
+
+    observed = runtime.run_diff_check(repo, ["target.txt"], 4096)
+
+    assert observed["exitCode"] == 0
+    assert observed["files"] == ["target.txt"]
+    assert observed["argv"] == ["git", "diff", "--check", "--", "target.txt"]
+
+
+def test_patch_applicability_timeout_is_infrastructure_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired(args[0], 60)),
+    )
+
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.validate_patch_applicability(tmp_path, {"data": b"patch"}, "fixture.patch")
+
+    assert error.value.code == "subprocess_timeout"
+
+
+def test_accept_reconstructs_budget_after_deduplicated_telemetry(tmp_path, cwd, config, monkeypatch):
+    state_dir, response = start(tmp_path, cwd, config, "full")
+    response = advance_full(cwd, state_dir, response)
+    sealed_lenses, _ = reach_adjudication(tmp_path, cwd, state_dir, response, config)
+    response = settle_lenses(tmp_path, cwd, state_dir, sealed_lenses, config)
+    response = runtime.command_adjudicate(cwd, state_dir, reference(response["card"]))
+    state = authoritative(cwd, state_dir, response["card"]["runId"])
+    accepted_attempt = state["attempts"][state["waves"][-1]["acceptedAttemptIds"][0]]
+    telemetry_path = runtime.telemetry_log_path(config)
+    telemetry_path.parent.mkdir(parents=True, exist_ok=True)
+    telemetry_path.write_text(
+        json.dumps(
+            {
+                "run_id": state["runId"],
+                "ticket": accepted_attempt["ticketId"],
+                "verdict": "PASS",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 2, "budget exceeded\n", ""),
+    )
+    observed = runtime.command_accept(cwd, state_dir, reference(response["card"]), config)
+
+    assert observed["card"]["budgetExhausted"] is True

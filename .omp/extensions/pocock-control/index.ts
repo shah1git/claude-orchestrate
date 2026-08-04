@@ -16,9 +16,11 @@ const STATE_ENTRY = "pocock-state";
 const DISPATCH_WIDGET = "pocock-dispatch";
 const DISPATCH_CONTEXT = "Pocock sealed dispatch";
 const DISPATCH_PLACEHOLDER = "Pocock sealed dispatch placeholder";
+const CORE_PROTOCOL_VERSION = 1;
+const CORE_TIMEOUT_MS = 120000;
+const PREGATE_CORE_TIMEOUT_MS = 3660000;
 const TERMINAL_PHASES: Readonly<Record<string, true>> = {
 	completed: true,
-	complete: true,
 	cancelled: true,
 };
 const DISPATCH_PHASES: Readonly<Record<string, "producer" | "lenses">> = {
@@ -325,13 +327,16 @@ function responseMessage(command: string, result: { code: number; killed: boolea
 }
 
 function parseCoreResponse(command: string, stdout: string): JsonRecord {
+	let parsed: unknown;
 	try {
-		const parsed: unknown = JSON.parse(stdout);
-		if (!isRecord(parsed)) throw new Error("stdout was not a JSON object");
-		return parsed;
+		parsed = JSON.parse(stdout);
 	} catch (error) {
 		throw new PocockError(`Pocock core ${command} returned invalid JSON: ${errorMessage(error)}`);
 	}
+	if (!isRecord(parsed) || parsed.protocolVersion !== CORE_PROTOCOL_VERSION) {
+		throw new PocockError(`Pocock core ${command} protocol mismatch: expected v${CORE_PROTOCOL_VERSION}`);
+	}
+	return parsed;
 }
 
 function readCard(value: unknown): StateCard | undefined {
@@ -354,7 +359,7 @@ function readCard(value: unknown): StateCard | undefined {
 }
 
 function responseCard(response: JsonRecord): StateCard | undefined {
-	return readCard(response) ?? readCard(response.state) ?? readCard(response.stateCard) ?? readCard(response.card);
+	return readCard(response.card);
 }
 
 function requireCard(response: JsonRecord, command: string): StateCard {
@@ -516,12 +521,249 @@ function browserInvocation(event: { toolName: string; input: JsonRecord }): Json
 	}
 }
 
-function hasCriterionBoundAssertion(code: string, criterion: string): boolean {
+function skipQuotedString(code: string, index: number): number | undefined {
+	const quote = code[index];
+	for (let cursor = index + 1; cursor < code.length; cursor += 1) {
+		if (code[cursor] === "\\") {
+			cursor += 1;
+			continue;
+		}
+		if (code[cursor] === quote) return cursor + 1;
+	}
+	return undefined;
+}
+
+function skipBalancedGroup(code: string, index: number): number | undefined {
+	const closingFor: Record<string, string> = { "(": ")", "[": "]", "{": "}" };
+	const firstClosing = closingFor[code[index]];
+	if (!firstClosing) return undefined;
+	const closings = [firstClosing];
+	for (let cursor = index + 1; cursor < code.length; cursor += 1) {
+		const skipped = skipQuotedOrComment(code, cursor);
+		if (skipped === undefined) return undefined;
+		if (skipped !== cursor) {
+			cursor = skipped - 1;
+			continue;
+		}
+		const character = code[cursor];
+		const closing = closingFor[character];
+		if (closing) {
+			closings.push(closing);
+			continue;
+		}
+		if (character === ")" || character === "]" || character === "}") {
+			if (character !== closings[closings.length - 1]) return undefined;
+			closings.pop();
+			if (closings.length === 0) return cursor + 1;
+		}
+	}
+	return undefined;
+}
+
+function skipTemplateString(code: string, index: number): number | undefined {
+	for (let cursor = index + 1; cursor < code.length; cursor += 1) {
+		if (code[cursor] === "\\") {
+			cursor += 1;
+			continue;
+		}
+		if (code[cursor] === "`") return cursor + 1;
+		if (code[cursor] === "$" && code[cursor + 1] === "{") {
+			const end = skipBalancedGroup(code, cursor + 1);
+			if (end === undefined) return undefined;
+			cursor = end - 1;
+		}
+	}
+	return undefined;
+}
+
+function skipQuotedOrComment(code: string, index: number): number | undefined {
+	const character = code[index];
+	if (character === "'" || character === "\"") return skipQuotedString(code, index);
+	if (character === "`") return skipTemplateString(code, index);
+	if (code.startsWith("//", index)) {
+		const lineEnd = code.indexOf("\n", index + 2);
+		return lineEnd === -1 ? code.length : lineEnd + 1;
+	}
+	if (code.startsWith("/*", index)) {
+		const commentEnd = code.indexOf("*/", index + 2);
+		return commentEnd === -1 ? undefined : commentEnd + 2;
+	}
+	return index;
+}
+
+function firstAssertArgument(code: string, openingParen: number, closingParen: number): string | undefined {
+	const closings: string[] = [];
+	for (let cursor = openingParen + 1; cursor < closingParen; cursor += 1) {
+		const skipped = skipQuotedOrComment(code, cursor);
+		if (skipped === undefined) return undefined;
+		if (skipped !== cursor) {
+			cursor = skipped - 1;
+			continue;
+		}
+		const character = code[cursor];
+		if (character === "(") {
+			closings.push(")");
+			continue;
+		}
+		if (character === "[") {
+			closings.push("]");
+			continue;
+		}
+		if (character === "{") {
+			closings.push("}");
+			continue;
+		}
+		if (character === ")" || character === "]" || character === "}") {
+			if (character !== closings[closings.length - 1]) return undefined;
+			closings.pop();
+			continue;
+		}
+		if (character === "," && closings.length === 0) return code.slice(openingParen + 1, cursor);
+	}
+	return closings.length === 0 ? code.slice(openingParen + 1, closingParen) : undefined;
+}
+
+function stripComments(expression: string): string {
+	let result = "";
+	for (let cursor = 0; cursor < expression.length; cursor += 1) {
+		const skipped = skipQuotedOrComment(expression, cursor);
+		if (skipped === undefined) return expression;
+		if (skipped !== cursor) {
+			if (expression.startsWith("//", cursor) || expression.startsWith("/*", cursor)) result += " ";
+			else result += expression.slice(cursor, skipped);
+			cursor = skipped - 1;
+			continue;
+		}
+		result += expression[cursor];
+	}
+	return result;
+}
+
+function normalizedExpression(expression: string): string {
+	let normalized = stripComments(expression).trim();
+	while (normalized.startsWith("(")) {
+		const closing = skipBalancedGroup(normalized, 0);
+		if (closing !== normalized.length) break;
+		normalized = normalized.slice(1, -1).trim();
+	}
+	return normalized;
+}
+
+function isLiteralExpression(expression: string): boolean {
+	const normalized = normalizedExpression(expression);
+	if (/^(?:true|false|null|undefined)$/.test(normalized)) return true;
+	if (/^[+-]?(?:0[xX][\da-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(?:n)?$/.test(normalized)) {
+		return true;
+	}
+	const quote = normalized[0];
+	if (quote === "'" || quote === "\"" || quote === "`") {
+		const end = quote === "`" ? skipTemplateString(normalized, 0) : skipQuotedString(normalized, 0);
+		return end === normalized.length;
+	}
+	if (quote === "{" || quote === "[") {
+		return skipBalancedGroup(normalized, 0) === normalized.length;
+	}
+	return false;
+}
+
+function topLevelComparison(expression: string): { index: number; length: number } | undefined {
+	const closings: string[] = [];
+	const operators = ["!==", "===", "==", "!=", "<=", ">=", "<", ">"];
+	for (let cursor = 0; cursor < expression.length; cursor += 1) {
+		const skipped = skipQuotedOrComment(expression, cursor);
+		if (skipped === undefined) return undefined;
+		if (skipped !== cursor) {
+			cursor = skipped - 1;
+			continue;
+		}
+		const character = expression[cursor];
+		if (character === "(") {
+			closings.push(")");
+			continue;
+		}
+		if (character === "[") {
+			closings.push("]");
+			continue;
+		}
+		if (character === "{") {
+			closings.push("}");
+			continue;
+		}
+		if (character === ")" || character === "]" || character === "}") {
+			if (character !== closings[closings.length - 1]) return undefined;
+			closings.pop();
+			continue;
+		}
+		if (closings.length === 0) {
+			const operator = operators.find(candidate => expression.startsWith(candidate, cursor));
+			if (operator) return { index: cursor, length: operator.length };
+		}
+	}
+	return undefined;
+}
+
+function isLiteralComparison(expression: string): boolean {
+	const normalized = normalizedExpression(expression);
+	const comparison = topLevelComparison(normalized);
+	if (!comparison) return false;
 	return (
-		code.includes(criterion)
-		&& /\bassert\s*\(/.test(code)
-		&& !/\bassert\s*\(\s*true\s*(?:,|\))/i.test(code)
+		isLiteralExpression(normalized.slice(0, comparison.index))
+		&& isLiteralExpression(normalized.slice(comparison.index + comparison.length))
 	);
+}
+
+
+function skipWhitespaceAndComments(code: string, index: number): number | undefined {
+	let cursor = index;
+	while (cursor < code.length) {
+		if (/\s/.test(code[cursor])) {
+			cursor += 1;
+			continue;
+		}
+		if (code.startsWith("//", cursor) || code.startsWith("/*", cursor)) {
+			const skipped = skipQuotedOrComment(code, cursor);
+			if (skipped === undefined) return undefined;
+			cursor = skipped;
+			continue;
+		}
+		break;
+	}
+	return cursor;
+}
+
+function hasCriterionBoundAssertion(code: string, criterion: string): boolean {
+	for (let cursor = 0; cursor < code.length; cursor += 1) {
+		const skipped = skipQuotedOrComment(code, cursor);
+		if (skipped === undefined) return false;
+		if (skipped !== cursor) {
+			cursor = skipped - 1;
+			continue;
+		}
+		if (
+			!code.startsWith("assert", cursor)
+			|| code[cursor - 1] === "."
+			|| /[A-Za-z0-9_$]/.test(code[cursor - 1] ?? "")
+			|| /[A-Za-z0-9_$]/.test(code[cursor + "assert".length] ?? "")
+		) continue;
+		const openingParen = skipWhitespaceAndComments(code, cursor + "assert".length);
+		if (openingParen === undefined || code[openingParen] !== "(") continue;
+		const callEnd = skipBalancedGroup(code, openingParen);
+		if (callEnd === undefined) continue;
+		const firstArgument = firstAssertArgument(code, openingParen, callEnd - 1);
+		if (
+			code.slice(openingParen + 1, callEnd - 1).includes(criterion)
+			&& firstArgument !== undefined
+			&& !isLiteralExpression(firstArgument)
+			&& !isLiteralComparison(firstArgument)
+		) {
+			return true;
+		}
+		// One full parse per assertion keeps the check linear for untrusted
+		// browser code. A nested assertion cannot provide stronger evidence
+		// than the enclosing call body already inspected above.
+		cursor = callEnd - 1;
+	}
+	return false;
 }
 
 export function uiEvidenceBinding(
@@ -780,11 +1022,14 @@ async function invokeCore(
 	const runtime = discoverRuntime(context.sessionManager.getSessionId());
 	const requestDirectory = mkdtempSync(join(tmpdir(), "pocock-core-"));
 	const requestPath = join(requestDirectory, "request.json");
+	const timeoutMs = command === "pregate" ? PREGATE_CORE_TIMEOUT_MS : CORE_TIMEOUT_MS;
+	const timeoutSignal = AbortSignal.timeout(timeoutMs);
+	const coreSignal = signal ? AbortSignal.any([timeoutSignal, signal]) : timeoutSignal;
 	try {
 		writeFileSync(requestPath, jsonText(request), { encoding: "utf8", flag: "wx", mode: 0o600 });
 		const result = await pi.exec("python3", [runtime, command, "--request-file", requestPath], {
 			cwd: context.cwd,
-			signal,
+			signal: coreSignal,
 		});
 		if (result.code !== 0 || result.killed) {
 			throw new CoreCliError(command, responseMessage(command, result), parseDiagnostic(result.stderr));

@@ -19,6 +19,7 @@ import copy
 import datetime as dt
 import fcntl
 import hashlib
+import heapq
 import hmac
 import json
 import os
@@ -31,7 +32,6 @@ import secrets
 import time
 import uuid
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
 
 import yaml
 
@@ -41,6 +41,7 @@ CONFIG_PATH = SKILL_DIR / "config.yaml"
 TELEMETRY_TOOL = Path(__file__).resolve().parent / "telemetry_append.py"
 REQUEST_BYTES_MAX = 32 * 1024 * 1024
 SCHEMA_VERSION = 2
+PROTOCOL_VERSION = 1
 TICKET_FIELDS = (
     "OBJECTIVE",
     "CONTEXT",
@@ -60,6 +61,12 @@ RUNTIME_CHANGED_MESSAGE = (
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{5,127}$")
 PATCH_FORBIDDEN_PREFIXES = (".git",)
 DEFAULT_PATCH_BYTES_MAX = 16 * 1024 * 1024
+# Every child process the runtime spawns carries an explicit wall clock
+# (code.md §2.9): a hung git, omp, or telemetry writer must fail the command,
+# never block the control plane indefinitely.
+GIT_TIMEOUT_SECONDS = 60
+OMP_CONFIG_TIMEOUT_SECONDS = 30
+TELEMETRY_TIMEOUT_SECONDS = 60
 ISOLATED_OMP_MODES = frozenset(
     {
         "auto",
@@ -184,10 +191,30 @@ def load_config() -> dict[str, Any]:
     return raw
 
 
+def active_policy_snapshot(config: dict[str, Any]) -> dict[str, Any]:
+    """The exact config subset the native contour consumes.
+
+    The fingerprint measures behaviour changes, not file bytes: archived
+    `run_lane` blocks and comment edits in config.yaml must not invalidate a
+    live run, while any semantic change below must.
+    """
+    gates = config.get("gates")
+    shape = config.get("shape")
+    return {
+        "version": config.get("version"),
+        "omp": config.get("omp"),
+        "session_budget": config.get("session_budget"),
+        "shape_values": shape.get("values") if isinstance(shape, dict) else None,
+        "routing": config.get("routing"),
+        "gates_pre_gate": gates.get("pre_gate") if isinstance(gates, dict) else None,
+        "telemetry": config.get("telemetry"),
+    }
+
+
 def config_fingerprint(config: dict[str, Any]) -> str:
     version = config.get("version")
-    raw = CONFIG_PATH.read_bytes()
-    return f"v{version}+{hashlib.sha256(raw).hexdigest()[:7]}"
+    policy = hashlib.sha256(canonical(active_policy_snapshot(config)).encode("utf-8")).hexdigest()[:7]
+    return f"v{version}+{policy}"
 
 
 def state_base(cwd: Path, explicit: str | None) -> Path:
@@ -345,7 +372,9 @@ def replacement_transaction_path(cwd: Path, explicit: str | None, replacement_ru
 
 
 def write_replacement_transaction(path: Path, transaction: dict[str, Any]) -> None:
-    write_bytes_atomic(path, (canonical(transaction) + "\n").encode("utf-8"))
+    body = {field: value for field, value in transaction.items() if field != "mac"}
+    body["mac"] = record_mac(body, transaction_auth_key(path, create=True))
+    write_bytes_atomic(path, (canonical(body) + "\n").encode("utf-8"))
 
 
 def recover_replacement_transactions(cwd: Path, explicit: str | None) -> None:
@@ -375,6 +404,11 @@ def recover_replacement_transactions(cwd: Path, explicit: str | None) -> None:
             f"replacement transaction has an invalid status: {transaction_path}",
         )
         if status == "committed":
+            continue
+        # A prepared transaction retires a live run, so it executes only with a
+        # valid authentication witness. Records without a mac are pre-auth
+        # legacy residue: skipped, never executed.
+        if "mac" not in transaction or not record_mac_valid(transaction, transaction_auth_key(transaction_path, create=False)):
             continue
 
         old_run_id = validate_run_id(transaction.get("oldRunId"))
@@ -471,15 +505,17 @@ def create_replacement_transaction(
     return read_state(replacement_path)
 
 
-def runtime_fingerprint() -> str:
-    # Only files the native contour actually executes. `dispatch_ledger.py` was
-    # dropped when slot binding replaced round-robin slot claiming: hashing an
-    # archived module would invalidate live runs for an edit that cannot reach
-    # them.
+def runtime_fingerprint(config: dict[str, Any] | None = None) -> str:
+    # Witness of what the native contour actually executes: the two runtime
+    # modules plus the normalized active policy subset. `dispatch_ledger.py`
+    # was dropped when slot binding replaced round-robin slot claiming, and
+    # archived config blocks stay out for the same reason: hashing bytes the
+    # contour cannot reach would invalidate live runs for inert edits.
+    if config is None:
+        config = load_config()
     files = (
         Path(__file__).resolve(),
         TELEMETRY_TOOL.resolve(),
-        CONFIG_PATH.resolve(),
     )
     witness = hashlib.sha256()
     for path in files:
@@ -488,6 +524,7 @@ def runtime_fingerprint() -> str:
         witness.update(b"\0")
         witness.update(path.read_bytes())
         witness.update(b"\0")
+    witness.update(canonical(active_policy_snapshot(config)).encode("utf-8"))
     return witness.hexdigest()
 
 
@@ -563,8 +600,7 @@ def state_key_path(state_path: Path) -> Path:
     return state_path.parent.parent / "state-auth.key"
 
 
-def load_or_create_state_key(state_path: Path, *, create: bool) -> bytes:
-    path = state_key_path(state_path)
+def _load_or_create_auth_key(path: Path, *, create: bool) -> bytes:
     if create:
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -583,6 +619,33 @@ def load_or_create_state_key(state_path: Path, *, create: bool) -> bytes:
     fail(path.stat().st_mode & 0o777 != 0o600, "state_auth_failed", f"state authentication key permissions must be 0600: {path}")
     fail(len(key) < 32, "state_auth_failed", f"state authentication key is invalid: {path}")
     return key
+
+
+def load_or_create_state_key(state_path: Path, *, create: bool) -> bytes:
+    return _load_or_create_auth_key(state_key_path(state_path), create=create)
+
+
+def journal_auth_key(artifact_dir: Path, *, create: bool) -> bytes:
+    """The run's state-auth key, addressed from its artifact directory."""
+    return _load_or_create_auth_key(artifact_dir.parent.parent / "state-auth.key", create=create)
+
+
+def transaction_auth_key(transaction_path: Path, *, create: bool) -> bytes:
+    return _load_or_create_auth_key(transaction_path.parent.parent / "state-auth.key", create=create)
+
+
+def record_mac(payload: dict[str, Any], key: bytes) -> str:
+    """HMAC over every field except the mac itself; journals and transactions
+    carry it so recovery paths never execute self-declared forged records."""
+    body = {field: value for field, value in payload.items() if field != "mac"}
+    return hmac.new(key, canonical(body).encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def record_mac_valid(payload: dict[str, Any], key: bytes) -> bool:
+    observed = payload.get("mac")
+    if not isinstance(observed, str):
+        return False
+    return hmac.compare_digest(observed, record_mac(payload, key))
 
 
 def public_snapshot(state: dict[str, Any]) -> dict[str, Any]:
@@ -637,6 +700,10 @@ def validate_state_snapshot(state: dict[str, Any], path: Path) -> dict[str, Any]
     fail(not hmac.compare_digest(observed_mac, expected_mac), "state_auth_failed", "authoritative state authentication witness does not match its contents")
     if (
         state.get("entry") == "sweep"
+        # Terminal runs are immutable history: re-deriving the sealed ledger
+        # on every scan buys nothing, so integrity is enforced only while the
+        # run can still mutate.
+        and state.get("phase") not in TERMINAL_PHASES
         and state.get("phase") not in {"sweep_admission", REPLACEMENT_STAGING_PHASE}
     ):
         require_sweep_integrity(state)
@@ -1087,22 +1154,26 @@ def card(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def output(state: dict[str, Any], **extra: Any) -> dict[str, Any]:
-    return {"card": card(state), **extra}
+    return {"protocolVersion": PROTOCOL_VERSION, "card": card(state), **extra}
 
 
 def metadata(config: dict[str, Any], cwd: Path) -> dict[str, Any]:
     validate_effective_omp_settings(cwd)
-    return {"configFingerprint": config_fingerprint(config), "omp": config["omp"]}
+    return {"protocolVersion": PROTOCOL_VERSION, "configFingerprint": config_fingerprint(config), "omp": config["omp"]}
 
 
 def validate_effective_omp_settings(cwd: Path) -> None:
-    completed = subprocess.run(
-        ["omp", "config", "list", "--json"],
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            ["omp", "config", "list", "--json"],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=OMP_CONFIG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeFailure("omp_config_unavailable", f"OMP settings inventory exceeded {OMP_CONFIG_TIMEOUT_SECONDS}s") from exc
     fail(completed.returncode != 0, "omp_config_unavailable", completed.stderr.strip() or "cannot inspect effective OMP settings")
     try:
         settings = json.loads(completed.stdout)
@@ -1111,6 +1182,7 @@ def validate_effective_omp_settings(cwd: Path) -> None:
     fail(not isinstance(settings, dict), "omp_config_unavailable", "OMP settings inventory is not an object")
     expected: dict[str, Any] = {
         "async.enabled": False,
+        "retry.enabled": True,
         "task.batch": True,
         "task.enableEffort": True,
         # The concrete backend is host policy; the invariant is that isolation
@@ -1141,6 +1213,9 @@ def validate_effective_omp_settings(cwd: Path) -> None:
     concurrency = settings.get("task.maxConcurrency", {}).get("value") if isinstance(settings.get("task.maxConcurrency"), dict) else None
     if not isinstance(concurrency, int) or isinstance(concurrency, bool) or not 1 <= concurrency <= 6:
         mismatches.append({"key": "task.maxConcurrency", "expected": "integer 1..6", "observed": concurrency})
+    max_runtime = settings.get("task.maxRuntimeMs", {}).get("value") if isinstance(settings.get("task.maxRuntimeMs"), dict) else None
+    if not isinstance(max_runtime, int) or isinstance(max_runtime, bool) or max_runtime <= 0:
+        mismatches.append({"key": "task.maxRuntimeMs", "expected": "positive integer", "observed": max_runtime})
     fail(
         bool(mismatches),
         "omp_config_incompatible",
@@ -1181,7 +1256,14 @@ def validate_omp_isolation_baseline(cwd: Path) -> None:
             check=False,
             capture_output=True,
             text=True,
+            timeout=GIT_TIMEOUT_SECONDS,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeFailure(
+            "omp_isolation_baseline_invalid",
+            "cannot inspect the Git repositories required by OMP task isolation",
+            repositories=[{"path": ".", "reason": f"git rev-parse exceeded {GIT_TIMEOUT_SECONDS}s"}],
+        ) from exc
     except OSError as exc:
         raise RuntimeFailure(
             "omp_isolation_baseline_invalid",
@@ -1195,13 +1277,21 @@ def validate_omp_isolation_baseline(cwd: Path) -> None:
         repositories=[{"path": ".", "reason": "Git repository root is not resolvable"}],
     )
     repo_root = Path(root_result.stdout.strip()).resolve()
-    submodules = subprocess.run(
-        ["git", "submodule", "--quiet", "foreach", "--recursive", "echo $sm_path"],
-        cwd=repo_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        submodules = subprocess.run(
+            ["git", "submodule", "--quiet", "foreach", "--recursive", "echo $sm_path"],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeFailure(
+            "omp_isolation_baseline_invalid",
+            "OMP cannot enumerate the repositories required for task isolation",
+            repositories=[{"path": ".", "reason": f"git submodule enumeration exceeded {GIT_TIMEOUT_SECONDS}s"}],
+        ) from exc
     fail(
         submodules.returncode != 0,
         "omp_isolation_baseline_invalid",
@@ -1212,13 +1302,19 @@ def validate_omp_isolation_baseline(cwd: Path) -> None:
     repositories = [repo_root, *discover_omp_nested_repositories(repo_root, submodule_paths)]
     broken: list[dict[str, str]] = []
     for repository in repositories:
-        head = subprocess.run(
-            ["git", "rev-parse", "--verify", "HEAD^{commit}"],
-            cwd=repository,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            head = subprocess.run(
+                ["git", "rev-parse", "--verify", "HEAD^{commit}"],
+                cwd=repository,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=GIT_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            relative = "." if repository == repo_root else repository.relative_to(repo_root).as_posix()
+            broken.append({"path": relative, "reason": f"git rev-parse exceeded {GIT_TIMEOUT_SECONDS}s"})
+            continue
         if head.returncode != 0 or not head.stdout.strip():
             relative = "." if repository == repo_root else repository.relative_to(repo_root).as_posix()
             broken.append({"path": relative, "reason": "HEAD does not resolve to a commit"})
@@ -1859,16 +1955,18 @@ def sweep_topological_order(dependencies: dict[str, list[str]]) -> list[str]:
     for ticket_id_value, prerequisites in dependencies.items():
         for prerequisite in prerequisites:
             dependents[prerequisite].append(ticket_id_value)
-    ready = sorted(ticket_id_value for ticket_id_value, prerequisites in unresolved.items() if not prerequisites)
+    ready = [ticket_id_value for ticket_id_value, prerequisites in unresolved.items() if not prerequisites]
+    heapq.heapify(ready)
     order = []
     while ready:
-        ticket_id_value = ready.pop(0)
+        # heapq replaces the old pop(0)+sort pair: deterministic lexicographic
+        # order, O(log T) per step instead of O(T log T) re-sort.
+        ticket_id_value = heapq.heappop(ready)
         order.append(ticket_id_value)
-        for dependent in sorted(dependents[ticket_id_value]):
+        for dependent in dependents[ticket_id_value]:
             unresolved[dependent].remove(ticket_id_value)
             if not unresolved[dependent]:
-                ready.append(dependent)
-        ready.sort()
+                heapq.heappush(ready, dependent)
     fail(
         len(order) != len(dependencies),
         "dag_invalid",
@@ -1877,20 +1975,29 @@ def sweep_topological_order(dependencies: dict[str, list[str]]) -> list[str]:
     return order
 
 
-def sweep_has_incomparable_pair(dependencies: dict[str, list[str]], order: list[str]) -> bool:
-    ancestors: dict[str, set[str]] = {}
-    for ticket_id_value in order:
-        closure: set[str] = set()
-        for prerequisite in dependencies[ticket_id_value]:
-            closure.add(prerequisite)
-            closure.update(ancestors[prerequisite])
-        ancestors[ticket_id_value] = closure
-    ticket_ids = sorted(dependencies)
-    return any(
-        left not in ancestors[right] and right not in ancestors[left]
-        for index, left in enumerate(ticket_ids)
-        for right in ticket_ids[index + 1:]
-    )
+def sweep_has_incomparable_pair(dependencies: dict[str, list[str]], _order: list[str]) -> bool:
+    """Return whether the sealed DAG contains mutually incomparable tickets.
+
+    Kahn layers answer this in O(T+E): tickets in one layer cannot descend
+    from each other, and a DAG whose every layer has width one is a chain.
+    """
+    unresolved = {ticket_id_value: set(prerequisites) for ticket_id_value, prerequisites in dependencies.items()}
+    dependents = {ticket_id_value: [] for ticket_id_value in dependencies}
+    for ticket_id_value, prerequisites in dependencies.items():
+        for prerequisite in prerequisites:
+            dependents[prerequisite].append(ticket_id_value)
+    current = [ticket_id_value for ticket_id_value, prerequisites in unresolved.items() if not prerequisites]
+    while current:
+        if len(current) >= 2:
+            return True
+        advanced: list[str] = []
+        for ticket_id_value in current:
+            for dependent in dependents[ticket_id_value]:
+                unresolved[dependent].remove(ticket_id_value)
+                if not unresolved[dependent]:
+                    advanced.append(dependent)
+        current = advanced
+    return False
 
 
 def validate_sweep_writer_contract(cwd: Path | None, ledger: dict[str, dict[str, Any]]) -> None:
@@ -2261,7 +2368,10 @@ def command_prepare(cwd: Path, explicit_state_dir: str | None, request: dict[str
         wave_no = len(state["waves"]) + 1
         base_sha = None
         if any(ticket["write"] for ticket in tickets):
-            completed = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, text=True, capture_output=True, check=False)
+            try:
+                completed = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, text=True, capture_output=True, check=False, timeout=GIT_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeFailure("git_required", f"git rev-parse exceeded {GIT_TIMEOUT_SECONDS}s") from exc
             fail(completed.returncode != 0, "git_required", "writer dispatch requires a git repository")
             base_sha = completed.stdout.strip()
 
@@ -2568,12 +2678,20 @@ def inspect_patch(cwd: Path, path_value: Any, label: str, max_bytes: int) -> dic
         f"{label} deletes a file",
     )
 
-    completed = subprocess.run(
-        ["git", "apply", "--numstat", "-z", str(path.resolve())],
-        cwd=cwd,
-        capture_output=True,
-        check=False,
-    )
+    # Parse the captured bytes through stdin, never the artifact path a second
+    # time: metadata must describe exactly the data that will later be applied,
+    # so swapping the artifact file between read and parse cannot bypass scope.
+    try:
+        completed = subprocess.run(
+            ["git", "apply", "--numstat", "-z", "-"],
+            cwd=cwd,
+            input=data,
+            capture_output=True,
+            check=False,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeFailure("subprocess_timeout", f"{label} numstat parse exceeded {GIT_TIMEOUT_SECONDS}s") from exc
     fail(completed.returncode != 0, "patch_invalid", completed.stderr.decode("utf-8", errors="replace").strip() or f"{label} is not a valid patch")
     files: list[str] = []
     diff_lines = 0
@@ -2618,27 +2736,28 @@ def validate_patch_scope(cwd: Path, patch: dict[str, Any], attempt: dict[str, An
 
 
 def validate_patch_applicability(cwd: Path, patch: dict[str, Any], label: str) -> None:
-    """Reject one captured patch without making sibling settlements collateral."""
+    """Reject one captured patch without making sibling settlements collateral.
+
+    Settlement accepts only a forward-applicable patch. A reverse-applicable
+    patch is pre-existing working-tree content, not work this attempt may
+    claim; rejecting it here prevents one conflicting attempt from failing a
+    later whole-wave application.
+    """
     if not patch["data"]:
         return
-    forward = subprocess.run(
-        ["git", "apply", "--check", "--whitespace=nowarn", "-"],
-        cwd=cwd,
-        input=patch["data"],
-        capture_output=True,
-        check=False,
-    )
-    if forward.returncode == 0:
-        return
-    reverse = subprocess.run(
-        ["git", "apply", "--reverse", "--check", "--whitespace=nowarn", "-"],
-        cwd=cwd,
-        input=patch["data"],
-        capture_output=True,
-        check=False,
-    )
+    try:
+        forward = subprocess.run(
+            ["git", "apply", "--check", "--whitespace=nowarn", "-"],
+            cwd=cwd,
+            input=patch["data"],
+            capture_output=True,
+            check=False,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeFailure("subprocess_timeout", f"{label} applicability check exceeded {GIT_TIMEOUT_SECONDS}s") from exc
     fail(
-        reverse.returncode != 0,
+        forward.returncode != 0,
         "patch_conflict",
         forward.stderr.decode("utf-8", errors="replace").strip() or f"{label} does not apply cleanly",
     )
@@ -2693,6 +2812,13 @@ def apply_patch_batch(
             "diffLines": patch["diffLines"],
         })
 
+    auth_key = journal_auth_key(artifact_dir, create=True)
+
+    def write_journal(body: dict[str, Any]) -> None:
+        body.pop("mac", None)
+        body["mac"] = record_mac(body, auth_key)
+        write_bytes_atomic(journal_path, (canonical(body) + "\n").encode("utf-8"))
+
     journal = {
         "sha256": combined_sha,
         "cwd": str(cwd.resolve()),
@@ -2715,28 +2841,55 @@ def apply_patch_batch(
             or observed_journal.get("dispatchId") != dispatch_id
             or observed_journal.get("patchPath") != str(combined_path.resolve())
             or observed_journal.get("attemptPatches") != attempt_patches
-            or observed_journal.get("status") not in {"prepared", "applied"},
+            or observed_journal.get("status") not in {"prepared", "applied", "rolled_back"},
             "patch_journal_corrupt",
             f"patch application journal does not match this wave: {journal_path}",
         )
+        fail(
+            "mac" in observed_journal and not record_mac_valid(observed_journal, auth_key),
+            "patch_journal_corrupt",
+            f"patch application journal authentication witness is invalid: {journal_path}",
+        )
         journal = observed_journal
     else:
-        write_bytes_atomic(journal_path, (canonical(journal) + "\n").encode("utf-8"))
+        write_journal(journal)
+    if journal["status"] == "rolled_back":
+        # Orphan recovery proved and restored the preimage. Re-arm the same
+        # sealed journal for the retried settlement; this is a fresh forward
+        # apply, not ownership of a pre-existing postimage.
+        journal["status"] = "prepared"
+        journal.pop("rolledBackAt", None)
+        write_journal(journal)
 
-    forward = subprocess.run(["git", "apply", "--check", "--whitespace=nowarn", str(combined_path)], cwd=cwd, text=True, capture_output=True, check=False)
-    reverse = subprocess.run(["git", "apply", "--reverse", "--check", "--whitespace=nowarn", str(combined_path)], cwd=cwd, text=True, capture_output=True, check=False)
+    def git_apply(*extra: str) -> subprocess.CompletedProcess[bytes]:
+        try:
+            return subprocess.run(
+                ["git", "apply", "--whitespace=nowarn", *extra, "-"],
+                cwd=cwd,
+                input=combined,
+                capture_output=True,
+                check=False,
+                timeout=GIT_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeFailure("patch_apply_failed", f"git apply exceeded {GIT_TIMEOUT_SECONDS}s") from exc
+
     if journal["status"] == "applied":
+        # Idempotent re-entry: only verify the working tree still carries the
+        # applied patch; never re-apply or re-claim it here.
+        reverse = git_apply("--reverse", "--check")
         fail(reverse.returncode != 0, "patch_journal_mismatch", "journal says the producer patch is applied, but the working tree disagrees")
-    elif forward.returncode == 0:
-        applied = subprocess.run(["git", "apply", "--whitespace=nowarn", str(combined_path)], cwd=cwd, text=True, capture_output=True, check=False)
-        fail(applied.returncode != 0, "patch_apply_failed", applied.stderr.strip() or "validated producer patches could not be applied")
-        journal["status"] = "applied"
-        write_bytes_atomic(journal_path, (canonical(journal) + "\n").encode("utf-8"))
-    elif reverse.returncode == 0:
-        journal["status"] = "applied"
-        write_bytes_atomic(journal_path, (canonical(journal) + "\n").encode("utf-8"))
     else:
-        fail(True, "patch_conflict", forward.stderr.strip() or "combined producer patches do not apply cleanly")
+        forward = git_apply("--check")
+        # Forward-only for a prepared journal: a patch that does not apply
+        # forward conflicts with the working tree. Reverse-applicability means
+        # the tree already holds this postimage — possibly a pre-existing user
+        # change — and claiming it would attribute foreign work to this run.
+        fail(forward.returncode != 0, "patch_conflict", forward.stderr.decode("utf-8", errors="replace").strip() or "combined producer patches do not apply cleanly")
+        applied = git_apply()
+        fail(applied.returncode != 0, "patch_apply_failed", applied.stderr.decode("utf-8", errors="replace").strip() or "validated producer patches could not be applied")
+        journal["status"] = "applied"
+        write_journal(journal)
 
     return {
         "path": str(combined_path.resolve()),
@@ -2771,6 +2924,13 @@ def rollback_orphaned_patch_journals(
             if journal_value is not None:
                 committed_journals.add(Path(journal_value).resolve())
 
+    try:
+        auth_key = journal_auth_key(artifact_dir, create=False)
+    except RuntimeFailure:
+        # No authentication key means no orphan journal can prove the runtime
+        # wrote it; recovery executes nothing rather than trusting them.
+        return
+
     for journal_path in sorted(artifact_dir.glob("wave-*.apply.json")):
         resolved_journal = journal_path.resolve()
         if resolved_journal in committed_journals:
@@ -2796,6 +2956,10 @@ def rollback_orphaned_patch_journals(
         )
         if status == "rolled_back":
             continue
+        # Only the runtime's own authenticated journal may drive a reverse
+        # apply: a forged or legacy record is skipped, never executed.
+        if "mac" not in journal or not record_mac_valid(journal, auth_key):
+            continue
 
         patch_path = Path(require_text(journal.get("patchPath"), "patchJournal.patchPath"))
         fail(
@@ -2809,41 +2973,42 @@ def rollback_orphaned_patch_journals(
             "patch_journal_corrupt",
             f"orphan patch artifact hash mismatch: {patch_path}",
         )
-        reverse = subprocess.run(
-            ["git", "apply", "--reverse", "--check", "--whitespace=nowarn", str(patch_path)],
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        forward = subprocess.run(
-            ["git", "apply", "--check", "--whitespace=nowarn", str(patch_path)],
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        def run_git(*extra: str) -> subprocess.CompletedProcess[bytes]:
+            try:
+                return subprocess.run(
+                    ["git", "apply", "--whitespace=nowarn", *extra, "-"],
+                    cwd=cwd,
+                    input=patch_data,
+                    capture_output=True,
+                    check=False,
+                    timeout=GIT_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeFailure("rollback_failed", f"orphan rollback exceeded {GIT_TIMEOUT_SECONDS}s") from exc
+
+        reverse = run_git("--reverse", "--check")
         if reverse.returncode == 0:
-            reverted = subprocess.run(
-                ["git", "apply", "--reverse", "--whitespace=nowarn", str(patch_path)],
-                cwd=cwd,
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            reverted = run_git("--reverse")
             fail(
                 reverted.returncode != 0,
                 "rollback_failed",
-                reverted.stderr.strip() or "orphan producer patch rollback failed",
+                reverted.stderr.decode("utf-8", errors="replace").strip() or "orphan producer patch rollback failed",
             )
-        elif forward.returncode != 0:
+        else:
+            # Neither pre- nor post-image is provable: the tree must hold
+            # either the preimage (nothing to undo) or nothing verifiable
+            # (corruption). Only the forward-applicable preimage is safe to
+            # record as rolled back.
+            forward = run_git("--check")
             fail(
-                True,
+                forward.returncode != 0,
                 "rollback_failed",
-                reverse.stderr.strip() or "orphan producer patch cannot be rolled back cleanly",
+                reverse.stderr.decode("utf-8", errors="replace").strip() or "orphan producer patch cannot be rolled back cleanly",
             )
         journal["status"] = "rolled_back"
         journal["rolledBackAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        journal.pop("mac", None)
+        journal["mac"] = record_mac(journal, auth_key)
         write_bytes_atomic(journal_path, (canonical(journal) + "\n").encode("utf-8"))
 
 
@@ -2865,6 +3030,13 @@ def rollback_attempt_patch(cwd: Path, attempt: dict[str, Any], applied: dict[str
     journal_path = artifact_dir / f"rollback-{rollback_id}.json"
     write_bytes_atomic(patch_path, patch_data)
 
+    auth_key = journal_auth_key(artifact_dir, create=True)
+
+    def write_rollback_journal(body: dict[str, Any]) -> None:
+        body.pop("mac", None)
+        body["mac"] = record_mac(body, auth_key)
+        write_bytes_atomic(journal_path, (canonical(body) + "\n").encode("utf-8"))
+
     journal = {
         "sha256": rollback_sha,
         "cwd": str(cwd.resolve()),
@@ -2885,46 +3057,49 @@ def rollback_attempt_patch(cwd: Path, attempt: dict[str, Any], applied: dict[str
             "rollback_journal_corrupt",
             f"patch rollback journal does not match rejected attempt: {journal_path}",
         )
+        fail(
+            "mac" in observed_journal and not record_mac_valid(observed_journal, auth_key),
+            "rollback_journal_corrupt",
+            f"patch rollback journal authentication witness is invalid: {journal_path}",
+        )
         journal = observed_journal
     else:
-        write_bytes_atomic(journal_path, (canonical(journal) + "\n").encode("utf-8"))
+        write_rollback_journal(journal)
 
-    reverse = subprocess.run(
-        ["git", "apply", "--reverse", "--check", "--whitespace=nowarn", str(patch_path)],
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    forward = subprocess.run(
-        ["git", "apply", "--check", "--whitespace=nowarn", str(patch_path)],
-        cwd=cwd,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+    def git_check(*extra: str) -> subprocess.CompletedProcess[bytes]:
+        try:
+            return subprocess.run(
+                ["git", "apply", "--whitespace=nowarn", *extra, "-"],
+                cwd=cwd,
+                input=patch_data,
+                capture_output=True,
+                check=False,
+                timeout=GIT_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeFailure("rollback_failed", f"git apply exceeded {GIT_TIMEOUT_SECONDS}s") from exc
+
     if journal["status"] == "rolled_back":
+        forward = git_check("--check")
         fail(
             forward.returncode != 0,
             "rollback_journal_mismatch",
             "journal says the rejected patch was rolled back, but the working tree disagrees",
         )
-    elif reverse.returncode == 0:
-        reverted = subprocess.run(
-            ["git", "apply", "--reverse", "--whitespace=nowarn", str(patch_path)],
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        fail(reverted.returncode != 0, "rollback_failed", reverted.stderr.strip() or "rejected producer patch rollback failed")
-        journal["status"] = "rolled_back"
-        write_bytes_atomic(journal_path, (canonical(journal) + "\n").encode("utf-8"))
-    elif forward.returncode == 0:
-        journal["status"] = "rolled_back"
-        write_bytes_atomic(journal_path, (canonical(journal) + "\n").encode("utf-8"))
     else:
-        fail(True, "rollback_failed", reverse.stderr.strip() or "rejected producer patch cannot be rolled back cleanly")
+        reverse = git_check("--reverse", "--check")
+        if reverse.returncode == 0:
+            reverted = git_check("--reverse")
+            fail(reverted.returncode != 0, "rollback_failed", reverted.stderr.decode("utf-8", errors="replace").strip() or "rejected producer patch rollback failed")
+        else:
+            forward = git_check("--check")
+            fail(
+                forward.returncode != 0,
+                "rollback_failed",
+                reverse.stderr.decode("utf-8", errors="replace").strip() or "rejected producer patch cannot be rolled back cleanly",
+            )
+        journal["status"] = "rolled_back"
+        write_rollback_journal(journal)
 
     applied["rolledBackAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
 
@@ -2989,6 +3164,12 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
                 f"sealed attempt {expected_id} is not running",
             )
 
+        if kind == "producer":
+            # A previous process may have applied a prepared journal and died
+            # before persisting status=applied. Reverse that authenticated
+            # orphan before validating the retried settlement; never reclaim
+            # an already-present postimage as this attempt's work.
+            rollback_orphaned_patch_journals(cwd, explicit_state_dir, state)
         observed_tokens = 0
         producer_patches: list[dict[str, Any]] = []
         successful_producer_ids: list[str] = []
@@ -3149,7 +3330,7 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
                     attempt["status"] = "completed"
                     attempt["result"] = data
             except RuntimeFailure as exc:
-                if exc.code == "state_corrupt":
+                if exc.code in {"state_corrupt", "subprocess_timeout"}:
                     raise
                 record_failure(attempt, code=exc.code, reason=exc.message, failure_kind="invalid")
 
@@ -3248,6 +3429,206 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
     return output(state)
 
 
+def ui_evidence_bound(code: str, criterion: str) -> bool:
+    """Mirror the adapter's challenge-bound assertion test."""
+
+    def skip_quoted_or_comment(text: str, index: int) -> int | None:
+        if text.startswith("//", index):
+            newline = text.find("\n", index + 2)
+            return len(text) if newline < 0 else newline + 1
+        if text.startswith("/*", index):
+            closing = text.find("*/", index + 2)
+            return None if closing < 0 else closing + 2
+        if index >= len(text) or text[index] not in ("'", '"', "`"):
+            return index
+        quote = text[index]
+        cursor = index + 1
+        while cursor < len(text):
+            if text[cursor] == "\\":
+                cursor += 2
+                continue
+            if quote == "`" and text.startswith("${", cursor):
+                interpolation_end = skip_balanced_group(text, cursor + 1)
+                if interpolation_end is None:
+                    return None
+                cursor = interpolation_end
+                continue
+            if text[cursor] == quote:
+                return cursor + 1
+            cursor += 1
+        return None
+
+    def skip_balanced_group(text: str, opening: int) -> int | None:
+        closings = {"(": ")", "[": "]", "{": "}"}
+        stack = [closings[text[opening]]]
+        cursor = opening + 1
+        while cursor < len(text):
+            skipped = skip_quoted_or_comment(text, cursor)
+            if skipped is None:
+                return None
+            if skipped != cursor:
+                cursor = skipped
+                continue
+            char = text[cursor]
+            if char in closings:
+                stack.append(closings[char])
+            elif char in (")", "]", "}"):
+                if not stack or char != stack[-1]:
+                    return None
+                stack.pop()
+                if not stack:
+                    return cursor + 1
+            cursor += 1
+        return None
+
+    def strip_comments(expression: str) -> str:
+        pieces: list[str] = []
+        cursor = 0
+        while cursor < len(expression):
+            if expression.startswith("//", cursor):
+                newline = expression.find("\n", cursor + 2)
+                cursor = len(expression) if newline < 0 else newline + 1
+                pieces.append(" ")
+                continue
+            if expression.startswith("/*", cursor):
+                closing = expression.find("*/", cursor + 2)
+                if closing < 0:
+                    return ""
+                cursor = closing + 2
+                pieces.append(" ")
+                continue
+            skipped = skip_quoted_or_comment(expression, cursor)
+            if skipped is None:
+                return ""
+            if skipped != cursor:
+                pieces.append(expression[cursor:skipped])
+                cursor = skipped
+                continue
+            pieces.append(expression[cursor])
+            cursor += 1
+        return "".join(pieces)
+
+    def normalized_expression(expression: str) -> str:
+        normalized = strip_comments(expression).strip()
+        while normalized.startswith("("):
+            closing = skip_balanced_group(normalized, 0)
+            if closing != len(normalized):
+                break
+            normalized = normalized[1:-1].strip()
+        return normalized
+
+    def is_literal_expression(expression: str) -> bool:
+        normalized = normalized_expression(expression)
+        if normalized in {"true", "false", "null", "undefined"}:
+            return True
+        if re.fullmatch(r"[+-]?(?:0[xX][\da-fA-F]+|0[bB][01]+|0[oO][0-7]+|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(?:n)?", normalized):
+            return True
+        if normalized[:1] in {"'", '"', "`"}:
+            return skip_quoted_or_comment(normalized, 0) == len(normalized)
+        if normalized[:1] in {"{", "["}:
+            return skip_balanced_group(normalized, 0) == len(normalized)
+        return False
+
+    def top_level_comparison(expression: str) -> tuple[int, int] | None:
+        stack: list[str] = []
+        closings = {"(": ")", "[": "]", "{": "}"}
+        operators = ("!==", "===", "==", "!=", "<=", ">=", "<", ">")
+        cursor = 0
+        while cursor < len(expression):
+            skipped = skip_quoted_or_comment(expression, cursor)
+            if skipped is None:
+                return None
+            if skipped != cursor:
+                cursor = skipped
+                continue
+            char = expression[cursor]
+            if char in closings:
+                stack.append(closings[char])
+            elif char in (")", "]", "}"):
+                if not stack or char != stack[-1]:
+                    return None
+                stack.pop()
+            elif not stack:
+                operator = next((candidate for candidate in operators if expression.startswith(candidate, cursor)), None)
+                if operator is not None:
+                    return cursor, len(operator)
+            cursor += 1
+        return None
+
+    def is_literal_comparison(expression: str) -> bool:
+        normalized = normalized_expression(expression)
+        comparison = top_level_comparison(normalized)
+        if comparison is None:
+            return False
+        index, length = comparison
+        return is_literal_expression(normalized[:index]) and is_literal_expression(normalized[index + length:])
+
+    def first_assert_argument(text: str, opening: int, closing: int) -> str | None:
+        stack: list[str] = []
+        closings = {"(": ")", "[": "]", "{": "}"}
+        cursor = opening + 1
+        while cursor < closing:
+            skipped = skip_quoted_or_comment(text, cursor)
+            if skipped is None:
+                return None
+            if skipped != cursor:
+                cursor = skipped
+                continue
+            char = text[cursor]
+            if char in closings:
+                stack.append(closings[char])
+            elif char in (")", "]", "}"):
+                if not stack or char != stack[-1]:
+                    return None
+                stack.pop()
+            elif char == "," and not stack:
+                return text[opening + 1:cursor]
+            cursor += 1
+        return text[opening + 1:closing]
+
+    cursor = 0
+    while cursor < len(code):
+        skipped = skip_quoted_or_comment(code, cursor)
+        if skipped is None:
+            return False
+        if skipped != cursor:
+            cursor = skipped
+            continue
+        if code.startswith("assert", cursor):
+            before = code[cursor - 1] if cursor else ""
+            after_index = cursor + len("assert")
+            after = code[after_index] if after_index < len(code) else ""
+            if before != "." and not re.match(r"[A-Za-z0-9_$]", before) and not re.match(r"[A-Za-z0-9_$]", after):
+                opening = after_index
+                while opening < len(code):
+                    next_index = skip_quoted_or_comment(code, opening)
+                    if next_index is None:
+                        return False
+                    if next_index != opening:
+                        opening = next_index
+                    elif code[opening].isspace():
+                        opening += 1
+                    else:
+                        break
+                if opening < len(code) and code[opening] == "(":
+                    call_end = skip_balanced_group(code, opening)
+                    if call_end is not None:
+                        first_argument = first_assert_argument(code, opening, call_end - 1)
+                        body = code[opening + 1:call_end - 1]
+                        if (
+                            criterion in body
+                            and first_argument is not None
+                            and not is_literal_expression(first_argument)
+                            and not is_literal_comparison(first_argument)
+                        ):
+                            return True
+                        # Nested assertion calls cannot add stronger evidence
+                        # than their enclosing assertion body; skip the body
+                        # once to keep parsing linear in untrusted code size.
+                        cursor = call_end
+                        continue
+        cursor += 1
+    return False
 def command_record_evidence(cwd: Path, explicit_state_dir: str | None, request: dict[str, Any]) -> dict[str, Any]:
     def apply(state: dict[str, Any]) -> None:
         fail(state["phase"] != "pregate_pending", "illegal_transition", "host UI evidence is accepted only before the deterministic pre-gate")
@@ -3276,12 +3657,10 @@ def command_record_evidence(cwd: Path, explicit_state_dir: str | None, request: 
         else:
             code = require_text(invocation.get("code"), "invocation.code")
             criterion = require_text(challenge.get("criterion"), "challenge.criterion")
-            has_assertion = re.search(r"\bassert\s*\(", code) is not None
-            constant_assertion = re.search(r"\bassert\s*\(\s*true\s*(?:,|\))", code, re.IGNORECASE) is not None
             fail(
-                action != "run" or not has_assertion or constant_assertion or criterion not in code,
+                action != "run" or not ui_evidence_bound(code, criterion),
                 "evidence_invalid",
-                "UI exercise evidence must assert a non-constant observation and name the exact issued criterion",
+                "UI exercise evidence must assert a non-constant observation bound to the exact issued criterion",
             )
         completed = {
             record.get("stage")
@@ -3369,7 +3748,16 @@ def run_diff_check(cwd: Path, files: list[str], max_bytes: int) -> dict[str, Any
     if not files:
         return {"argv": ["git", "diff", "--check", "--"], "files": [], "exitCode": 0, "output": ""}
     argv = ["git", "diff", "--check", "--", *files]
-    completed = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False)
+    try:
+        completed = subprocess.run(argv, cwd=cwd, text=True, capture_output=True, check=False, timeout=GIT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "argv": argv,
+            "files": files,
+            "exitCode": None,
+            "timeout": True,
+            "output": bounded_process_output(exc.stdout, exc.stderr, max_bytes),
+        }
     return {
         "argv": argv,
         "files": files,
@@ -3845,18 +4233,29 @@ def telemetry_log_path(config: dict[str, Any]) -> Path:
     return SKILL_DIR / config.get("telemetry", {}).get("log", "telemetry/routing-log.jsonl")
 
 
-def telemetry_exists(config: dict[str, Any], run_id: str, ticket_id_value: str) -> bool:
+def recorded_telemetry_keys(config: dict[str, Any], run_id: str) -> set[tuple[str, str]]:
+    """One scan of the routing log yields every (run, ticket) PASS key.
+
+    Acceptance records K tickets per wave; the old per-ticket
+    `telemetry_exists` re-read the whole log for each of them (O(K*L)). The
+    set below is built once per accept command.
+    """
     path = telemetry_log_path(config)
     if not path.is_file():
-        return False
+        return set()
+    keys: set[tuple[str, str]] = set()
     for line in path.read_text(encoding="utf-8").splitlines():
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
             raise RuntimeFailure("telemetry_corrupt", f"invalid JSONL in {path}")
-        if isinstance(row, dict) and row.get("run_id") == run_id and str(row.get("ticket")) == ticket_id_value and row.get("verdict") == "PASS":
-            return True
-    return False
+        if isinstance(row, dict) and row.get("run_id") == run_id and row.get("verdict") == "PASS":
+            keys.add((run_id, str(row.get("ticket"))))
+    return keys
+
+
+def telemetry_exists(config: dict[str, Any], run_id: str, ticket_id_value: str) -> bool:
+    return (run_id, ticket_id_value) in recorded_telemetry_keys(config, run_id)
 
 
 def command_accept(cwd: Path, explicit_state_dir: str | None, request: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
@@ -3900,6 +4299,7 @@ def command_accept(cwd: Path, explicit_state_dir: str | None, request: dict[str,
 
         shape = telemetry_shape_for_entry(config, state["entry"])
         budget_exhausted = False
+        already_recorded = recorded_telemetry_keys(config, state["runId"])
         for attempt in accepted:
             ticket = str(attempt["ticketId"])
             row: dict[str, Any] = {
@@ -3921,21 +4321,42 @@ def command_accept(cwd: Path, explicit_state_dir: str | None, request: dict[str,
             if sweep is not None:
                 row["ledger_hash"] = sweep["ledgerHash"]
                 row["dag_hash"] = sweep["dagHash"]
-            if telemetry_exists(config, state["runId"], ticket):
+            if (state["runId"], ticket) in already_recorded:
                 attempt["status"] = "recorded"
                 continue
-            completed = subprocess.run(
-                [sys.executable, str(TELEMETRY_TOOL), canonical(row), "--skill-dir", str(SKILL_DIR), "--run-id", state["runId"]],
-                text=True,
-                capture_output=True,
-                check=False,
-            )
+            try:
+                completed = subprocess.run(
+                    [sys.executable, str(TELEMETRY_TOOL), canonical(row), "--skill-dir", str(SKILL_DIR), "--run-id", state["runId"]],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=TELEMETRY_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeFailure("telemetry_failed", f"telemetry writer exceeded {TELEMETRY_TIMEOUT_SECONDS}s") from exc
             if completed.returncode not in {0, 2}:
                 raise RuntimeFailure("telemetry_failed", completed.stderr.strip() or "telemetry writer rejected an acceptance record")
             telemetry_events.append({"ticket": ticket, "exitCode": completed.returncode, "stdout": completed.stdout.strip()})
             attempt["status"] = "recorded"
             if completed.returncode == 2:
                 budget_exhausted = True
+        # Recompute the canonical run budget even when every PASS row was
+        # deduplicated after a prior writer timed out post-append. Exit code 2
+        # is part of the persisted budget verdict, not merely this process's
+        # transient writer result.
+        try:
+            budget_check = subprocess.run(
+                [sys.executable, str(TELEMETRY_TOOL), "--check-only", "--skill-dir", str(SKILL_DIR), "--run-id", state["runId"]],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=TELEMETRY_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeFailure("telemetry_failed", f"telemetry budget check exceeded {TELEMETRY_TIMEOUT_SECONDS}s") from exc
+        if budget_check.returncode not in {0, 2}:
+            raise RuntimeFailure("telemetry_failed", budget_check.stderr.strip() or "telemetry writer could not reconstruct the run budget")
+        budget_exhausted = budget_check.returncode == 2
 
         if sweep is not None:
             sweep["acceptedTicketIds"] = sorted(set(sweep["acceptedTicketIds"]) | set(accepted_ticket_ids_now))
@@ -3963,7 +4384,7 @@ def command_status(
             recover_replacement_transactions(cwd, explicit_state_dir)
             state = find_active_run(cwd, explicit_state_dir)
         if state is None:
-            return {"active": False}
+            return {"protocolVersion": PROTOCOL_VERSION, "active": False}
     else:
         run_id = validate_run_id(requested_run_id)
         state_path, lock_path = state_paths(cwd, explicit_state_dir, run_id)

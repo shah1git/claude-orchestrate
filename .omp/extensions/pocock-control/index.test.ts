@@ -40,7 +40,7 @@ test("a runtime-mismatched mirror can be replaced by a new run", async () => {
 	const manifestFingerprint = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 	const harness = adapterHarness((command, request) => {
 		if (command === "status") {
-			return {
+			return coreResponse({
 				card: {
 					...card("old-run", 4, "ready"),
 					manifestFingerprint,
@@ -48,10 +48,10 @@ test("a runtime-mismatched mirror can be replaced by a new run", async () => {
 					blockedReason: "effective Pocock runtime differs",
 					runtimeMismatch: { expected: "old", observed: "new" },
 				},
-			};
+			});
 		}
-		if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
-		if (command === "start") return { card: { ...card("new-run", 0, "frontier_admission"), manifestFingerprint } };
+		if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+		if (command === "start") return coreCard({ ...card("new-run", 0, "frontier_admission"), manifestFingerprint });
 		throw new Error(`Unexpected core command ${command}: ${JSON.stringify(request)}`);
 	});
 
@@ -77,9 +77,9 @@ test("status without a mirrored run hydrates the core-owned active run", async (
 	const harness = adapterHarness((command, request) => {
 		if (command === "status") {
 			expect(request).toEqual({ manifestFingerprint });
-			return { card: { ...card("durable-run", 7, "ready"), manifestFingerprint } };
+			return coreCard({ ...card("durable-run", 7, "ready"), manifestFingerprint });
 		}
-		if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
+		if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
 		throw new Error(`Unexpected core command ${command}: ${JSON.stringify(request)}`);
 	});
 
@@ -92,12 +92,12 @@ test("status without a mirrored run hydrates the core-owned active run", async (
 
 test("status without a mirrored run reports an empty workspace", async () => {
 	const harness = adapterHarness((command, request) => {
-		if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
+		if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
 		if (command === "status") {
 			expect(request).toEqual({
 				manifestFingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 			});
-			return { active: false };
+			return coreResponse({ active: false });
 		}
 		throw new Error(`Unexpected core command ${command}: ${JSON.stringify(request)}`);
 	});
@@ -111,6 +111,7 @@ test("status without a mirrored run reports an empty workspace", async () => {
 type CoreRequest = {
 	command: string;
 	request: Record<string, unknown>;
+	signal: AbortSignal | undefined;
 };
 
 type ToolExecute = (
@@ -139,6 +140,14 @@ const card = (runId: string, revision: number, phase: string) => ({
 	phase,
 	manifestFingerprint: "manifest",
 });
+
+function coreResponse(response: Record<string, unknown>): Record<string, unknown> {
+	return { protocolVersion: 1, ...response };
+}
+
+function coreCard(value: Record<string, unknown>): Record<string, unknown> {
+	return coreResponse({ card: value });
+}
 
 let harnessSession = 0;
 
@@ -200,7 +209,7 @@ function adapterHarness(respond?: CoreResponder) {
 		sendMessage: (...args: unknown[]) => {
 			messages.push(args);
 		},
-		exec: async (_program: string, args: string[]) => {
+		exec: async (_program: string, args: string[], options?: { signal?: AbortSignal }) => {
 			const requestPath = args[args.indexOf("--request-file") + 1];
 			if (!requestPath) throw new Error("Pocock core request path is missing");
 			const parsed: unknown = JSON.parse(await Bun.file(requestPath).text());
@@ -208,13 +217,13 @@ function adapterHarness(respond?: CoreResponder) {
 			const request = parsed;
 			const command = args[1];
 			if (!command) throw new Error("Pocock core command is missing");
-			requests.push({ command, request });
+			requests.push({ command, request, signal: options?.signal });
 			const response = respond?.(command, request) ?? (
 				command === "metadata"
-					? { omp: { slots: { scout: { alias: "@pocock-scout" } } } }
+					? coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } })
 					: command === "start"
-						? card(`${request.entry}-run`, 0, "producer_dispatch_pending")
-						: card(String(request.runId), Number(request.revision) + 1, "completed")
+						? coreCard(card(`${request.entry}-run`, 0, "producer_dispatch_pending"))
+						: coreCard(card(String(request.runId), Number(request.revision) + 1, "completed"))
 			);
 			if (response instanceof Error) throw response;
 			return { code: 0, killed: false, stdout: JSON.stringify(response), stderr: "" };
@@ -243,6 +252,66 @@ function adapterHarness(respond?: CoreResponder) {
 		sessionStop: hooks.get("session_stop")!,
 	};
 }
+
+describe("Pocock core protocol", () => {
+	test("rejects a core response without protocolVersion", async () => {
+		const harness = adapterHarness(command => {
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") return { card: card("missing-version", 0, "ready") };
+			throw new Error(`Unexpected core command ${command}`);
+		});
+
+		const result = await harness.enter(
+			"missing-protocol-version",
+			{ entry: "full", objective: "Validate response protocol" },
+			undefined,
+			undefined,
+			harness.context,
+		);
+
+		expect(result).toMatchObject({
+			isError: true,
+			details: { error: "Pocock core start protocol mismatch: expected v1" },
+		});
+	});
+
+	test("rejects a state card returned at the response root", async () => {
+		const harness = adapterHarness(command => {
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") return coreResponse(card("root-card", 0, "ready"));
+			throw new Error(`Unexpected core command ${command}`);
+		});
+
+		const result = await harness.enter(
+			"root-card",
+			{ entry: "full", objective: "Validate response envelope" },
+			undefined,
+			undefined,
+			harness.context,
+		);
+
+		expect(result).toMatchObject({
+			isError: true,
+			details: { error: "Pocock core start did not return a state card" },
+		});
+	});
+
+	test("always passes a signal to core execution", async () => {
+		const harness = adapterHarness();
+
+		const result = await harness.enter(
+			"core-timeout-signal",
+			{ entry: "full", objective: "Observe core execution signal" },
+			undefined,
+			undefined,
+			harness.context,
+		);
+
+		expect(result.isError).not.toBe(true);
+		expect(harness.requests).toHaveLength(2);
+		for (const request of harness.requests) expect(request.signal).toBeInstanceOf(AbortSignal);
+	});
+});
 
 describe("Sweep adapter requests", () => {
 	const harness = adapterHarness();
@@ -315,20 +384,19 @@ describe("Pocock live dispatch observability", () => {
 		};
 		let manifestFingerprint = "";
 		const harness = adapterHarness((command, request) => {
-			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
 			if (command === "start") {
 				manifestFingerprint = String(request.manifestFingerprint);
-				return { ...card("projection-run", 0, "producer_dispatch_pending"), manifestFingerprint };
+				return coreCard({ ...card("projection-run", 0, "producer_dispatch_pending"), manifestFingerprint });
 			}
-			if (command === "transition") return { ...projectedCard, manifestFingerprint };
+			if (command === "transition") return coreCard({ ...projectedCard, manifestFingerprint });
 			if (command === "seal-task") {
-				return {
-					...projectedCard,
-					manifestFingerprint,
+				return coreResponse({
+					card: { ...projectedCard, manifestFingerprint },
 					dispatchId: "dispatch-opaque",
 					attemptIds: [actor.attemptId],
 					taskInput: sealedTaskInput,
-				};
+				});
 			}
 			throw new Error(`Unexpected core command ${command} for ${String(request.runId)}`);
 		});
@@ -400,11 +468,11 @@ describe("Pocock live dispatch observability", () => {
 		};
 		let transitions = 0;
 		const harness = adapterHarness(command => {
-			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
-			if (command === "start") return card("clear-run", 0, "producer_dispatch_pending");
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") return coreCard(card("clear-run", 0, "producer_dispatch_pending"));
 			if (command === "transition") {
 				transitions += 1;
-				return transitions === 1 ? actorCard : card("clear-run", 2, "completed");
+				return coreCard(transitions === 1 ? actorCard : card("clear-run", 2, "completed"));
 			}
 			throw new Error(`Unexpected core command ${command}`);
 		});
@@ -452,21 +520,20 @@ describe("Pocock live dispatch observability", () => {
 		};
 		let manifestFingerprint = "";
 		const harness = adapterHarness((command, request) => {
-			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
 			if (command === "start") {
 				manifestFingerprint = String(request.manifestFingerprint);
-				return { ...card("result-run", 0, "producer_dispatch_pending"), manifestFingerprint };
+				return coreCard({ ...card("result-run", 0, "producer_dispatch_pending"), manifestFingerprint });
 			}
 			if (command === "seal-task") {
-				return {
-					...card("result-run", 1, "producer_dispatch_pending"),
-					manifestFingerprint,
+				return coreResponse({
+					card: { ...card("result-run", 1, "producer_dispatch_pending"), manifestFingerprint },
 					dispatchId: "dispatch-results",
 					attemptIds: ["attempt-1", "attempt-2"],
 					taskInput: sealedTaskInput,
-				};
+				});
 			}
-			if (command === "record-task-result") return { ...card("result-run", 2, "completed"), manifestFingerprint };
+			if (command === "record-task-result") return coreCard({ ...card("result-run", 2, "completed"), manifestFingerprint });
 			throw new Error(`Unexpected core command ${command}`);
 		});
 
@@ -519,9 +586,9 @@ describe("Pocock live dispatch observability", () => {
 	test("gates nonterminal sessions but allows terminal sessions to stop", async () => {
 		const runId = "stop-run";
 		const harness = adapterHarness(command => {
-			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
-			if (command === "start") return card(runId, 0, "ready");
-			if (command === "transition") return card(runId, 1, "completed");
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") return coreCard(card(runId, 0, "ready"));
+			if (command === "transition") return coreCard(card(runId, 1, "completed"));
 			throw new Error(`Unexpected core command ${command}`);
 		});
 
@@ -556,9 +623,9 @@ describe("Pocock live dispatch observability", () => {
 describe("Hub lifecycle guard", () => {
 	test("blocks every Hub operation only for this session's nonterminal Pocock run", async () => {
 		const harness = adapterHarness(command => {
-			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
-			if (command === "start") return card("hub-guard-run", 0, "producer_dispatch_pending");
-			if (command === "transition") return card("hub-guard-run", 1, "completed");
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") return coreCard(card("hub-guard-run", 0, "producer_dispatch_pending"));
+			if (command === "transition") return coreCard(card("hub-guard-run", 1, "completed"));
 			throw new Error(`Unexpected core command ${command}`);
 		});
 		const hubCall = (op: string) => harness.toolCall(
@@ -597,19 +664,18 @@ describe("Hub lifecycle guard", () => {
 		};
 		let manifestFingerprint = "";
 		const harness = adapterHarness((command, request) => {
-			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
 			if (command === "start") {
 				manifestFingerprint = String(request.manifestFingerprint);
-				return { ...card("hub-fail-closed", 0, "producer_dispatch_pending"), manifestFingerprint };
+				return coreCard({ ...card("hub-fail-closed", 0, "producer_dispatch_pending"), manifestFingerprint });
 			}
 			if (command === "seal-task") {
-				return {
-					...card("hub-fail-closed", 1, "producer_running"),
-					manifestFingerprint,
+				return coreResponse({
+					card: { ...card("hub-fail-closed", 1, "producer_running"), manifestFingerprint },
 					dispatchId: "dispatch-fail-closed",
 					attemptIds: ["attempt-1"],
 					taskInput: sealedTaskInput,
-				};
+				});
 			}
 			throw new Error(`Unexpected core command ${command}`);
 		});
@@ -647,17 +713,17 @@ describe("Hub lifecycle guard", () => {
 
 	test("status without runId replaces a terminal mirror with the core-owned active run", async () => {
 		const harness = adapterHarness((command, request) => {
-			if (command === "metadata") return { omp: { slots: { scout: { alias: "@pocock-scout" } } } };
-			if (command === "start") return card("finished-run", 0, "ready");
-			if (command === "transition") return card("finished-run", 1, "completed");
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") return coreCard(card("finished-run", 0, "ready"));
+			if (command === "transition") return coreCard(card("finished-run", 1, "completed"));
 			if (command === "status") {
 				expect(request).toEqual({
 					manifestFingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 				});
-				return {
+				return coreCard({
 					...card("resumed-run", 4, "ready"),
 					manifestFingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-				};
+				});
 			}
 			throw new Error(`Unexpected core command ${command}`);
 		});
@@ -720,7 +786,7 @@ describe("uiEvidenceBinding", () => {
 		})).toBeUndefined();
 	});
 
-	test("requires recorded open evidence and a host assertion before exercise", () => {
+	test("requires recorded open evidence and a criterion-bound non-literal assertion before exercise", () => {
 		const opened = { ...card, evidenceRequests: [{ ...challenge, completedStages: ["open"] }] };
 		expect(uiEvidenceBinding(card, {
 			toolName: "browser",
@@ -736,10 +802,42 @@ describe("uiEvidenceBinding", () => {
 		})).toBeUndefined();
 		expect(uiEvidenceBinding(opened, {
 			toolName: "browser",
+			input: { action: "run", name: challenge.token, code: "assert(1 === 1, 'fixture renders')" },
+		})).toBeUndefined();
+		expect(uiEvidenceBinding(opened, {
+			toolName: "browser",
+			input: { action: "run", name: challenge.token, code: "assert({}, 'fixture renders')" },
+		})).toBeUndefined();
+		expect(uiEvidenceBinding(opened, {
+			toolName: "browser",
+			input: {
+				action: "run",
+				name: challenge.token,
+				code: "console.assert(document.body.textContent, 'fixture renders')",
+			},
+		})).toBeUndefined();
+		expect(uiEvidenceBinding(opened, {
+			toolName: "browser",
+			input: {
+				action: "run",
+				name: challenge.token,
+				code: "const rendered = document.title.length > 0; assert(rendered); 'fixture renders'",
+			},
+		})).toBeUndefined();
+		expect(uiEvidenceBinding(opened, {
+			toolName: "browser",
 			input: {
 				action: "run",
 				name: challenge.token,
 				code: "const rendered = document.title.length > 0; assert(rendered, 'fixture renders')",
+			},
+		})?.stage).toBe("exercise");
+		expect(uiEvidenceBinding(opened, {
+			toolName: "browser",
+			input: {
+				action: "run",
+				name: challenge.token,
+				code: "assert(document.body.textContent?.includes(`${value})`), 'fixture renders')",
 			},
 		})?.stage).toBe("exercise");
 	});

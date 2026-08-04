@@ -407,8 +407,8 @@ cat <<'EOF'
     task.batch: true; task.enableEffort: true; task.showResolvedModelBadge: true
     task.isolation.mode: auto (дефолт); явный изолирующий backend тоже допустим
     task.isolation.apply: false; task.isolation.merge: patch
-    task.maxRecursionDepth: 1; task.maxConcurrency: 6
-    retry.modelFallback: true
+    task.maxRecursionDepth: 1; task.maxConcurrency: 6; task.maxRuntimeMs: 1800000
+    retry.enabled: true; retry.modelFallback: true
 EOF
 
 for name in orchestrate orchestrate-frontier orchestrate-sweep; do

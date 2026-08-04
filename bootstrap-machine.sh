@@ -54,33 +54,73 @@ backup_path() {
   local source="$1" label="$2" stamp backup
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   backup="${BACKUP_DIR}/${label}.${stamp}.$$"
-  mkdir -p "${BACKUP_DIR}"
-  if [ -L "${source}" ]; then
-    cp -P "${source}" "${backup}"
-  else
-    cp -p "${source}" "${backup}"
-    chmod 600 "${backup}"
-  fi
+  mkdir -p "${BACKUP_DIR}" || return 1
+  # Относительный симлинк сломался бы после копирования в BACKUP_DIR. Сохраняем
+  # разрешённое переносимое содержимое, а не текст ссылки.
+  cp -pL "${source}" "${backup}" || return 1
+  chmod 600 "${backup}" || return 1
   printf '%s\n' "${backup}"
 }
 
 install_portable_file() {
-  local source="$1" destination="$2" label="$3" backup
-  if [ -e "${destination}" ] || [ -L "${destination}" ]; then
-    if [ ! -L "${destination}" ] && [ -f "${destination}" ] \
-       && cmp -s "${source}" "${destination}"; then
-      chmod 600 "${destination}"
+  local source="$1" destination="$2" label="$3" backup="" staging="" suffix=1
+  local write_destination="${destination}" had_destination=0
+  if [ -L "${destination}" ]; then
+    write_destination="$(readlink -f "${destination}")" \
+      || die "${label}: не удалось разрешить симлинк ${destination}"
+    [ -f "${write_destination}" ] \
+      || die "${label}: цель симлинка ${write_destination} не является обычным файлом"
+  elif [ -e "${destination}" ]; then
+    [ -f "${destination}" ] \
+      || die "${destination} существует и не является обычным файлом"
+  fi
+
+  if [ -e "${write_destination}" ]; then
+    if cmp -s "${source}" "${write_destination}"; then
+      chmod 600 "${write_destination}"
       ok "${label}: уже совпадает с переносимым снимком"
       return
     fi
-    [ -f "${destination}" ] || [ -L "${destination}" ] \
-      || die "${destination} существует и не является обычным файлом или симлинком"
-    backup="$(backup_path "${destination}" "$(basename "${destination}")")"
-    rm -f "${destination}"
+    had_destination=1
+  fi
+
+  # Симлинк конфигурации остаётся точкой входа: атомарно заменяется только его
+  # целевой файл, а не сама ссылка.
+  staging="${write_destination}.staging.$$"
+  while [ -e "${staging}" ] || [ -L "${staging}" ]; do
+    staging="${write_destination}.staging.$$.${suffix}"
+    suffix=$((suffix + 1))
+  done
+  if ! install -m 600 "${source}" "${staging}"; then
+    rm -f "${staging}"
+    die "${label}: не удалось подготовить переносимый снимок"
+  fi
+
+  if [ "${had_destination}" -eq 1 ]; then
+    if ! backup="$(backup_path "${write_destination}" "$(basename "${destination}")")"; then
+      rm -f "${staging}"
+      die "${label}: не удалось сохранить прежний файл"
+    fi
     warn "${label}: прежний файл сохранён в ${backup}"
   fi
-  install -m 600 "${source}" "${destination}"
+
+  if ! mv -f "${staging}" "${write_destination}"; then
+    rm -f "${staging}"
+    die "${label}: не удалось атомарно установить снимок"
+  fi
   ok "${label}: установлен"
+}
+
+# Проверяем зависимости следующего этапа до замены переносимых файлов: иначе
+# рабочий локальный config.yml можно было бы заменить снимком до отказа bootstrap-mac.sh.
+preflight_portable_install() {
+  require_command rsync
+  require_command gh
+  if ! readlink -f / >/dev/null 2>&1; then
+    die "readlink -f не поддерживается — он необходим bootstrap-mac.sh"
+  fi
+  OMP_BASE="$(omp config path)"
+  [ -n "${OMP_BASE}" ] || die "omp config path вернул пустой путь"
 }
 
 require_command git
@@ -103,9 +143,8 @@ BOOTSTRAP="${CLAUDE_ORCHESTRATE_DIR}/bootstrap-mac.sh"
 [ -f "${BOOTSTRAP}" ] || die "в checkout отсутствует ${BOOTSTRAP}"
 
 python3 "${VALIDATOR}" "${PROFILE}"
+preflight_portable_install
 
-OMP_BASE="$(omp config path)"
-[ -n "${OMP_BASE}" ] || die "omp config path вернул пустой путь"
 mkdir -p "${OMP_BASE}"
 
 echo "== Переносимый профиль OMP =="

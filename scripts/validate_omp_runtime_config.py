@@ -20,6 +20,8 @@ EXPECTED_VALUES = {
     "task.isolation.merge": "patch",
     "task.maxRecursionDepth": 1,
     "task.maxConcurrency": 6,
+    "task.maxRuntimeMs": 1800000,
+    "retry.enabled": True,
     "retry.modelFallback": True,
 }
 
