@@ -34,12 +34,6 @@ modelRoles:
   pocock-lens-standards: google-antigravity/gemini-3.6-flash:high
   pocock-lens-spec: kimi-code/k3:high
   pocock-lens-critic: anthropic/claude-fable-5:max
-  pocock-scout-backup: alibaba-token-plan/qwen3.8-max
-  pocock-builder-backup: alibaba-token-plan/qwen3.8-max
-  pocock-architect-backup: alibaba-token-plan/qwen3.8-max
-  pocock-lens-standards-backup: xai-oauth/grok-4.5:high
-  pocock-lens-spec-backup: xai-oauth/grok-4.5:high
-  pocock-lens-critic-backup: xai-oauth/grok-4.5:xhigh
 modelTags:
   free:
     name: AG Opus
@@ -129,18 +123,12 @@ retry:
       - anthropic/claude-opus-5:high
       - openai-codex/gpt-5.6-terra:high
       - kimi-code/k3:high
-    pocock-scout: [openai-codex/gpt-5.4-mini:low, openai-codex/gpt-5.5:low]
-    pocock-builder: [openai-codex/gpt-5.6-sol:high, openai-codex/gpt-5.5:high]
-    pocock-architect: [openai-codex/gpt-5.6-terra:max, openai-codex/gpt-5.4:xhigh]
-    pocock-lens-standards: [google-antigravity/gemini-3.1-pro:high, google-antigravity/gemini-3.5-flash:high]
-    pocock-lens-spec: [kimi-code/k3-256k:high, kimi-code/kimi-k2.5:high]
-    pocock-lens-critic: [anthropic/claude-opus-5:high, anthropic/claude-sonnet-5:high]
-    pocock-scout-backup: [xai-oauth/grok-4.5:high]
-    pocock-builder-backup: [xai-oauth/grok-4.5:high]
-    pocock-architect-backup: [xai-oauth/grok-4.5:xhigh]
-    pocock-lens-standards-backup: [xai-oauth/grok-4.5:high]
-    pocock-lens-spec-backup: [xai-oauth/grok-4.5:high]
-    pocock-lens-critic-backup: [xai-oauth/grok-4.5:xhigh]
+    pocock-scout: [openai-codex/gpt-5.4-mini:low, openai-codex/gpt-5.5:low, alibaba-token-plan/qwen3.8-max, xai-oauth/grok-4.5:high]
+    pocock-builder: [openai-codex/gpt-5.6-sol:high, openai-codex/gpt-5.5:high, alibaba-token-plan/qwen3.8-max, xai-oauth/grok-4.5:high]
+    pocock-architect: [openai-codex/gpt-5.6-terra:max, openai-codex/gpt-5.4:xhigh, alibaba-token-plan/qwen3.8-max, xai-oauth/grok-4.5:xhigh]
+    pocock-lens-standards: [google-antigravity/gemini-3.1-pro:high, google-antigravity/gemini-3.5-flash:high, xai-oauth/grok-4.5:high]
+    pocock-lens-spec: [kimi-code/k3-256k:high, kimi-code/kimi-k2.5:high, xai-oauth/grok-4.5:high]
+    pocock-lens-critic: [anthropic/claude-opus-5:high, anthropic/claude-sonnet-5:high, xai-oauth/grok-4.5:xhigh]
 task:
   eager: preferred
   maxConcurrency: 6

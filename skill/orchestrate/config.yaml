@@ -28,7 +28,11 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 41
+version: 42
+# v42 (2026-08-04): удалены парные роли `-backup`. Техническая замена модели
+#      теперь имеет единственного владельца — OMP `retry.fallbackChains`.
+#      Повторы сохраняют Слот; смысловой провал повышает класс Тикета либо
+#      завершается блокировкой при исчерпании глубины.
 # v41 (2026-08-04): контур перестал знать модели. Ось «вендор/семейство»,
 #      белый список `known_vendors`, ранговые лейны, `critic_min_rank` и
 #      `standards_non_claude` упразднены; вместо них — двенадцать слотов,
@@ -1538,44 +1542,37 @@ omp:
   # Слот Pocock — это ИМЯ РОЛИ OMP и ничего больше. Контур никогда не называет
   # модель: назначение моделей ролям живёт в основном конфиге OMP, а
   # замена модели ВНУТРИ роли целиком принадлежит OMP (retry.fallbackChains) и
-  # контуру не видна. У каждого слота есть парный `-backup` — на него контур
-  # переходит, когда основной слот исчерпан.
+  # контуру не видна.
   slots:
-    scout:                 {alias: "@pocock-scout"}
-    scout-backup:          {alias: "@pocock-scout-backup"}
-    builder:               {alias: "@pocock-builder"}
-    builder-backup:        {alias: "@pocock-builder-backup"}
-    architect:             {alias: "@pocock-architect"}
-    architect-backup:      {alias: "@pocock-architect-backup"}
-    lens-standards:        {alias: "@pocock-lens-standards"}
-    lens-standards-backup: {alias: "@pocock-lens-standards-backup"}
-    lens-spec:             {alias: "@pocock-lens-spec"}
-    lens-spec-backup:      {alias: "@pocock-lens-spec-backup"}
-    lens-critic:           {alias: "@pocock-lens-critic"}
-    lens-critic-backup:    {alias: "@pocock-lens-critic-backup"}
+    scout:          {alias: "@pocock-scout"}
+    builder:        {alias: "@pocock-builder"}
+    architect:      {alias: "@pocock-architect"}
+    lens-standards: {alias: "@pocock-lens-standards"}
+    lens-spec:      {alias: "@pocock-lens-spec"}
+    lens-critic:    {alias: "@pocock-lens-critic"}
 
   # Класс тикета -> слот продюсера. Раньше соответствие было размазано между
   # кодом (CLASS_ROLE, EFFORT) и ранговым подбором слота; теперь оно однозначно
   # и целиком здесь.
   producers:
-    mechanical: {capability: scout,     slot: scout,     backup: scout-backup,     effort: lo}
-    skilled:    {capability: builder,   slot: builder,   backup: builder-backup,   effort: med}
-    judgment:   {capability: architect, slot: architect, backup: architect-backup, effort: hi}
+    mechanical: {capability: scout,     slot: scout,     effort: lo}
+    skilled:    {capability: builder,   slot: builder,   effort: med}
+    judgment:   {capability: architect, slot: architect, effort: hi}
 
   # Линза -> слот. Поиск независимого рецензента упразднён вместе с осью
   # «вендор/семейство». Независимость держится на двух проверках, и ни одна из
   # них не знает моделей: (1) слоты продюсеров и слоты линз не пересекаются,
-  # слоты трёх линз попарно различны, primary != backup — проверяется на
-  # конфиге; (2) перед раздачей линз ядро отклоняет волну, если разрешённая
+  # слоты трёх линз попарно различны — проверяется на конфиге; (2) перед
+  # раздачей линз ядро отклоняет волну, если разрешённая
   # модель линзы совпала строка-в-строку с разрешённой моделью продюсера этой
   # волны. Вторая проверка — сравнение непрозрачных строк, а не таблица.
   lenses:
     names: [Standards, Spec, Critic]
     capability: reviewer
     slots:
-      Standards: {slot: lens-standards, backup: lens-standards-backup, effort: med}
-      Spec:      {slot: lens-spec,      backup: lens-spec-backup,      effort: med}
-      Critic:    {slot: lens-critic,    backup: lens-critic-backup,    effort: hi}
+      Standards: {slot: lens-standards, effort: med}
+      Spec:      {slot: lens-spec,      effort: med}
+      Critic:    {slot: lens-critic,    effort: hi}
 
   # Слот -> агент. Этот же перечень читает отпечаток доверенных манифестов
   # (trusted_manifest_fingerprint), поэтому у каждого слота обязан быть агент.
@@ -1584,26 +1581,20 @@ omp:
       writer: false
       agents:
         scout: pocock-scout
-        scout-backup: pocock-scout-backup
     builder:
       writer: true
       agents:
         builder: pocock-builder
-        builder-backup: pocock-builder-backup
     architect:
       writer: false
       agents:
         architect: pocock-architect
-        architect-backup: pocock-architect-backup
     reviewer:
       writer: false
       agents:
         lens-standards: pocock-lens-standards
-        lens-standards-backup: pocock-lens-standards-backup
         lens-spec: pocock-lens-spec
-        lens-spec-backup: pocock-lens-spec-backup
         lens-critic: pocock-lens-critic
-        lens-critic-backup: pocock-lens-critic-backup
 
   pre_gate:
     command_timeout_seconds: 600

@@ -145,16 +145,17 @@ The core executes sealed direct-argv checks, then creates exactly three distinct
 wave-level reviewers over the pre-gate-passed producer subset. A wave may mix
 `mechanical`, `skilled`, and `judgment` producer attempts on their respective slots.
 Configuration makes producer and lens slot sets disjoint, the three lens slots pairwise
-distinct, and every primary slot distinct from its backup. Before dispatching lenses,
+distinct. Before dispatching lenses,
 the core fails closed with `independent_reviewer_unavailable` if a lens's opaque
 `resolvedModel` string exactly matches that of any producer in the wave; it does not
 classify vendors or families. Each lens returns
 `{lens, summary, reports:[{attemptId, summary, findings, verdict}]}` covering every passed
 producer attempt. Standards and Spec emit `NO_VERDICT`; Critic alone emits `PASS` or
-`FAIL`. Only an isolated failed lens is retried, and a successful backup-slot lens clears
-its backup marker. Retry routing is core-owned: a missing diagnosis uses
+`FAIL`. Only an isolated failed lens is retried on the same slot. Retry routing is
+core-owned: a missing diagnosis uses
 `lastFailureKind`; `capability` deepens the class (writers stop at `skilled`, exhausted
-`judgment` blocks as `escalation_exhausted`) and `availability` uses the paired backup.
+depth blocks as `escalation_exhausted`) and `availability` preserves the slot while OMP
+owns model replacement.
 During partial acceptance each rejected ticket routes directly by its recorded rejection
 cause, without a separate `retry`; adjudication preserves already accepted tickets and
 rejects any ticket with a Critic `FAIL` or surviving introduced blocking Standards or Spec

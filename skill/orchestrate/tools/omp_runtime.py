@@ -110,24 +110,15 @@ def digest(value: Any) -> str:
     return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
-def slot_pair(mapping: Any, key: str, label: str) -> tuple[str, str]:
-    """The primary and backup slot a producer class or a lens is bound to.
-
-    Every field is required. A missing `backup` used to surface only when the
-    primary slot failed — that is, in the one situation where the run can least
-    afford a configuration error — so it is refused here instead.
-    """
+def declared_slot(mapping: Any, key: str, label: str) -> str:
+    """Return the single Pocock slot bound to a producer class or lens."""
     definition = mapping.get(key) if isinstance(mapping, dict) else None
     fail(not isinstance(definition, dict), "config_invalid", f"{label} declares no slot mapping")
-    values = []
-    for field in ("slot", "backup"):
-        value = definition.get(field)
-        fail(not isinstance(value, str) or not value, "config_invalid", f"{label} declares no {field}")
-        values.append(value)
-    fail(values[0] == values[1], "config_invalid", f"{label} uses one slot as both primary and backup: {values[0]}")
-    for field in ("effort",):
-        fail(not isinstance(definition.get(field), str) or not definition[field], "config_invalid", f"{label} declares no {field}")
-    return values[0], values[1]
+    slot = definition.get("slot")
+    fail(not isinstance(slot, str) or not slot, "config_invalid", f"{label} declares no slot")
+    effort = definition.get("effort")
+    fail(not isinstance(effort, str) or not effort, "config_invalid", f"{label} declares no effort")
+    return slot
 
 
 def validate_slot_disjointness(omp: dict[str, Any]) -> None:
@@ -145,7 +136,7 @@ def validate_slot_disjointness(omp: dict[str, Any]) -> None:
     for cls in producer_map:
         capability = producer_map[cls].get("capability") if isinstance(producer_map[cls], dict) else None
         fail(not isinstance(capability, str) or not capability, "config_invalid", f"omp.producers.{cls} declares no capability")
-        producers.update(slot_pair(producer_map, cls, f"omp.producers.{cls}"))
+        producers.add(declared_slot(producer_map, cls, f"omp.producers.{cls}"))
 
     lens_config = omp.get("lenses")
     fail(not isinstance(lens_config, dict), "config_invalid", "omp.lenses is missing")
@@ -158,14 +149,13 @@ def validate_slot_disjointness(omp: dict[str, Any]) -> None:
     fail(not isinstance(lens_map, dict) or not lens_map, "config_invalid", "omp.lenses.slots declares no lenses")
     lenses: set[str] = set()
     for lens in lens_map:
-        pair = slot_pair(lens_map, lens, f"omp.lenses.slots.{lens}")
-        clash = sorted(lenses.intersection(pair))
+        slot = declared_slot(lens_map, lens, f"omp.lenses.slots.{lens}")
         fail(
-            bool(clash),
+            slot in lenses,
             "config_invalid",
-            f"lens {lens} shares a slot with another lens: {', '.join(clash)}",
+            f"lens {lens} shares a slot with another lens: {slot}",
         )
-        lenses.update(pair)
+        lenses.add(slot)
 
     overlap = sorted(producers & lenses)
     fail(
@@ -176,6 +166,8 @@ def validate_slot_disjointness(omp: dict[str, Any]) -> None:
     declared = set(omp.get("slots", {}))
     missing = sorted((producers | lenses) - declared)
     fail(bool(missing), "config_invalid", f"slots are not declared in omp.slots: {', '.join(missing)}")
+    unbound = sorted(declared - (producers | lenses))
+    fail(bool(unbound), "config_invalid", f"omp.slots declares unbound slots: {', '.join(unbound)}")
 
 
 def load_config() -> dict[str, Any]:
@@ -794,45 +786,18 @@ def set_retry_lens_names(state: dict[str, Any], lenses: set[str]) -> None:
     state["retryLensNames"] = ordered_lens_names(lenses)
 
 
-def retry_backup_ticket_ids(state: dict[str, Any]) -> set[str]:
-    """Tickets whose next attempt must run on the backup slot of their class."""
-    raw = state.get("retryBackupTicketIds", [])
-    fail(
-        not isinstance(raw, list) or any(not isinstance(ticket_id_value, str) or not ticket_id_value for ticket_id_value in raw),
-        "state_corrupt",
-        "retryBackupTicketIds is invalid",
-    )
-    return set(raw)
-
-
-def retry_backup_lens_names(state: dict[str, Any]) -> set[str]:
-    """Lenses whose next review must run on their backup slot."""
-    raw = state.get("retryBackupLensNames", [])
-    fail(
-        not isinstance(raw, list)
-        or any(not isinstance(lens, str) or lens not in LENS_NAMES for lens in raw)
-        or len(raw) != len(set(raw)),
-        "state_corrupt",
-        "retryBackupLensNames is invalid",
-    )
-    return set(raw)
-
-
 def route_ticket_retry(state: dict[str, Any], attempts: dict[str, dict[str, Any]], kind: str) -> list[str]:
     """Bind each failed ticket to the axis its own failure calls for.
 
-    Two axes, never confused. Insufficient depth is answered with depth: the
-    ticket class rises and the class selects a deeper slot. An undelivered slot
-    is answered with the paired backup slot, which is equal depth in another
-    model. A writing ticket may never become `judgment` — that is the
-    decomposition invariant — so at `skilled` it has no depth left and takes the
-    backup instead.
+    Insufficient depth is answered with depth: the ticket class rises and the
+    class selects a deeper slot. Availability never changes a slot; OMP owns
+    model replacement through the role's fallback chain. A writing ticket may
+    never become `judgment`, so exhausting `skilled` is terminal.
 
-    Returns the tickets that have neither axis left; the caller blocks them
-    rather than spending their last attempt on an identical dispatch.
+    Returns tickets whose capability depth is exhausted. The caller blocks
+    them rather than hiding the failure behind an equal-depth model change.
     """
     exhausted: list[str] = []
-    backups: set[str] = set()
     floors = state.setdefault("classFloor", {})
     for ticket_id_value, attempt in attempts.items():
         status = attempt.get("status")
@@ -854,14 +819,8 @@ def route_ticket_retry(state: dict[str, Any], attempts: dict[str, dict[str, Any]
                     str(floors.get(ticket_id_value) or deeper),
                     key=lambda name: CLASS_ORDER[name],
                 )
-            elif writes:
-                backups.add(ticket_id_value)
             else:
                 exhausted.append(ticket_id_value)
-        elif kind == "availability" and status == "availability_failed":
-            backups.add(ticket_id_value)
-    if backups:
-        state["retryBackupTicketIds"] = sorted(retry_backup_ticket_ids(state) | backups)
     return sorted(exhausted)
 
 
@@ -911,9 +870,6 @@ def schedule_lens_retry(
         state["phase"] = "blocked"
         state["blockedReason"] = f"lens retry limit reached for wave {wave_id}: {', '.join(exhausted)}"
     else:
-        # A lens that could not be settled retries on its backup slot: the
-        # primary one has just demonstrated it cannot deliver this review.
-        state["retryBackupLensNames"] = ordered_lens_names(retry_backup_lens_names(state) | failed_lenses)
         state["phase"] = "lens_prepare_pending"
         state["blockedReason"] = reason
     state["lastFailureKind"] = "availability"
@@ -1336,8 +1292,6 @@ def command_start(cwd: Path, explicit_state_dir: str | None, request: dict[str, 
             "qualityFailures": {},
             "availabilityFailures": {},
             "classFloor": {},
-            "retryBackupTicketIds": [],
-            "retryBackupLensNames": [],
             "retryTicketIds": [],
             "retryLensNames": [],
             "frontierExhausted": False,
@@ -2224,13 +2178,11 @@ def bind_slot(state: dict[str, Any], config: dict[str, Any], capability: str, sl
     return {"slot": slot, "agent": agent, "witness": witness}
 
 
-def slot_for(config: dict[str, Any], mapping: dict[str, Any], key: str, use_backup: bool) -> dict[str, Any]:
-    """Pick a slot definition and, when the primary is spent, its backup pair."""
+def slot_for(mapping: dict[str, Any], key: str, label: str) -> dict[str, Any]:
+    """Pick the single slot definition declared for a producer class or lens."""
     definition = mapping.get(key)
     fail(not isinstance(definition, dict), "config_invalid", f"no slot mapping is declared for {key}")
-    field = "backup" if use_backup else "slot"
-    slot = definition.get(field)
-    fail(not isinstance(slot, str) or not slot, "config_invalid", f"slot mapping for {key} declares no {field}")
+    slot = declared_slot(mapping, key, label)
     return {"slot": slot, "definition": definition}
 
 
@@ -2318,8 +2270,7 @@ def command_prepare(cwd: Path, explicit_state_dir: str | None, request: dict[str
             floor = state.get("classFloor", {}).get(ticket["ticketId"])
             cls = classify_ticket(ticket, config, floor if isinstance(floor, str) else None)
             producers_map = config["omp"].get("producers", {})
-            use_backup = ticket["ticketId"] in retry_backup_ticket_ids(state)
-            picked = slot_for(config, producers_map, cls, use_backup)
+            picked = slot_for(producers_map, cls, f"omp.producers.{cls}")
             capability = picked["definition"].get("capability")
             fail(not isinstance(capability, str) or not capability, "config_invalid", f"producer class {cls} declares no capability")
             selected = bind_slot(state, config, capability, picked["slot"])
@@ -2337,7 +2288,6 @@ def command_prepare(cwd: Path, explicit_state_dir: str | None, request: dict[str
                 "role": capability,
                 "slot": selected["slot"],
                 "slotRole": config["omp"]["slots"][selected["slot"]]["alias"],
-                "slotIsBackup": use_backup,
                 "agent": selected["agent"],
                 "declaredAgent": selected["agent"],
                 "declaredModel": selected["witness"]["resolvedModel"],
@@ -3044,7 +2994,6 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
         availability_ticket_ids: list[str] = []
         quality_ticket_ids: list[str] = []
         failed_lenses: set[str] = set()
-        settled_backup_lenses: set[str] = set()
         failure_reasons: list[str] = []
         patch_bytes_max = int(config.get("omp", {}).get("pre_gate", {}).get("patch_bytes_max", DEFAULT_PATCH_BYTES_MAX))
 
@@ -3192,10 +3141,6 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
                     validate_lens_result(data, attempt)
                     attempt["status"] = "completed"
                     attempt["result"] = data
-                    # The backup slot has now delivered this lens, so the marker
-                    # is spent. Leaving it set would pin the lens to its backup
-                    # for every later wave of the run.
-                    settled_backup_lenses.add(str(attempt["lens"]))
             except RuntimeFailure as exc:
                 if exc.code == "state_corrupt":
                     raise
@@ -3280,7 +3225,6 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
                 f"wave is missing completed lens reports: {', '.join(ordered_lens_names(missing_lenses))}",
             )
             return
-        state["retryBackupLensNames"] = ordered_lens_names(retry_backup_lens_names(state) - settled_backup_lenses)
         set_retry_lens_names(state, set())
         state["phase"] = "adjudication_pending"
         state["blockedReason"] = None
@@ -3566,7 +3510,7 @@ def select_wave_reviewers(
     config: dict[str, Any],
     lenses: list[str],
 ) -> dict[str, dict[str, Any]]:
-    """Bind each lens to its own slot — primary, or backup when it is spent.
+    """Bind each lens to its own declared slot.
 
     No search and no independence arithmetic: `omp.lenses.slots` and
     `omp.producers` name disjoint slot sets, and `validate_slot_disjointness`
@@ -3578,13 +3522,11 @@ def select_wave_reviewers(
     capability = lens_config.get("capability")
     fail(not isinstance(capability, str) or not capability, "config_invalid", "omp.lenses declares no reviewer capability")
     mapping = lens_config.get("slots", {})
-    use_backup = retry_backup_lens_names(state)
     chosen: dict[str, dict[str, Any]] = {}
     for lens in lenses:
-        picked = slot_for(config, mapping, lens, lens in use_backup)
+        picked = slot_for(mapping, lens, f"omp.lenses.slots.{lens}")
         bound = bind_slot(state, config, capability, picked["slot"])
         bound["definition"] = picked["definition"]
-        bound["isBackup"] = lens in use_backup
         chosen[lens] = bound
     return chosen
 
@@ -3596,10 +3538,9 @@ def assert_reviewers_are_not_producers(
     """Refuse a wave where a lens and a producer resolved to the same model.
 
     Disjoint slots guarantee different roles, not different models: the owner
-    may point two roles at one model, and a backup substitution can land a lens
-    on the model a producer is already using. This is the fail-closed backstop
-    for that, and it needs no knowledge of models — only string equality on the
-    opaque witnesses OMP reported.
+    may point two roles at one model. This is the fail-closed backstop for that,
+    and it needs no knowledge of models — only string equality on the opaque
+    witnesses OMP reported.
     """
     producing = {
         str(producer.get("declaredModel") or "")
@@ -3706,7 +3647,6 @@ def command_prepare_lenses(cwd: Path, explicit_state_dir: str | None, request: d
                 "attemptOrdinal": review_no,
                 "slot": selected["slot"],
                 "slotRole": config["omp"]["slots"][selected["slot"]]["alias"],
-                "slotIsBackup": selected["isBackup"],
                 "agent": selected["agent"],
                 "declaredAgent": selected["agent"],
                 "declaredModel": selected["witness"]["resolvedModel"],

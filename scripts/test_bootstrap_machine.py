@@ -208,7 +208,7 @@ def test_portable_profile_declares_pocock_agent_roles_and_rejects_missing_role(
         for manifest in POCOCK_AGENT_MANIFESTS.glob("pocock-*.md")
         if manifest.is_file()
     }
-    assert len(pocock_roles) == 12
+    assert len(pocock_roles) == 6
 
     profile = yaml.safe_load(PORTABLE_PROFILE.read_text(encoding="utf-8"))
     model_roles = profile["modelRoles"]
@@ -256,3 +256,26 @@ def test_portable_profile_declares_pocock_agent_roles_and_rejects_missing_role(
     )
     assert chain_validation.returncode != 0
     assert missing_role in chain_validation.stderr
+
+
+@pytest.mark.parametrize("section", ["modelRoles", "fallbackChains"])
+def test_portable_profile_rejects_retired_pocock_backup_routes(
+    tmp_path: Path,
+    section: str,
+) -> None:
+    profile = yaml.safe_load(PORTABLE_PROFILE.read_text(encoding="utf-8"))
+    target = profile["modelRoles"] if section == "modelRoles" else profile["retry"]["fallbackChains"]
+    target["pocock-retired-backup"] = (
+        "retired/model" if section == "modelRoles" else ["retired/fallback"]
+    )
+    invalid_profile = tmp_path / f"retired-{section}.yml"
+    invalid_profile.write_text(yaml.safe_dump(profile, sort_keys=False), encoding="utf-8")
+
+    validation = subprocess.run(
+        [sys.executable, str(PROFILE_VALIDATOR), str(invalid_profile)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert validation.returncode != 0
+    assert "pocock-retired-backup" in validation.stderr

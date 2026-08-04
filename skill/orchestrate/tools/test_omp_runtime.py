@@ -659,7 +659,18 @@ def test_copy_reinstall_preserves_live_telemetry(tmp_path):
     (legacy_frontier / "SKILL.md").write_text("name: pocock-frontier\n", encoding="utf-8")
     omp_config = home / ".omp" / "agent" / "config.yml"
     omp_config.parent.mkdir(parents=True)
-    omp_config.write_text("ownerSetting:\n  preserved: true\n", encoding="utf-8")
+    omp_config.write_text(
+        "ownerSetting:\n"
+        "  preserved: true\n"
+        "modelRoles:\n"
+        "  default: owner/model\n"
+        "  pocock-retired-backup: retired/model\n"
+        "retry:\n"
+        "  fallbackChains:\n"
+        "    default: [owner/fallback]\n"
+        "    pocock-retired-backup: [retired/fallback]\n",
+        encoding="utf-8",
+    )
     command = ["bash", str(repo_root / "install.sh")]
     first = subprocess.run(command, cwd=repo_root, env=env, text=True, capture_output=True, check=False)
     assert first.returncode == 0, first.stderr
@@ -672,6 +683,8 @@ def test_copy_reinstall_preserves_live_telemetry(tmp_path):
         for manifest in (repo_root / ".omp" / "agents").glob("pocock-*.md")
     }
     assert installed_config["ownerSetting"] == {"preserved": True}
+    assert installed_config["modelRoles"]["default"] == "owner/model"
+    assert installed_config["retry"]["fallbackChains"]["default"] == ["owner/fallback"]
     assert {
         role
         for role in installed_config["modelRoles"]
@@ -682,6 +695,8 @@ def test_copy_reinstall_preserves_live_telemetry(tmp_path):
         for role in installed_config["retry"]["fallbackChains"]
         if role.startswith("pocock-")
     } == expected_roles
+    assert "pocock-retired-backup" not in installed_config["modelRoles"]
+    assert "pocock-retired-backup" not in installed_config["retry"]["fallbackChains"]
 
     installed = home / ".agents" / "skills" / "orchestrate"
     telemetry = installed / "telemetry"
@@ -788,10 +803,8 @@ def test_lost_settlement_can_be_abandoned_fail_closed_and_retry_is_bounded(tmp_p
     second_state = authoritative(cwd, state_dir, second["card"]["runId"])
     second_attempt = second_state["attempts"][second_state["pendingDispatch"]["attemptIds"][0]]
     assert second_attempt["qualityAttempt"] == 2
-    # An unavailable slot is precisely what the paired backup slot exists for.
-    assert second_attempt["slotIsBackup"] is True
-    assert second_attempt["slot"] == "scout-backup"
-    assert second_attempt["agent"] == "pocock-scout-backup"
+    assert second_attempt["slot"] == "scout"
+    assert second_attempt["agent"] == "pocock-scout"
 
     sealed_again = seal(cwd, state_dir, second, "producer")
     response = transition(
@@ -1119,7 +1132,6 @@ def test_router_uses_alias_roles_and_rejects_under_routing(tmp_path, cwd, config
         "builder",
     )
     assert attempt["declaredModel"] == state["models"]["builder"]["resolvedModel"]
-    assert attempt["slotIsBackup"] is False
     assert state["pendingDispatch"]["taskInput"]["tasks"][0]["isolated"] is True
 
     other_state_dir, other = start(tmp_path / "other", cwd, config, "frontier")
@@ -1354,7 +1366,6 @@ def test_lenses_occupy_three_slots_a_producer_can_never_hold(tmp_path, cwd, conf
     assert len(lens_slots) == 3
     assert not (lens_slots & producer_slots)
     assert all(assignment["producerAttemptIds"] == producer_ids for assignment in assignments)
-    assert all(assignment["slotIsBackup"] is False for assignment in assignments)
     assert prepared["card"]["dispatch"]["kind"] == "lenses"
     assert len(prepared["card"]["dispatch"]["actors"]) == 3
 
@@ -1393,11 +1404,20 @@ def test_config_refuses_a_lens_slot_a_producer_could_also_hold(config):
 
 def test_config_refuses_a_slot_that_names_no_omp_role(config):
     omp = copy.deepcopy(config["omp"])
-    omp["producers"]["skilled"]["backup"] = "no-such-slot"
+    omp["producers"]["skilled"]["slot"] = "no-such-slot"
     with pytest.raises(runtime.RuntimeFailure) as error:
         runtime.validate_slot_disjointness(omp)
     assert error.value.code == "config_invalid"
     assert "omp.slots" in error.value.message
+
+
+def test_config_refuses_an_unbound_slot(config):
+    omp = copy.deepcopy(config["omp"])
+    omp["slots"]["retired"] = {"alias": "@pocock-retired"}
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.validate_slot_disjointness(omp)
+    assert error.value.code == "config_invalid"
+    assert "unbound slots: retired" in error.value.message
 
 
 def test_config_refuses_two_lenses_on_one_slot(config):
@@ -1410,31 +1430,17 @@ def test_config_refuses_two_lenses_on_one_slot(config):
     assert "shares a slot" in error.value.message
 
 
-def test_config_refuses_a_backup_equal_to_its_primary(config):
+def test_config_refuses_a_lens_without_a_slot(config):
     omp = copy.deepcopy(config["omp"])
-    omp["producers"]["skilled"]["backup"] = omp["producers"]["skilled"]["slot"]
+    del omp["lenses"]["slots"]["Critic"]["slot"]
     with pytest.raises(runtime.RuntimeFailure) as error:
         runtime.validate_slot_disjointness(omp)
     assert error.value.code == "config_invalid"
-    assert "both primary and backup" in error.value.message
+    assert "declares no slot" in error.value.message
 
 
-def test_config_refuses_a_lens_without_a_backup(config):
-    """A missing backup must not wait until the primary slot has already failed."""
-    omp = copy.deepcopy(config["omp"])
-    del omp["lenses"]["slots"]["Critic"]["backup"]
-    with pytest.raises(runtime.RuntimeFailure) as error:
-        runtime.validate_slot_disjointness(omp)
-    assert error.value.code == "config_invalid"
-    assert "declares no backup" in error.value.message
-
-
-def test_capability_retry_deepens_the_class_instead_of_taking_the_backup(tmp_path, cwd, config):
-    """A model that was not deep enough is answered with depth, not with a peer.
-
-    The backup slot is the answer to unavailability; insufficient capability is
-    answered by raising the ticket class, which selects a deeper slot.
-    """
+def test_capability_retry_deepens_the_class(tmp_path, cwd, config):
+    """A model that was not deep enough is answered with a deeper class."""
     state_dir, response = start(tmp_path, cwd, config, "frontier")
     response = admit_frontier(cwd, state_dir, response)
     response = prepare(cwd, state_dir, response, config)
@@ -1456,24 +1462,17 @@ def test_capability_retry_deepens_the_class_instead_of_taking_the_backup(tmp_pat
     retried = second_state["attempts"][second_state["pendingDispatch"]["attemptIds"][0]]
     assert second_state["classFloor"]["T1"] == "skilled"
     assert (retried["class"], retried["slot"]) == ("skilled", "builder")
-    assert retried["slotIsBackup"] is False
 
 
-def test_capability_retry_of_a_writing_ticket_takes_the_backup_at_its_depth_ceiling(tmp_path, cwd, config):
-    """The commonest retry in the system: a `skilled` writer failed the pre-gate.
-
-    It cannot be deepened — a writing ticket may never become `judgment`, that
-    is the decomposition invariant — so the escalation must move along the other
-    axis and take the paired backup slot, not die with an unrelated
-    `ticket_needs_decomposition`.
-    """
+def test_capability_retry_of_a_writing_ticket_blocks_at_its_depth_ceiling(tmp_path, cwd, config):
+    """A writing ticket cannot silently switch models after exhausting `skilled`."""
     state_dir, response = start(tmp_path, cwd, config, "frontier")
     response = admit_frontier(cwd, state_dir, response)
     ticket = writer_ticket("T1", "fixture.txt")
     response = prepare(cwd, state_dir, response, config, ticket)
     state = authoritative(cwd, state_dir, response["card"]["runId"])
     first = state["attempts"][state["pendingDispatch"]["attemptIds"][0]]
-    assert (first["class"], first["slot"], first["slotIsBackup"]) == ("skilled", "builder", False)
+    assert (first["class"], first["slot"]) == ("skilled", "builder")
 
     runtime.mutate(
         cwd,
@@ -1484,21 +1483,12 @@ def test_capability_retry_of_a_writing_ticket_takes_the_backup_at_its_depth_ceil
     )
     response = runtime.command_status(cwd, state_dir, {"runId": response["card"]["runId"]})
     response = transition(cwd, state_dir, response, "retry", {"diagnosis": "capability"})
-    second = prepare(cwd, state_dir, response, config, ticket)
-    second_state = authoritative(cwd, state_dir, second["card"]["runId"])
-    retried = second_state["attempts"][second_state["pendingDispatch"]["attemptIds"][0]]
-    assert "T1" not in second_state.get("classFloor", {})
-    assert (retried["class"], retried["slot"]) == ("skilled", "builder-backup")
-    assert retried["agent"] == "pocock-builder-backup"
-    assert retried["slotIsBackup"] is True
+    assert response["card"]["phase"] == "blocked"
+    assert "escalation is exhausted" in response["card"]["blockedReason"]
 
 
 def test_capability_retry_blocks_a_judgment_ticket_instead_of_sidestepping(tmp_path, cwd, config):
-    """`judgment` is the deepest class; a backup would be an equal-depth peer.
-
-    Spending the last attempt on the same depth cannot answer a depth verdict,
-    so the run blocks and says what the owner must do instead.
-    """
+    """`judgment` is the deepest class, so the run blocks with a diagnosis."""
     state_dir, response = start(tmp_path, cwd, config, "frontier")
     response = admit_frontier(cwd, state_dir, response)
     ticket = ticket_named("T1")
@@ -1519,15 +1509,13 @@ def test_capability_retry_blocks_a_judgment_ticket_instead_of_sidestepping(tmp_p
     response = transition(cwd, state_dir, response, "retry", {"diagnosis": "capability"})
     assert response["card"]["phase"] == "blocked"
     assert "escalation is exhausted" in response["card"]["blockedReason"]
-    blocked = authoritative(cwd, state_dir, response["card"]["runId"])
-    assert "T1" not in blocked.get("retryBackupTicketIds", [])
 
 
 def test_bare_retry_uses_the_recorded_failure_kind(tmp_path, cwd, config):
     """A retry without a payload must not silently pick the inert diagnosis.
 
     The core already recorded why the wave failed; that recorded kind is the
-    default, so an availability failure still reaches its backup slot.
+    default, while model replacement remains inside the unchanged OMP role.
     """
     state_dir, response = start(tmp_path, cwd, config, "frontier")
     response = admit_frontier(cwd, state_dir, response)
@@ -1544,8 +1532,7 @@ def test_bare_retry_uses_the_recorded_failure_kind(tmp_path, cwd, config):
     second = prepare(cwd, state_dir, response, config)
     retried = authoritative(cwd, state_dir, second["card"]["runId"])
     attempt = retried["attempts"][retried["pendingDispatch"]["attemptIds"][0]]
-    assert attempt["slot"] == "scout-backup"
-    assert attempt["slotIsBackup"] is True
+    assert attempt["slot"] == "scout"
 
 
 def test_partial_pregate_routes_the_failed_ticket_without_an_explicit_retry(tmp_path, cwd, config):
@@ -1651,17 +1638,13 @@ def test_lens_settlement_retries_only_the_failed_wave_lens(tmp_path, cwd, config
     assert len(prepared_retry["card"]["dispatch"]["actors"]) == 1
     retry_state = authoritative(cwd, state_dir, prepared_retry["card"]["runId"])
     assert retry_state["pendingDispatch"]["lensNames"] == [failed_lens]
-    assert retry_state["retryBackupLensNames"] == [failed_lens]
     retried = retry_state["lensAttempts"][retry_state["pendingDispatch"]["attemptIds"][0]]
-    assert retried["slotIsBackup"] is True
-    assert retried["slot"].endswith("-backup")
+    expected_slot = config["omp"]["lenses"]["slots"][failed_lens]["slot"]
+    assert retried["slot"] == expected_slot
     assert len(set(retry_state["waves"][-1]["reviewerSlots"].values())) == 3
     retry_sealed = seal(cwd, state_dir, prepared_retry, "lenses")
     response = settle_lenses(tmp_path, cwd, state_dir, retry_sealed, config)
     assert response["card"]["phase"] == "adjudication_pending"
-    # The backup delivered, so the marker is spent: leaving it set would pin
-    # this lens to its backup for every later wave of the run.
-    assert authoritative(cwd, state_dir, response["card"]["runId"])["retryBackupLensNames"] == []
     response = runtime.command_adjudicate(cwd, state_dir, reference(response["card"]))
     assert response["card"]["phase"] == "accepted"
 

@@ -66,8 +66,8 @@ producer's own reasoning, drafts, and self-reports stay excluded exactly as befo
 After deterministic pre-gate, the core takes exactly the producer attempts that passed
 it and creates one wave-level review task. A wave may mix `mechanical`, `skilled`, and
 `judgment` producer attempts on their respective slots. Configuration makes producer and
-lens slot sets disjoint, the three lens slots pairwise distinct, and every primary slot
-distinct from its backup. Before dispatching lenses, the core fails closed with
+lens slot sets disjoint and the three lens slots pairwise distinct. Before dispatching
+lenses, the core fails closed with
 `independent_reviewer_unavailable` if a lens's opaque `resolvedModel` string exactly
 matches that of any producer in the wave; it does not classify vendors or families. The
 task has exactly three distinct reviewer slots: **Standards**, **Spec**, and **Critic**.
@@ -85,11 +85,11 @@ only verdict. Acceptance also requires no surviving blocking finding introduced 
 Standards or Spec.
 
 An execution or schema failure safely attributable to one lens retries only that lens;
-valid reports from the other lenses stay bound to their producer attempts. A successful
-backup-slot lens clears its backup marker. A missing retry diagnosis uses
-`lastFailureKind`; `capability` deepens the ticket class (writers stop at `skilled`,
-exhausted `judgment` blocks as `escalation_exhausted`) while `availability` moves to the
-paired backup. Adjudication is partial: producer tickets that already pass retain
+valid reports from the other lenses stay bound to their producer attempts. The failed
+lens retries on the same slot. A missing retry diagnosis uses `lastFailureKind`;
+`capability` deepens the ticket class (writers stop at `skilled`, exhausted depth blocks
+as `escalation_exhausted`) while `availability` preserves the slot and leaves model
+replacement to OMP. Adjudication is partial: producer tickets that already pass retain
 acceptance, and each rejected ticket routes directly from its recorded rejection cause,
 without a separate `retry` step.
 

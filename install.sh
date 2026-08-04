@@ -344,8 +344,9 @@ install_omp_native() {
 # public heads run in any repository, so the assignments live in the main OMP
 # config. The portable profile supplies installation defaults only. Roles are
 # namespaced and therefore do not belong behind --configure-omp, which gates
-# global task invariants. Only `pocock-*` keys are written; every other setting
-# in the user's main config is preserved verbatim.
+# global task invariants. The `pocock-*` namespace is reconciled with the
+# portable profile so retired roles cannot survive an upgrade; every other
+# setting in the user's main config is preserved verbatim.
 install_pocock_model_roles() {
   python3 - "${POCOCK_PROFILE_SOURCE}" "${OMP_BASE_DIR}/config.yml" <<'PY'
 import sys
@@ -365,14 +366,21 @@ chains = {
     for key, value in ((source.get("retry") or {}).get("fallbackChains") or {}).items()
     if key.startswith("pocock-")
 }
-if roles:
-    target.setdefault("modelRoles", {}).update(roles)
-if chains:
-    target.setdefault("retry", {}).setdefault("fallbackChains", {}).update(chains)
+target_roles = target.setdefault("modelRoles", {})
+for key in list(target_roles):
+    if key.startswith("pocock-") and key not in roles:
+        del target_roles[key]
+target_roles.update(roles)
+
+target_chains = target.setdefault("retry", {}).setdefault("fallbackChains", {})
+for key in list(target_chains):
+    if key.startswith("pocock-") and key not in chains:
+        del target_chains[key]
+target_chains.update(chains)
 
 target_file.parent.mkdir(parents=True, exist_ok=True)
 target_file.write_text(yaml.safe_dump(target, allow_unicode=True, sort_keys=False), encoding="utf-8")
-print(f"installed {len(roles)} Pocock model roles and {len(chains)} fallback chains in {target_file}")
+print(f"reconciled {len(roles)} Pocock model roles and {len(chains)} fallback chains in {target_file}")
 PY
 }
 

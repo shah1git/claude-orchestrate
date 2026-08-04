@@ -187,22 +187,22 @@ attempts enter review. `pocock_prepare_lenses` creates exactly three distinct
 wave-level reviewers—Standards, Spec, and Critic—over precisely that pre-gate-passed
 subset. A wave may mix `mechanical`, `skilled`, and `judgment` producer attempts on
 their respective slots. Configuration makes producer and lens slot sets disjoint, the
-three lens slots pairwise distinct, and every primary slot distinct from its backup.
+three lens slots pairwise distinct.
 Before dispatching lenses, the core fails closed with
 `independent_reviewer_unavailable` if a lens's opaque `resolvedModel` string exactly
 matches that of any producer in the wave; it does not classify vendors or families.
 Each lens returns `{lens, summary, reports:[{attemptId, summary, findings, verdict}]}`
 with a report for every passed producer attempt. Standards and Spec emit `NO_VERDICT`;
 Critic alone emits `PASS` or `FAIL`. If a lens alone fails execution or schema
-validation, only that lens receives a new sealed attempt; a lens that then succeeds on
-its backup slot clears its backup marker. `pocock_adjudicate` is the only place reports
+validation, only that lens receives a new sealed attempt on the same slot.
+`pocock_adjudicate` is the only place reports
 are adjudicated: it preserves already accepted producer tickets and accepts another only
 with a Critic `PASS` and zero surviving blocking findings introduced by Standards or Spec.
 Retry routing remains code-owned: a missing diagnosis uses `lastFailureKind`;
 `capability` raises the ticket class from `mechanical` through `skilled` to `judgment`,
-except that a writer stops at `skilled` and moves to its backup, while an exhausted
-`judgment` ticket blocks as `escalation_exhausted`; `availability` moves to the paired
-backup. During partial acceptance, the core routes each rejected ticket directly from
+except that a writer stops at `skilled`; exhausting the permitted depth blocks as
+`escalation_exhausted`. `availability` preserves the slot and leaves model replacement
+to OMP. During partial acceptance, the core routes each rejected ticket directly from
 its recorded rejection cause, without a separate `retry` transition. The lead cannot
 waive these conditions; attempt eligibility, retry limits, gate conditions, and the
 decision to accept remain code-owned.

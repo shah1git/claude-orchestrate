@@ -81,6 +81,14 @@ def validate_profile(profile: object) -> None:
     if missing_roles:
         fail(f"modelRoles is missing: {', '.join(sorted(missing_roles))}")
 
+    retired_backup_roles = sorted(
+        role
+        for role in roles
+        if role.startswith("pocock-") and role.endswith("-backup")
+    )
+    if retired_backup_roles:
+        fail(f"retired Pocock backup modelRoles are forbidden: {', '.join(retired_backup_roles)}")
+
     empty_pocock_roles = sorted(
         role
         for role in required_pocock_roles
@@ -93,6 +101,13 @@ def validate_profile(profile: object) -> None:
     retry = require_mapping(root.get("retry"), "retry")
     require_value(retry, "modelFallback", True, "retry")
     fallback_chains = require_mapping(retry.get("fallbackChains"), "retry.fallbackChains")
+    retired_backup_chains = sorted(
+        role
+        for role in fallback_chains
+        if role.startswith("pocock-") and role.endswith("-backup")
+    )
+    if retired_backup_chains:
+        fail(f"retired Pocock backup fallbackChains are forbidden: {', '.join(retired_backup_chains)}")
     missing_chains = required_pocock_roles.difference(fallback_chains)
     if missing_chains:
         fail(f"retry.fallbackChains is missing: {', '.join(sorted(missing_chains))}")

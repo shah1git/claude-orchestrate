@@ -283,10 +283,16 @@ if not roles:
 
 missing_roles = [role for role in roles if not str(configured_roles.get(role) or "").strip()]
 missing_chains = [role for role in roles if not configured_chains.get(role)]
+extra_roles = sorted(role for role in configured_roles if role.startswith("pocock-") and role not in roles)
+extra_chains = sorted(role for role in configured_chains if role.startswith("pocock-") and role not in roles)
 if missing_roles:
     raise SystemExit("missing Pocock modelRoles: " + ", ".join(missing_roles))
 if missing_chains:
     raise SystemExit("missing Pocock fallbackChains: " + ", ".join(missing_chains))
+if extra_roles:
+    raise SystemExit("retired Pocock modelRoles: " + ", ".join(extra_roles))
+if extra_chains:
+    raise SystemExit("retired Pocock fallbackChains: " + ", ".join(extra_chains))
 print(f"{len(roles)} modelRoles and {len(roles)} fallbackChains")
 ' "${OMP_AGENTS_SOURCE}"
   )"; then
