@@ -451,6 +451,64 @@ describe("Pocock live dispatch observability", () => {
 		expect(harness.messages).toEqual([]);
 	});
 
+	test("groups identical dispatch witnesses so wave width does not inflate the widget", async () => {
+		const producer = {
+			role: "builder",
+			lens: null,
+			attemptOrdinal: 1,
+			slotRole: "@pocock-builder",
+			declaredModel: "openai-codex/gpt-5.6-terra",
+			observedModel: null,
+			modelWitness: "DECLARED_ONLY",
+			status: "running",
+			tokens: null,
+		};
+		const actors: Record<string, unknown>[] = [1, 2, 3, 4, 5].map(index => ({
+			...producer,
+			dispatchName: `P1T${index}A1`,
+			attemptId: `attempt-${index}`,
+			ticketId: `C-${index}`,
+		}));
+		actors.push({
+			...producer,
+			dispatchName: "P1L1",
+			attemptId: "attempt-critic",
+			ticketId: "C-1",
+			role: "reviewer",
+			lens: "Critic",
+			slotRole: "@pocock-lens-critic",
+			status: "completed",
+		});
+		const harness = adapterHarness(command => {
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") return coreCard(card("wide-run", 0, "producer_dispatch_pending"));
+			if (command === "transition") {
+				return coreCard({ ...card("wide-run", 1, "producer_dispatch_pending"), dispatch: { actors } });
+			}
+			throw new Error(`Unexpected core command ${command}`);
+		});
+
+		await harness.enter("enter-wide", { entry: "full", objective: "Dispatch a wide wave" }, undefined, undefined, harness.context);
+		await harness.transition(
+			"transition-wide",
+			{ runId: "wide-run", revision: 0, stateHash: "wide-run-0-hash", action: "project" },
+			undefined,
+			undefined,
+			harness.context,
+		);
+
+		const lines = harness.widgets.findLast(value => value.name === "pocock-dispatch")?.content as string[];
+		// header + two witness groups of three lines + footer: height follows
+		// distinct witnesses, not the six dispatched actors.
+		expect(lines).toHaveLength(8);
+		const display = lines.join("\n");
+		for (const index of [1, 2, 3, 4, 5]) expect(display).toContain(`P1T${index}A1→C-${index}`);
+		expect(display).toContain("P1L1→C-1");
+		expect(display).toContain("RUNTIME/PENDING, not SETTLED");
+		expect(display).toContain("SETTLED, not ACCEPTED");
+		expect(display).toContain("tokens n/a");
+	});
+
 	test("clears the dispatch widget for terminal, no-mirror, and fail-closed states", async () => {
 		const actorCard = {
 			...card("clear-run", 1, "producer_dispatch_pending"),

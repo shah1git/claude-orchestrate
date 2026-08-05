@@ -792,23 +792,48 @@ function renderDispatchStatus(status: string): string {
 }
 
 
-function renderDispatchActor(actor: JsonRecord): string[] {
-	const dispatchName = displayValue(actor.dispatchName);
-	const ticketId = displayValue(actor.ticketId);
-	const role = displayValue(actor.role);
-	const lens = displayValue(actor.lens);
-	const attemptOrdinal = displayValue(actor.attemptOrdinal);
-	const slotRole = displayValue(actor.slotRole);
-	const declaredModel = displayValue(actor.declaredModel);
-	const observedModel = displayValue(actor.observedModel);
-	const modelWitness = displayValue(actor.modelWitness);
-	const status = displayValue(actor.status);
-	const tokens = displayValue(actor.tokens);
-	return [
-		`${dispatchName} → ticket ${ticketId} · role ${role} · lens ${lens} · attempt ${attemptOrdinal} · slot ${slotRole}`,
-		`  declared ${declaredModel} · observed ${observedModel} · witness ${modelWitness}`
-			+ ` · status ${renderDispatchStatus(status)} · tokens ${tokens}`,
-	];
+/** Render actors grouped by identical witness so wave width does not inflate the panel.
+ *
+ * A sealed wave normally dispatches N tickets onto one slot with one declared
+ * model, one witness kind and one status. Two lines per actor repeated that
+ * same witness N times, so the widget grew with the wave and pushed the editor
+ * down. Grouping keeps every field the panel exists for — declared vs observed
+ * model, witness kind, settlement state, tokens — but its height now tracks the
+ * number of DISTINCT witnesses, not the number of tickets.
+ */
+function renderDispatchGroups(actors: JsonRecord[]): string[] {
+	type Member = { label: string; tokens: string };
+	type Group = { head: string; witness: string; members: Member[] };
+	const groups = new Map<string, Group>();
+	for (const actor of actors) {
+		const head = `role ${displayValue(actor.role)} · lens ${displayValue(actor.lens)}`
+			+ ` · attempt ${displayValue(actor.attemptOrdinal)} · slot ${displayValue(actor.slotRole)}`;
+		const witness = `declared ${displayValue(actor.declaredModel)} · observed ${displayValue(actor.observedModel)}`
+			+ ` · witness ${displayValue(actor.modelWitness)}`
+			+ ` · status ${renderDispatchStatus(displayValue(actor.status))}`;
+		const member: Member = {
+			label: `${displayValue(actor.dispatchName)}→${displayValue(actor.ticketId)}`,
+			tokens: displayValue(actor.tokens),
+		};
+		const key = `${head}\n${witness}`;
+		const group = groups.get(key);
+		if (group) group.members.push(member);
+		else groups.set(key, { head, witness, members: [member] });
+	}
+	const lines: string[] = [];
+	for (const group of groups.values()) {
+		// Tokens are per attempt only after settlement; while a wave is pending
+		// they are uniformly unknown, and repeating that per ticket is noise.
+		const uniformTokens = group.members.every(member => member.tokens === group.members[0]!.tokens);
+		lines.push(
+			group.head,
+			`  ${group.witness}${uniformTokens ? ` · tokens ${group.members[0]!.tokens}` : ""}`,
+			`  ${group.members
+				.map(member => (uniformTokens ? member.label : `${member.label} tokens ${member.tokens}`))
+				.join(" · ")}`,
+		);
+	}
+	return lines;
 }
 
 function updateDispatchWidget(pi: ExtensionAPI, context: RuntimeContext | undefined, card?: StateCard): void {
@@ -821,7 +846,7 @@ function updateDispatchWidget(pi: ExtensionAPI, context: RuntimeContext | undefi
 		}
 		const noun = actors.length === 1 ? "actor" : "actors";
 		const lines = [`Pocock dispatch participation · ${actors.length} ${noun}`];
-		for (const actor of actors) lines.push(...renderDispatchActor(actor));
+		lines.push(...renderDispatchGroups(actors));
 		lines.push("RUNTIME/PENDING is not a settled witness · SETTLED is not ACCEPTED");
 		if (actors.some(actor => actor.slotRole === "@advisor")) {
 			lines.push("slot @advisor is a worker slot, not the Watchdog Advisor role");
