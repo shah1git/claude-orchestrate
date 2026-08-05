@@ -23,6 +23,7 @@ INSTALLER = REPOSITORY_ROOT / "install.sh"
 PORTABLE_PROFILE = REPOSITORY_ROOT / "scripts" / "omp-portable-profile.yml"
 PORTABLE_WATCHDOG = REPOSITORY_ROOT / "scripts" / "omp-portable-WATCHDOG.md"
 PROFILE_VALIDATOR = REPOSITORY_ROOT / "scripts" / "validate_portable_omp_profile.py"
+PROFILE_EXPORTER = REPOSITORY_ROOT / "scripts" / "export-portable-omp-profile.py"
 RUNTIME_CONFIG_VALIDATOR = REPOSITORY_ROOT / "scripts" / "validate_omp_runtime_config.py"
 POCOCK_AGENT_MANIFESTS = REPOSITORY_ROOT / ".omp" / "agents"
 
@@ -667,6 +668,80 @@ def test_portable_profile_rejects_retired_pocock_backup_routes(
 
     assert validation.returncode != 0
     assert "pocock-retired-backup" in validation.stderr
+
+
+def isolated_exporter(tmp_path: Path) -> tuple[Path, Path]:
+    """Copy the real exporter into a throwaway checkout.
+
+    The exporter writes beside itself, so an isolated copy is what keeps a test
+    from overwriting the committed profile. The validator it imports resolves the
+    agent manifests relative to the same checkout, so those travel too.
+    """
+    scripts = tmp_path / "scripts"
+    scripts.mkdir(exist_ok=True)
+    for source in (PROFILE_EXPORTER, PROFILE_VALIDATOR):
+        (scripts / source.name).write_bytes(source.read_bytes())
+    manifests = tmp_path / ".omp" / "agents"
+    manifests.mkdir(parents=True, exist_ok=True)
+    for manifest in POCOCK_AGENT_MANIFESTS.glob("pocock-*.md"):
+        (manifests / manifest.name).write_bytes(manifest.read_bytes())
+    return scripts / PROFILE_EXPORTER.name, scripts / PORTABLE_PROFILE.name
+
+
+def test_exporter_mirrors_the_live_config_without_machine_local_keys(tmp_path: Path) -> None:
+    """The snapshot must equal the live config minus what cannot travel.
+
+    Hand-maintaining this file is what let the committed snapshot fall behind the
+    live routes, so the exporter's whole value is that the two cannot diverge.
+    """
+    exporter, destination = isolated_exporter(tmp_path)
+    live = yaml.safe_load(PORTABLE_PROFILE.read_text(encoding="utf-8"))
+    live["setupVersion"] = 1
+    live["dev"] = {"autoqaConsent": "granted"}
+    live_path = tmp_path / "live-config.yml"
+    live_path.write_text(yaml.safe_dump(live, sort_keys=False), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(exporter), str(live_path)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    exported = yaml.safe_load(destination.read_text(encoding="utf-8"))
+    expected = {key: value for key, value in live.items() if key not in {"dev", "setupVersion"}}
+    assert exported == expected
+    assert list(exported) == list(expected)
+    assert "dev" not in exported and "setupVersion" not in exported
+
+    validation = subprocess.run(
+        [sys.executable, str(tmp_path / "scripts" / PROFILE_VALIDATOR.name), str(destination)],
+        capture_output=True,
+        text=True,
+    )
+    assert validation.returncode == 0, validation.stderr
+
+
+def test_exporter_refuses_a_secret_bearing_config_and_keeps_the_previous_snapshot(
+    tmp_path: Path,
+) -> None:
+    """A rejected export must never replace a good snapshot."""
+    exporter, destination = isolated_exporter(tmp_path)
+    destination.write_text("# committed snapshot\n", encoding="utf-8")
+    live = yaml.safe_load(PORTABLE_PROFILE.read_text(encoding="utf-8"))
+    live["providers"]["anthropicApiKey"] = "sk-ant-fixture"
+    live_path = tmp_path / "live-with-secret.yml"
+    live_path.write_text(yaml.safe_dump(live, sort_keys=False), encoding="utf-8")
+
+    result = subprocess.run(
+        [sys.executable, str(exporter), str(live_path)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "anthropicApiKey" in result.stderr
+    assert destination.read_text(encoding="utf-8") == "# committed snapshot\n"
 
 
 def test_runtime_config_validator_accepts_yaml_mapping_keys_with_trailing_space(tmp_path: Path) -> None:

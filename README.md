@@ -241,6 +241,20 @@ curl -fsSL https://raw.githubusercontent.com/shah1git/claude-orchestrate/main/bo
 `dev.autoqaConsent`, сессии и машинное состояние не переносятся; вендоры
 авторизуются владельцем после установки.
 
+Снимок переносимого профиля обновляется на машине-источнике, поведение которой
+должно переехать, и только через экспортёр:
+
+```bash
+python3 scripts/export-portable-omp-profile.py   # → scripts/omp-portable-profile.yml
+```
+
+Экспортёр читает действующий конфиг OMP, отбрасывает машинные корни `dev` и
+`setupVersion`, а правила переносимости берёт из
+`scripts/validate_portable_omp_profile.py`, поэтому второй политики не возникает.
+Снимок записывается только после успешной проверки: отклонённый экспорт не
+заменяет уже закреплённый файл. Правки этого YAML руками возвращают тот самый
+дрейф, из-за которого закреплённый снимок отставал от живых маршрутов.
+
 Ручная установка:
 
 ```bash
@@ -492,6 +506,20 @@ and runs the full verifier. For the full contract, it invokes
 OAuth, API keys, user consent, sessions, and machine runtime state; the owner logs in
 to each provider afterward.
 
+Refresh the snapshot on the machine whose behavior should travel, and only through
+the exporter — a hand edit is what let the committed snapshot fall behind the live
+routes:
+
+```bash
+python3 scripts/export-portable-omp-profile.py   # → scripts/omp-portable-profile.yml
+```
+
+It reads the live OMP config, drops the machine-local `dev` and `setupVersion`
+roots, and imports every portability rule from
+`scripts/validate_portable_omp_profile.py`, so the two can never disagree. The
+snapshot is written only after validation passes: a rejected export never replaces
+the committed file.
+
 Manual installation:
 
 ```bash
@@ -537,6 +565,7 @@ docs/adr/                                architectural decisions
 install.sh                               link/copy installer; optional OMP configuration
 scripts/verify-install.sh                offline installation verifier
 scripts/omp-portable-profile.yml         portable bootstrap snapshot of the main OMP config
+scripts/export-portable-omp-profile.py   refreshes that snapshot from the live OMP config
 ```
 
 ## License
