@@ -25,6 +25,7 @@ PORTABLE_WATCHDOG = REPOSITORY_ROOT / "scripts" / "omp-portable-WATCHDOG.md"
 PROFILE_VALIDATOR = REPOSITORY_ROOT / "scripts" / "validate_portable_omp_profile.py"
 PROFILE_EXPORTER = REPOSITORY_ROOT / "scripts" / "export-portable-omp-profile.py"
 RUNTIME_CONFIG_VALIDATOR = REPOSITORY_ROOT / "scripts" / "validate_omp_runtime_config.py"
+BOOTSTRAP_MAC = REPOSITORY_ROOT / "bootstrap-mac.sh"
 POCOCK_AGENT_MANIFESTS = REPOSITORY_ROOT / ".omp" / "agents"
 
 
@@ -668,6 +669,69 @@ def test_portable_profile_rejects_retired_pocock_backup_routes(
 
     assert validation.returncode != 0
     assert "pocock-retired-backup" in validation.stderr
+
+
+def test_bootstrap_mac_creates_a_missing_upstream_cache_parent(tmp_path: Path) -> None:
+    """A fresh machine has no cache parent, and `-w` on a missing path is false.
+
+    The retired guard read that as a permission failure and told the owner to
+    sudo-chown a directory inside their own home: unnecessary, and harmful
+    because it leaves root-owned directories behind. Cloning must create the
+    path instead. `bootstrap-mac.sh` is stubbed out of the machine-bootstrap
+    fixture, so this is the only coverage of its own clone step.
+    """
+    checkout = tmp_path / "checkout"
+    # The script refuses to run outside a complete contour, so the fixture
+    # provides exactly the four paths that sanity check requires.
+    (checkout / "skill" / "orchestrate" / "tools").mkdir(parents=True)
+    (checkout / "skill" / "orchestrate" / "tools" / "omp_runtime.py").write_text("")
+    (checkout / ".omp" / "agents").mkdir(parents=True)
+    (checkout / ".omp" / "extensions" / "pocock-control").mkdir(parents=True)
+    (checkout / "bootstrap-mac.sh").write_bytes(BOOTSTRAP_MAC.read_bytes())
+    (checkout / "bootstrap-mac.sh").chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    # The stub keeps the test offline and records what the script asked Git to do.
+    (fake_bin / "git").write_text(
+        "#!/bin/sh\n"
+        "set -eu\n"
+        'printf "%s\\n" "$*" >> "$GIT_LOG"\n'
+        'if [ "$1" = clone ]; then mkdir -p "$3/.git"; exit 0; fi\n'
+        'for arg in "$@"; do\n'
+        '    if [ "$arg" = rev-parse ]; then printf "%s\\n" deadbeef; exit 0; fi\n'
+        "done\n"
+        "exit 0\n"
+    )
+    (fake_bin / "git").chmod(0o755)
+    for command in ("rsync", "gh", "omp"):
+        executable = fake_bin / command
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    cache = tmp_path / "cache" / "absent-parent" / "mattpocock-skills"
+    assert not cache.parent.exists()
+
+    result = subprocess.run(
+        ["bash", str(checkout / "bootstrap-mac.sh")],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "POCOCK_CACHE_DIR": str(cache),
+            "GIT_LOG": str(tmp_path / "git.log"),
+        },
+    )
+
+    combined = result.stdout + result.stderr
+    assert "нет прав" not in combined, combined
+    assert (cache / ".git").is_dir(), combined
+    git_log = (tmp_path / "git.log").read_text(encoding="utf-8")
+    assert f"clone https://github.com/mattpocock/skills.git {cache}" in git_log
+
 
 
 def isolated_exporter(tmp_path: Path) -> tuple[Path, Path]:

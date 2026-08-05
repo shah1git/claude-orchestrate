@@ -87,11 +87,17 @@ ok "Python 3 + PyYAML"
 # --- 2-3. Репозитории -------------------------------------------------------
 # clone_or_pull DIR REPO: свежий клон либо ff-only pull; чужие правки не трёт.
 clone_or_pull() {
-  local dir="$1" repo="$2"
+  local dir="$1" repo="$2" parent
   if [ -d "${dir}/.git" ]; then
     git -C "${dir}" pull --ff-only && ok "обновлён ${dir}"
   else
-    [ -w "$(dirname "${dir}")" ] || die "нет прав на $(dirname "${dir}") — выполните: sudo mkdir -p ${dir} && sudo chown -R \"\$(id -un)\" $(dirname "${dir}")"
+    # На свежей машине родительского каталога кэша ещё нет, а `-w` на
+    # несуществующем пути ложен. Прежняя проверка читала это как отсутствие
+    # прав и предлагала sudo, то есть создавала root-овые каталоги в домашней
+    # папке владельца — вред вместо помощи. Создаём путь сами, как это уже
+    # делает ensure_checkout в bootstrap-machine.sh.
+    parent="$(dirname "${dir}")"
+    mkdir -p "${parent}" || die "не удалось создать ${parent} — если каталог принадлежит другому пользователю (например, остался от запуска под sudo), верните его себе: chown -R \"\$(id -un)\" ${parent}"
     git clone "${repo}" "${dir}" && ok "клонирован ${dir}"
   fi
 }
