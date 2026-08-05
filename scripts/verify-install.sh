@@ -368,7 +368,15 @@ for entry in \
   "${HOME}/.claude/skills/pocock-frontier" \
   "${HOME}/.claude/skills/pocock-sweep"; do
   if [ -e "${entry}" ] || [ -L "${entry}" ]; then
-    bad "legacy Claude skill всё ещё активен: ${entry} — запустите install.sh"
+    # Прежний совет «запустите install.sh» был тупиком: установщик удаляет
+    # только свои симлинки, ведущие внутрь текущего чекаута, и сознательно не
+    # трогает ни реальные каталоги, ни ссылки на другие пути. Называем, что это
+    # за запись, и оставляем удаление владельцу.
+    if [ -L "${entry}" ]; then
+      bad "legacy Claude skill всё ещё активен: ${entry} → $(readlink "${entry}") — установщик удаляет только свои ссылки внутрь ${ORCH_DIR}; уберите вручную: rm -f ${entry}"
+    else
+      bad "legacy Claude skill всё ещё активен: ${entry} (не симлинк, а копия прежней установки) — установщик чужие файлы не удаляет; уберите вручную: rm -rf ${entry}"
+    fi
     legacy_found=$((legacy_found + 1))
   fi
 done
