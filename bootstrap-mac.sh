@@ -63,7 +63,7 @@ POCOCK_SKILLS=(
   grill-me grill-with-docs grilling handoff implement
   improve-codebase-architecture prototype research resolving-merge-conflicts
   setup-matt-pocock-skills tdd teach to-spec to-tickets triage wayfinder
-  writing-great-skills
+  writing-for-agents
 )
 # Девять симлинков реестра Codex (тикет #11 — состав хребта + wayfinder/research/handoff).
 CODEX_LINKS=(code-review grill-with-docs handoff implement research tdd to-spec to-tickets wayfinder)

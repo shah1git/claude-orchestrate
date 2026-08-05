@@ -541,7 +541,11 @@ if command -v bun >/dev/null 2>&1; then
     printf '%s\n' "${adapter_out}" | tail -5 | sed 's/^/      /'
   fi
 else
-  bad "bun не найден — TypeScript-адаптер OMP нельзя проверить"
+  # bun — инструмент проверки, а не требование контура: его нет ни в
+  # требованиях README, ни в префлайте bootstrap-mac.sh, ни в install.sh.
+  # Отсутствие тест-раннера — пробел в покрытии, как с pytest выше, а не
+  # неисправная установка.
+  warn "bun не найден — TypeScript-адаптер OMP не проверен (curl -fsSL https://bun.sh/install | bash)"
 fi
 
 # --- Итог --------------------------------------------------------------------
