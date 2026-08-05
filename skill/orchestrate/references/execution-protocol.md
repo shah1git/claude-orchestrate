@@ -58,7 +58,7 @@ pocock_prepare
 → repair_pending: pocock_transition(retry) → pocock_prepare
   or
   lens_prepare_pending: pocock_prepare_lenses
-  → lens_dispatch_pending: one wave-level fixed three-lens task
+  → lens_dispatch_pending: one wave-level fixed two-lens task
     → if one lens alone fails execution or schema validation, retry only that lens
     → adjudication_pending: pocock_adjudicate
       → repair_pending for affected producer attempts: core routes each by its recorded rejection cause (no separate retry)
@@ -123,24 +123,24 @@ browser-assert над фактически наблюдённым `probe` и т�
 запросите `pocock_pregate`.
 
 `pocock_pregate` выполняет запечатанные проверки direct-argv и определяет, какие
-попытки Производителей переходят в ревью. `pocock_prepare_lenses` создаёт ровно три
-различных волновых Рецензента — Standards, Spec и Critic — над точно тем
+попытки Производителей переходят в ревью. `pocock_prepare_lenses` создаёт ровно две
+волновые Линзы — Review и Critic — над точно тем
 подмножеством, которое прошло pre-gate. Волна может сочетать попытки Производителей
 `mechanical`, `skilled` и `judgment` на соответствующих Слотах. Конфигурация делает
-множества Слотов Производителей и Линз непересекающимися, а три Слота Линз —
-попарно разными. До раздачи Линз ядро отказывает замкнуто с
-`independent_reviewer_unavailable`, если непрозрачная строка `resolvedModel` Линзы в
-точности совпадает с любой строкой Производителя Волны; оно не классифицирует
-поставщиков или семейства. Каждая Линза возвращает
+множества Слотов Производителей и Линз непересекающимися, а Слоты Линз —
+попарно разными. Равенство фактических моделей раздачу не отклоняет: ядро сравнивает
+непрозрачные строки до раздачи и повторно после settlement и записывает совпадения как
+наблюдение, не классифицируя поставщиков или семейства. Каждая Линза возвращает
 `{lens, summary, reports:[{attemptId, summary, findings, verdict}]}` с отчётом для
-каждой прошедшей попытки Производителя. Standards и Spec возвращают `NO_VERDICT`,
+каждой прошедшей попытки Производителя. Review отвечает на две оси — стандарты
+репозитория и соответствие Тикету — и возвращает `NO_VERDICT`,
 только Critic возвращает `PASS` или `FAIL`. Если одна Линза отдельно не прошла
 исполнение или проверку схемы, только она получает новую запечатанную попытку на том
 же Слоте.
 
 Только `pocock_adjudicate` рассматривает отчёты: оно сохраняет уже принятые Тикеты
 Производителей и принимает следующий лишь при `PASS` Critic и отсутствии выживших
-блокирующих находок Standards или Spec. Маршрутизация повтора принадлежит коду:
+блокирующих находок Review. Маршрутизация повтора принадлежит коду:
 отсутствующий диагноз использует `lastFailureKind`; `capability` повышает класс
 Тикета от `mechanical` через `skilled` до `judgment`, кроме пишущего Тикета, который
 останавливается на `skilled`; исчерпание допустимой глубины блокируется как

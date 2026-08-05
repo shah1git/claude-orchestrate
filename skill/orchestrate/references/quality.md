@@ -66,12 +66,12 @@ producer's own reasoning, drafts, and self-reports stay excluded exactly as befo
 After deterministic pre-gate, the core takes exactly the producer attempts that passed
 it and creates one wave-level review task. A wave may mix `mechanical`, `skilled`, and
 `judgment` producer attempts on their respective slots. Configuration makes producer and
-lens slot sets disjoint and the three lens slots pairwise distinct. Before dispatching
-lenses, the core fails closed with
-`independent_reviewer_unavailable` if a lens's opaque `resolvedModel` string exactly
-matches that of any producer in the wave; it does not classify vendors or families. The
-task has exactly three distinct reviewer slots: **Standards**, **Spec**, and **Critic**.
-It is one shared task for the passed subset, not a ticket-scoped trio.
+lens slot sets disjoint and the lens slots pairwise distinct. Model equality no longer
+refuses the wave: the core compares opaque model strings before dispatch and again after
+settlement and records any sharing as an observation, without classifying vendors or
+families. The
+task has exactly two distinct reviewer slots: **Review** and **Critic**.
+It is one shared task for the passed subset, not a ticket-scoped pair.
 
 Every lens returns exactly this structure:
 
@@ -79,10 +79,12 @@ Every lens returns exactly this structure:
 {lens, summary, reports:[{attemptId, summary, findings, verdict}]}
 ```
 
-`reports` covers exactly the pre-gate-passed producer attempts. Standards and Spec emit
-`NO_VERDICT` for each report. Critic emits `PASS` or `FAIL` for each report and owns the
+`reports` covers exactly the pre-gate-passed producer attempts. Review answers both the
+repository-standards axis and the ticket-conformance axis and emits
+`NO_VERDICT` for each report; neither axis may be left unanswered. Critic emits `PASS` or
+`FAIL` for each report and owns the
 only verdict. Acceptance also requires no surviving blocking finding introduced by
-Standards or Spec.
+Review.
 
 An execution or schema failure safely attributable to one lens retries only that lens;
 valid reports from the other lenses stay bound to their producer attempts. The failed
@@ -106,8 +108,8 @@ without a separate `retry` step.
 **Current verdict mapping:** Critic returns `FAIL` only for a failed acceptance criterion
 or a surviving `introduced` critical/major finding. `pre-existing`,
 `decision-challenge`, and minor findings remain recorded but do not change a passing
-Critic report. A blocking `introduced` Standards or Spec finding independently prevents
-acceptance even though those lenses emit `NO_VERDICT`.
+Critic report. A blocking `introduced` Review finding independently prevents acceptance
+even though that lens emits `NO_VERDICT`.
 
 **The credential rule — what counts as a documented decision.** A decision credential is:
 an accepted ADR; a CONTEXT.md entry; or an inline decision comment that (a) exists on the
@@ -156,7 +158,7 @@ qualifies as a `decision-challenge`, and self-declared intent comments carry no 
 ### 3b. Isolated lens retry and partial acceptance
 
 The core adjudicates the one wave-level report set, not separate review rounds for each
-ticket. A review transport or schema failure that is isolated to Standards, Spec, or Critic
+ticket. A review transport or schema failure that is isolated to Review or Critic
 creates a new sealed attempt for that failed lens only. It does not redispatch the other
 lenses, revive a settled native task, or discard valid producer results.
 
@@ -215,7 +217,7 @@ bound the loops *inside* a ticket; this bounds the run.
 - deterministic, **UI-facing changes**: the primary user flow is exercised *live* — a
   scripted browser/DOM interaction, or a hand click-through when scripting is
   impractical — so the real event handlers fire before acceptance. tsc, build, and code
-  review (all three lenses) do not substitute for runtime event-handler behavior: the
+  review (both lenses) do not substitute for runtime event-handler behavior: the
   2026-07-09 live-FileList reset passed every static gate and failed on the first real
   click (§8, incident 1);
 - deterministic, **probes**: a negative-path probe must assert *who answered* — body

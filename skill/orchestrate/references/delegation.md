@@ -146,12 +146,13 @@ Hub. A retry is a new sealed attempt authorized only by the current state card.
 After pre-gate, the core dispatches one **wave-level** fixed gate over exactly the
 pre-gate-passed producer attempts. A wave may mix `mechanical`, `skilled`, and
 `judgment` producer attempts on their respective slots. Configuration makes producer and
-lens slot sets disjoint and the three lens slots pairwise distinct. Before dispatching
-lenses, the core fails closed with
-`independent_reviewer_unavailable` if a lens's opaque `resolvedModel` string exactly
-matches that of any producer in the wave; it does not classify vendors or families. Each
+lens slot sets disjoint and the lens slots pairwise distinct. Model equality no longer
+refuses the wave: the core compares opaque model strings before dispatch and again after
+settlement and records any sharing as an observation, without classifying vendors or
+families. Each
 lens returns `{lens, summary, reports:[{attemptId, summary, findings, verdict}]}`, with
-one report for every passed producer attempt. Standards and Spec emit `NO_VERDICT` per
+one report for every passed producer attempt. Review answers both the repository-standards
+axis and the ticket-conformance axis and emits `NO_VERDICT` per
 report; Critic emits `PASS` or `FAIL`. A lens execution or schema failure retries only
 that failed lens on the same slot. A missing retry diagnosis uses `lastFailureKind`;
 `capability` deepens the ticket class (writers stop at `skilled`, exhausted depth blocks
@@ -159,4 +160,4 @@ as `escalation_exhausted`) while `availability` preserves the slot and leaves mo
 replacement to OMP. Central adjudication preserves accepted
 producer tickets. During partial acceptance, each rejected ticket routes directly by its
 recorded rejection cause, without a separate `retry`; acceptance additionally requires no
-surviving blocking Standards or Spec finding.
+surviving blocking Review finding.

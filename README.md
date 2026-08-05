@@ -4,7 +4,7 @@
 
 A native **Oh My Pi (OMP)** control plane for Pocock-style engineering orchestration:
 three public skill heads, model-independent routing, sealed OMP `task` dispatches, durable
-state, and a fail-closed three-lens quality gate.
+state, and a fail-closed two-lens quality gate.
 
 > The point is not to save tokens. The point is to make decomposition, explicit
 > contracts, independent verification, and evidence part of the execution path.
@@ -60,7 +60,7 @@ flowchart LR
     R --> P["запечатанный OMP task batch"]
     P --> A["OMP capability-agents"]
     A --> G["детерминированный pre-gate"]
-    G --> L["один волновой пакет: Standards + Spec + Critic"]
+    G --> L["один волновой пакет: Review + Critic"]
     L --> R
     R --> S["частичная приёмка и синтез"]
 ```
@@ -95,9 +95,8 @@ flowchart LR
 | `@pocock-scout` | дешёвая механическая разведка |
 | `@pocock-builder` | реализация по полной спецификации |
 | `@pocock-architect` | архитектурная работа и суждение |
-| `@pocock-lens-standards` | линза Standards |
-| `@pocock-lens-spec` | линза Spec |
-| `@pocock-lens-critic` | линза Critic |
+| `@pocock-lens-review` | линза Review (стандарты и соответствие Тикету) |
+| `@pocock-lens-critic` | линза Critic (единственный вердикт) |
 
 Какая модель стоит за ролью — решает владелец в основном конфиге OMP
 (`$(omp config path)/config.yml`).
@@ -105,19 +104,18 @@ flowchart LR
 (`retry.fallbackChains`) и контуру не видна. Повтор Pocock сохраняет Слот и не
 создаёт второй механизм замены модели.
 
-Независимость трёх Линз начинается со структуры: множество Слотов
-Производителей и множество Слотов Линз не пересекаются, а Слоты трёх Линз
-попарно различны; это проверяется при загрузке конфигурации
-(`validate_slot_disjointness`). Перед раздачей Линз runtime сравнивает
-разрешённые модели Линз с фактическими `observedModel` Производителей и друг с
-другом. После выполнения Линз runtime повторяет сравнение по их фактическим
-`observedModel`. Совпадение даёт `independent_reviewer_unavailable`. Это не
+Структурная независимость Линз сохранена: множество Слотов Производителей и
+множество Слотов Линз не пересекаются, а Слоты Линз попарно различны; это
+проверяется при загрузке конфигурации (`validate_slot_disjointness`). Равенство
+фактических моделей больше не блокирует раздачу: runtime сравнивает непрозрачные
+строки перед раздачей и после выполнения Линз и записывает совпадения как
+наблюдение ([ADR-0014](docs/adr/0014-two-lens-quality-gate.md)). Это не
 классификация поставщика или семейства и не таблица вендоров.
 
 Файлы [`.omp/agents/pocock-*.md`](.omp/agents/) объявляют способности Слота и
 допустимые инструменты. Адаптер передаёт `observedModel` и `modelFallback`.
-Runtime сохраняет их как оперативную телеметрию и использует `observedModel`
-только для гейта независимости; маршрут по-прежнему задаётся Слотом.
+Runtime сохраняет их как оперативную телеметрию и записывает совпадения моделей
+как наблюдение; маршрут по-прежнему задаётся Слотом.
 
 Маршрут выводится из сигналов Тикета:
 
@@ -206,18 +204,15 @@ runtime/config/manifests. Устаревшая ревизия, повреждё�
   успешным host-assert над наблюдаемым результатом.
 
 Затем для **всей Волны** и только её прошедшего pre-gate подмножества запускается
-один пакет из трёх различных независимых Линз. Волна может законно смешивать
+один пакет из двух Линз. Волна может законно смешивать
 Тикеты классов `mechanical`, `skilled` и `judgment` на соответствующих Слотах.
-Непересечение Слотов Производителей и Линз и попарное различие трёх Линз
-проверяются при загрузке конфигурации.
-Перед раздачей runtime fail-closed сравнивает разрешённые модели Линз с
-фактическими `observedModel` Производителей и друг с другом. После выполнения
-Линз runtime повторяет проверку по их фактическим `observedModel`; совпадение
-даёт `independent_reviewer_unavailable`. Поставщик и семейство при этом не
-выводятся. Каждая Линза возвращает
+Непересечение Слотов Производителей и Линз и попарное различие Слотов Линз
+проверяются при загрузке конфигурации. Равенство фактических моделей раздачу не
+блокирует: совпадения записываются как наблюдение. Каждая Линза возвращает
 `{lens, summary, reports:[{attemptId, summary, findings, verdict}]}` с отчётом
-для каждой прошедшей producer attempt. Standards и Spec дают `NO_VERDICT`;
-только Critic даёт `PASS`/`FAIL`. Ошибка одной Линзы повторяет только её, а не
+для каждой прошедшей producer attempt. Review отвечает на две оси — стандарты
+репозитория и соответствие Тикету — и даёт `NO_VERDICT`; только Critic даёт
+`PASS`/`FAIL`. Ошибка одной Линзы повторяет только её, а не
 всю Волну; повтор сохраняет Слот Линзы.
 Приёмка сохраняет уже прошедшие Тикеты и для каждого нового требует `Critic=PASS`
 и отсутствия выживших блокирующих замечаний, внесённых текущей работой.
@@ -355,13 +350,15 @@ direct path 不创建 Pocock run、状态卡或 lenses，也绝不接收 frontie
 ### 与模型解耦
 
 路由只使用槽位，即 OMP 角色名 `@pocock-scout`、`@pocock-builder`、
-`@pocock-architect` 与三个镜头槽位 `@pocock-lens-*`。具体模型由 OMP 主配置
+`@pocock-architect` 与两个镜头槽位 `@pocock-lens-*`。具体模型由 OMP 主配置
 （`$(omp config path)/config.yml`）决定；代码中没有任何
 GPT、Gemini、Claude、Grok 或 Qwen 名称，也没有供应商白名单。角色**内部**的模型替换
 完全属于 OMP（`retry.fallbackChains`）；Pocock 重试保持同一槽位，不建立第二套模型
-替换机制。三个镜头的独立性由结构保证——生产者槽位集合与镜头槽位集合
-互不相交，配置加载时即校验。适配器将 `observedModel` 和 `modelFallback` 记录为运行时
-遥测；它们本身不会拒绝一次尝试，也不影响验收门。
+替换机制。镜头的结构独立性得以保持——生产者槽位集合与镜头槽位集合互不相交，
+且镜头槽位两两不同，配置加载时即校验。实际模型相同不再拒绝分发：运行时在分发前
+与结算后比较不透明的模型字符串，并将相同之处记录为观察
+（[ADR-0014](docs/adr/0014-two-lens-quality-gate.md)）。适配器将 `observedModel` 和
+`modelFallback` 记录为运行时遥测；它们本身不会拒绝一次尝试，也不影响验收门。
 
 ### 状态、隔离与质量门
 
@@ -374,9 +371,9 @@ cancel-and-re-enter；普通取消只允许明确的 owner abandonment。只有 
 Hub 等待或复活。
 
 结果必须通过确定性 pre-gate。随后只有通过 pre-gate 的 producer subset 进入一个
-wave-level 三 lens 包：独立的 **Standards**、**Spec**、**Critic** 都报告每个 producer
-attempt。Standards/Spec 给出 `NO_VERDICT`，仅 Critic 给出 `PASS`/`FAIL`；仅失败 lens
-重试，已通过工单保持已接收。
+wave-level 双 lens 包：**Review** 与 **Critic** 都报告每个 producer attempt。
+Review 覆盖仓库标准与工单一致性两条轴并给出 `NO_VERDICT`，仅 Critic 给出
+`PASS`/`FAIL`；仅失败 lens 重试，已通过工单保持已接收。
 
 ### 安装与使用
 
@@ -439,17 +436,17 @@ Native batched OMP `task` is the only Pocock worker transport.
 ### Model-independent routing
 
 Routing targets slots — that is, OMP role names: `@pocock-scout`, `@pocock-builder`,
-`@pocock-architect`, and the three lens slots `@pocock-lens-*`. The model behind a
+`@pocock-architect`, and the two lens slots `@pocock-lens-*`. The model behind a
 role is chosen in the main OMP config
 (`$(omp config path)/config.yml`);
 the contour holds no model names and no provider allowlist, so admitting a model from a
 new provider is a config edit alone. Replacing a model *within* a role belongs entirely
 to OMP (`retry.fallbackChains`); Pocock retries keep the same slot and do not create a
-second model-fallback mechanism. Producer slots and lens slots are disjoint sets,
-checked at config load. Before lens dispatch, the runtime compares each resolved lens
-model with the producers' observed models and with the other lens models. After the
-batch settles, it repeats the comparison using every lens's observed model, so a runtime
-fallback collision cannot reach acceptance. Agent definitions in
+second model-fallback mechanism. Producer slots and lens slots are disjoint sets, and the
+lens slots are pairwise distinct, both checked at config load. Model equality no longer
+blocks dispatch: the runtime compares opaque model strings before dispatch and again after
+the batch settles, and records any sharing as an observation
+([ADR-0014](docs/adr/0014-two-lens-quality-gate.md)). Agent definitions in
 [`.omp/agents/`](.omp/agents/) declare capabilities and tool allowlists.
 
 ### Durable state, isolation, and gates
@@ -469,11 +466,11 @@ explicit isolated OMP backend such as `rcopy`, but rejects `none`
 overlayfs/ProjFS, `git worktree`, or a directory copy, plus per-agent tool
 allowlists. This is not an OS container or a network sandbox.
 
-Every pre-gate-passed producer subset receives one wave-level package of exactly three
-distinct independent lenses: **Standards**, **Spec**, and **Critic**. Each reports each
-producer attempt; Standards and Spec emit `NO_VERDICT`, and Critic owns the sole
-`PASS`/`FAIL`. Only a failed lens is retried, and partial acceptance preserves passing
-tickets.
+Every pre-gate-passed producer subset receives one wave-level package of exactly two
+distinct lenses: **Review** and **Critic**. Each reports each producer attempt; Review
+answers both the repository-standards axis and the ticket-conformance axis and emits
+`NO_VERDICT`, while Critic owns the sole `PASS`/`FAIL`. Only a failed lens is retried, and
+partial acceptance preserves passing tickets.
 
 ### Install and verify
 

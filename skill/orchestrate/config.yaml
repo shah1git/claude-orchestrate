@@ -28,7 +28,13 @@
 # Так любая строка журнала разворачивается в точный конфиг, её породивший.
 # =============================================================================
 
-version: 43
+version: 44
+# v44 (2026-08-05, ADR-0014): гейт Волны состоит из двух Линз. Review отвечает
+#      на две оси — стандарты репозитория и соответствие Тикету — и даёт
+#      NO_VERDICT; Critic единолично выносит PASS/FAIL. Равенство фактических
+#      моделей больше не блокирует раздачу и не отклоняет отчёт: оно
+#      записывается как наблюдение. Роли lens-standards и lens-spec выведены,
+#      вместо них lens-review.
 # v43 (2026-08-04, ADR-0013): независимость Линз проверяется по фактическим
 #      observedModel после fallback. Столкновение с Производителем или другой
 #      Линзой повторяет только затронутые Линзы на тех же Слотах.
@@ -1550,8 +1556,7 @@ omp:
     scout:          {alias: "@pocock-scout"}
     builder:        {alias: "@pocock-builder"}
     architect:      {alias: "@pocock-architect"}
-    lens-standards: {alias: "@pocock-lens-standards"}
-    lens-spec:      {alias: "@pocock-lens-spec"}
+    lens-review:    {alias: "@pocock-lens-review"}
     lens-critic:    {alias: "@pocock-lens-critic"}
 
   # Класс тикета -> слот продюсера. Раньше соответствие было размазано между
@@ -1562,20 +1567,18 @@ omp:
     skilled:    {capability: builder,   slot: builder,   effort: med}
     judgment:   {capability: architect, slot: architect, effort: hi}
 
-  # Линза -> слот. Поиск независимого рецензента упразднён вместе с осью
-  # «вендор/семейство». Независимость держится на трёх model-agnostic
-  # проверках: (1) слоты продюсеров и слоты линз не пересекаются, а слоты трёх
-  # линз попарно различны; (2) перед раздачей разрешённые модели линз не
-  # совпадают между собой и с фактическими observedModel продюсеров; (3) после
-  # раздачи фактические observedModel линз не совпадают между собой и с
-  # продюсерами. Проверки моделей сравнивают непрозрачные строки.
+  # Линза -> слот. Гейт состоит из двух Линз (ADR-0014): Review отвечает на две
+  # оси — стандарты репозитория и соответствие Тикету, — и даёт NO_VERDICT;
+  # Critic единолично выносит PASS/FAIL. Структурная независимость сохранена:
+  # слоты продюсеров и слоты линз не пересекаются, а слоты линз попарно
+  # различны. Равенство фактических моделей больше не блокирует раздачу: оно
+  # вычисляется сравнением непрозрачных строк и записывается как наблюдение.
   lenses:
-    names: [Standards, Spec, Critic]
+    names: [Review, Critic]
     capability: reviewer
     slots:
-      Standards: {slot: lens-standards, effort: med}
-      Spec:      {slot: lens-spec,      effort: med}
-      Critic:    {slot: lens-critic,    effort: hi}
+      Review: {slot: lens-review, effort: hi}
+      Critic: {slot: lens-critic, effort: hi}
 
   # Слот -> агент. Этот же перечень читает отпечаток доверенных манифестов
   # (trusted_manifest_fingerprint), поэтому у каждого слота обязан быть агент.
@@ -1595,8 +1598,7 @@ omp:
     reviewer:
       writer: false
       agents:
-        lens-standards: pocock-lens-standards
-        lens-spec: pocock-lens-spec
+        lens-review: pocock-lens-review
         lens-critic: pocock-lens-critic
 
   pre_gate:

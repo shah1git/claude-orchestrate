@@ -61,8 +61,8 @@ SCHEMA = {
     "gates": {"type": dict, "children": {
         # v11 (slice 3, issue #7): dual_lens_triggers, dual_lens_correctness_model, and
         # cross_model_third_lens are retired along with the mechanism they configured —
-        # the schema does not carry a dead canon's vocabulary forward. `lenses` is the
-        # fixed three-lens gate that replaced it (gates.lenses.{standards,spec,critic}).
+        # the schema does not carry a dead canon's vocabulary forward. `lenses` here is
+        # the archival run_lane gate block; the active gate is omp.lenses (ADR-0014).
         "lenses": {"type": dict},
         "ui_live_check": {"type": str},
         "probe_responder_identity": {"type": str},

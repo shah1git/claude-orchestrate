@@ -596,7 +596,7 @@ def test_portable_profile_declares_pocock_agent_roles_and_rejects_missing_role(
         for manifest in POCOCK_AGENT_MANIFESTS.glob("pocock-*.md")
         if manifest.is_file()
     }
-    assert len(pocock_roles) == 6
+    assert len(pocock_roles) == 5
 
     profile = yaml.safe_load(PORTABLE_PROFILE.read_text(encoding="utf-8"))
     model_roles = profile["modelRoles"]

@@ -1,6 +1,6 @@
 ---
 name: orchestrate-frontier
-description: Execute an already-published, provenance-backed Pocock ticket frontier as lead orchestrator — sealed delegation, wave-level three-lens quality gates, and synthesis. Use only when the tracker already contains the approved spine and dependency-linked tickets. This head always enters Pocock after status; its work is never eligible for the direct path. Do NOT use for raw or decision-bearing work (/orchestrate) or a closed, unpublished run-local ledger (/orchestrate-sweep).
+description: Execute an already-published, provenance-backed Pocock ticket frontier as lead orchestrator — sealed delegation, wave-level two-lens quality gates, and synthesis. Use only when the tracker already contains the approved spine and dependency-linked tickets. This head always enters Pocock after status; its work is never eligible for the direct path. Do NOT use for raw or decision-bearing work (/orchestrate) or a closed, unpublished run-local ledger (/orchestrate-sweep).
 argument-hint: [фильтр тикетов, или пусто — весь фронтир]
 effort: xhigh
 ---

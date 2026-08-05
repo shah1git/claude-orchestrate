@@ -87,7 +87,7 @@ ISOLATED_OMP_MODES = frozenset(
 
 SWEEP_INTEGRATIONS = frozenset({"aggregate", "disjoint_patches"})
 
-LENS_NAMES = ("Standards", "Spec", "Critic")
+LENS_NAMES = ("Review", "Critic")
 INCOMPLETE_TRACKER_REFERENCE_RE = re.compile(r"(?<![A-Za-z0-9_./:-])#\d+(?![A-Za-z0-9_])")
 
 
@@ -181,9 +181,9 @@ def validate_slot_disjointness(omp: dict[str, Any]) -> None:
     occupy and no other lens shares. That is a statement about slot names
     alone, so it is settled here once instead of being recomputed per wave from
     model metadata. It does not, and cannot, catch two slots that resolve to the
-    same model; `assert_reviewers_are_independent` checks the known witnesses at
-    dispatch and `observed_reviewer_collisions` checks runtime fallbacks after
-    settlement.
+    same model; `reviewer_model_collisions` observes the known witnesses at
+    dispatch and `observed_reviewer_collisions` observes runtime fallbacks after
+    settlement. Neither refuses the wave (ADR-0014).
     """
     producers: set[str] = set()
     producer_map = omp.get("producers")
@@ -1196,6 +1196,11 @@ def card(state: dict[str, Any]) -> dict[str, Any]:
     retry_lenses = state.get("retryLensNames", [])
     if retry_lenses:
         result["retryLensNames"] = list(retry_lenses)
+    waves = state.get("waves")
+    if isinstance(waves, list) and waves and isinstance(waves[-1], dict):
+        collisions = waves[-1].get("reviewerModelCollisions")
+        if collisions:
+            result["reviewerModelCollisions"] = list(collisions)
     return result
 
 
@@ -3442,13 +3447,17 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
         completed_lenses = latest_completed_lens_attempts(state, require_text(wave.get("waveId"), "wave.waveId"))
         missing_lenses = set(LENS_NAMES) - set(completed_lenses)
         if not failed_lenses and not missing_lenses:
-            for lens, reason in observed_reviewer_collisions(state, completed_lenses).items():
-                record_failure(
-                    completed_lenses[lens],
-                    code="independent_reviewer_unavailable",
-                    reason=reason,
-                    failure_kind="invalid",
-                )
+            # ADR-0014: a shared model is recorded, never a reason to discard a
+            # settled report. The fresh context window is the independence that
+            # matters, and a valid report is not evidence about its own routing.
+            # The pre-dispatch observation is kept: settlement adds what runtime
+            # fallback revealed instead of erasing what was known before it.
+            recorded = list(wave.get("reviewerModelCollisions", []))
+            wave["reviewerModelCollisions"] = recorded + [
+                note
+                for note in observed_reviewer_collisions(state, completed_lenses)
+                if note not in recorded
+            ]
         if failed_lenses:
             schedule_lens_retry(
                 cwd,
@@ -3799,17 +3808,16 @@ def observed_attempt_model(attempt: dict[str, Any], label: str) -> str:
     return model_base(observed)
 
 
-def assert_reviewers_are_independent(
+def reviewer_model_collisions(
     chosen: dict[str, dict[str, Any]],
     producers: list[dict[str, Any]],
-) -> None:
-    """Refuse a wave with a known producer/reviewer or reviewer collision.
+) -> list[str]:
+    """Observe, without refusing, producer/reviewer and reviewer model sharing.
 
-    Disjoint slots guarantee different roles, not different models: the owner
-    may point two roles at one model. Producer results have already settled, so
-    their observed witnesses are authoritative. Reviewer witnesses are the
-    models OMP resolves before dispatch; runtime fallback is checked again when
-    the reviewer results settle.
+    ADR-0014 keeps the observation and drops the veto. Producer results have
+    already settled, so their observed witnesses are authoritative. Reviewer
+    witnesses are the models OMP resolves before dispatch; runtime fallback is
+    observed again when the reviewer results settle.
     """
     producing = {
         observed_attempt_model(producer, f"producer {producer.get('attemptId', 'unknown')}")
@@ -3820,7 +3828,7 @@ def assert_reviewers_are_independent(
         for lens, bound in chosen.items()
     }
     producer_collisions = sorted(
-        f"{lens} ({bound['witness']['resolvedModel']})"
+        f"{lens} ({bound['witness']['resolvedModel']}) shares a producer model"
         for lens, bound in chosen.items()
         if reviewer_models[lens] in producing
     )
@@ -3828,23 +3836,18 @@ def assert_reviewers_are_independent(
     for lens, model in reviewer_models.items():
         reviewers_by_model.setdefault(model, []).append(lens)
     reviewer_collisions = sorted(
-        f"{', '.join(sorted(lenses))} ({model})"
+        f"{', '.join(sorted(lenses))} share {model}"
         for model, lenses in reviewers_by_model.items()
         if len(lenses) > 1
     )
-    collisions = producer_collisions + reviewer_collisions
-    fail(
-        bool(collisions),
-        "independent_reviewer_unavailable",
-        "reviewer model independence is unavailable: " + "; ".join(collisions),
-    )
+    return producer_collisions + reviewer_collisions
 
 
 def observed_reviewer_collisions(
     state: dict[str, Any],
     completed_lenses: dict[str, dict[str, Any]],
-) -> dict[str, str]:
-    """Return lens-specific failures after OMP has applied runtime fallbacks."""
+) -> list[str]:
+    """Return model sharing observed after OMP has applied runtime fallbacks."""
     producer_models: set[str] = set()
     for attempt in completed_lenses.values():
         for producer_attempt_id in attempt["producerAttemptIds"]:
@@ -3857,16 +3860,14 @@ def observed_reviewer_collisions(
         model = observed_attempt_model(attempt, f"lens {lens}")
         reviewers_by_model.setdefault(model, []).append(lens)
 
-    failures: dict[str, str] = {}
-    for model, lenses in reviewers_by_model.items():
+    notes: list[str] = []
+    for model, lenses in sorted(reviewers_by_model.items()):
+        names = ", ".join(sorted(lenses))
         if model in producer_models:
-            for lens in lenses:
-                failures[lens] = f"lens {lens} used producer model {model} after runtime fallback"
+            notes.append(f"{names} used producer model {model} after runtime fallback")
         if len(lenses) > 1:
-            names = ", ".join(sorted(lenses))
-            for lens in lenses:
-                failures[lens] = f"lenses {names} used the same model {model} after runtime fallback"
-    return failures
+            notes.append(f"lenses {names} used the same model {model} after runtime fallback")
+    return notes
 
 
 def lens_task_text(lens: str, producers: list[dict[str, Any]], state: dict[str, Any]) -> str:
@@ -3891,9 +3892,11 @@ def lens_task_text(lens: str, producers: list[dict[str, Any]], state: dict[str, 
         f"PREGATE: {canonical(state.get('pregate', {}))}\n\n"
         "Inspect the repository and every listed disk artifact yourself. Return exactly "
         "{lens, summary, reports:[{attemptId, summary, findings, verdict}]}; reports must cover "
-        "every listed producer attempt exactly once. Standards and Spec emit NO_VERDICT in every "
-        "report; Critic emits PASS or FAIL in every report. Every finding must identify scope and "
-        "concrete evidence. Do not modify files."
+        "every listed producer attempt exactly once. Review answers two axes explicitly in every "
+        "report - conformance to this repository's documented standards, and conformance to the "
+        "ticket - and emits NO_VERDICT; neither axis may be left unanswered. Critic emits PASS or "
+        "FAIL in every report. Every finding must identify scope and concrete evidence. "
+        "Do not modify files."
     )
 
 
@@ -3925,7 +3928,7 @@ def command_prepare_lenses(cwd: Path, explicit_state_dir: str | None, request: d
         fail(
             not isinstance(configured_names, list) or tuple(configured_names) != LENS_NAMES,
             "config_invalid",
-            "OMP lenses.names must define the fixed Standards, Spec, Critic wave gate",
+            "OMP lenses.names must define the fixed Review, Critic wave gate",
         )
         requested_retry_names = retry_lens_names(state)
         lens_names = ordered_lens_names(requested_retry_names) if requested_retry_names else list(LENS_NAMES)
@@ -3935,7 +3938,7 @@ def command_prepare_lenses(cwd: Path, explicit_state_dir: str | None, request: d
         budget_check(state, config, projection)
         capability = config["omp"].get("lenses", {}).get("capability")
         selected_reviewers = select_wave_reviewers(state, config, lens_names)
-        assert_reviewers_are_independent(selected_reviewers, producers)
+        wave["reviewerModelCollisions"] = reviewer_model_collisions(selected_reviewers, producers)
 
         items = []
         lens_ids = []
@@ -3981,7 +3984,7 @@ def command_prepare_lenses(cwd: Path, explicit_state_dir: str | None, request: d
             })
 
         task_input = {
-            "context": f"Pocock fixed three-lens wave gate for run {state['runId']}. Reports are producer-attempt-bound and read-only.",
+            "context": f"Pocock fixed two-lens wave gate for run {state['runId']}. Reports are producer-attempt-bound and read-only.",
             "tasks": items,
         }
         state["pendingDispatch"] = {
@@ -4038,11 +4041,11 @@ def command_adjudicate(cwd: Path, explicit_state_dir: str | None, request: dict[
         failed_producers: set[str] = set()
         for producer_id in passed_ids:
             reports = grouped[producer_id]
-            fail(set(reports) != set(LENS_NAMES), "lens_result_invalid", f"producer {producer_id} lacks the fixed three lenses")
+            fail(set(reports) != set(LENS_NAMES), "lens_result_invalid", f"producer {producer_id} lacks a report from every fixed wave lens")
             if reports["Critic"]["verdict"] != "PASS":
                 failures.append(f"Critic FAIL for {producer_id}")
                 failed_producers.add(producer_id)
-            for lens in ("Standards", "Spec"):
+            for lens in ("Review",):
                 for finding in reports[lens]["findings"]:
                     if finding["blocking"] is True and finding["scope"] == "introduced":
                         failures.append(f"blocking {lens} finding for {producer_id}: {finding['evidence']}")
@@ -4072,6 +4075,7 @@ def command_adjudicate(cwd: Path, explicit_state_dir: str | None, request: dict[
             "acceptedAttemptIds": accepted_producers,
             "failedAttemptIds": [producer_id for producer_id in passed_ids if producer_id in failed_producers],
             "retryTicketIds": sorted(retry_tickets),
+            "reviewerModelCollisions": list(wave.get("reviewerModelCollisions", [])),
         }
         if accepted_producers:
             wave["status"] = "accepted" if not retry_tickets else "partial_acceptance"
