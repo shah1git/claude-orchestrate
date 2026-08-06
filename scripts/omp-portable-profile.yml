@@ -9,6 +9,7 @@ providers:
   webSearchOrder:
   - xai
   - codex
+  - exa
   - gemini
   - kimi
   openaiWebsockets: auto
