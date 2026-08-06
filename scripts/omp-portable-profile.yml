@@ -6,7 +6,10 @@
 # Do not hand-edit: run the exporter on the machine whose behavior should travel,
 # then commit the result. A hand edit reintroduces the drift the exporter removes.
 providers:
-  webSearchOrder: []
+  webSearchOrder:
+  - xai
+  - gemini
+  - kimi
   openaiWebsockets: auto
   kimiApiFormat: auto
   antigravityEndpoint: auto
@@ -20,6 +23,8 @@ providers:
     xai-oauth: 1
     alibaba-token-plan: 3
   autoThinkingMaxEffort: xhigh
+  webSearchGeminiModel: gemini-3.6-flash
+  webSearchExclude: []
 modelRoles:
   default: openai-codex/gpt-5.6-sol:high
   smol: openai-codex/gpt-5.6-luna:high
