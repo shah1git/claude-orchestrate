@@ -259,7 +259,8 @@ print(f"{len(roles)} modelRoles and {len(roles)} fallbackChains")
 
 # --- A. Чекаут ---------------------------------------------------------------
 echo "== Чекаут =="
-if [ -d "${ORCH_DIR}/.git" ]; then
+# `-d "${ORCH_DIR}/.git"` не годится: в связанном worktree `.git` — файл.
+if git -C "${ORCH_DIR}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   head_sha="$(git -C "${ORCH_DIR}" rev-parse --short HEAD)"
   head_sub="$(git -C "${ORCH_DIR}" log -1 --pretty=%s)"
   ok "${ORCH_DIR} @ ${head_sha} — ${head_sub}"
