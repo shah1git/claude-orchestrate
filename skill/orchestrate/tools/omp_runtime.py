@@ -249,7 +249,6 @@ def active_policy_snapshot(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "version": config.get("version"),
         "omp": config.get("omp"),
-        "session_budget": config.get("session_budget"),
         "shape_values": shape.get("values") if isinstance(shape, dict) else None,
         "routing": config.get("routing"),
         "gates_pre_gate": gates.get("pre_gate") if isinstance(gates, dict) else None,
@@ -1184,8 +1183,6 @@ def card(state: dict[str, Any]) -> dict[str, Any]:
         result["blockedTicketIds"] = list(sweep.get("blockedTicketIds", []))
     if state.get("blockedReason"):
         result["blockedReason"] = state["blockedReason"]
-    if state.get("budgetExhausted"):
-        result["budgetExhausted"] = True
     for field in ("cancelReason", "supersededBy"):
         value = nullable_text(state.get(field))
         if value is not None:
@@ -1449,9 +1446,7 @@ def command_start(cwd: Path, explicit_state_dir: str | None, request: dict[str, 
             "lensAttempts": {},
             "evidence": [],
             "tokensSpent": 0,
-            "projectedTokens": 0,
             "telemetryRecorded": False,
-            "budgetExhausted": False,
             "blockedReason": None,
         }
         active = require_start_slot(cwd, explicit_state_dir, manifest_fingerprint)
@@ -1557,7 +1552,6 @@ def command_transition(cwd: Path, explicit_state_dir: str | None, request: dict[
                     ticket_ids.append(str(attempt["ticketId"]))
                 else:
                     failed_lenses.add(str(attempt.get("lens")))
-            state["projectedTokens"] = max(0, int(state.get("projectedTokens", 0)) - int(pending.get("projection", 0)))
             pending["status"] = "abandoned"
             pending["abandonedAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
             pending["abandonReason"] = reason
@@ -1659,10 +1653,6 @@ def command_transition(cwd: Path, explicit_state_dir: str | None, request: dict[
                 remaining_ids = sweep["remainingTicketIds"]
                 ready_ids = sweep["readyTicketIds"]
                 fail(not remaining_ids, "sweep_exhausted", "sweep has no remaining tickets; begin synthesis instead")
-                if state.get("budgetExhausted"):
-                    state["phase"] = "blocked"
-                    state["blockedReason"] = f"token budget exhausted with remaining sealed tickets: {', '.join(remaining_ids)}"
-                    return
                 if not ready_ids:
                     state["phase"] = "blocked"
                     state["blockedReason"] = f"sealed DAG has no ready tickets: {', '.join(remaining_ids)}"
@@ -1731,10 +1721,6 @@ def command_transition(cwd: Path, explicit_state_dir: str | None, request: dict[
             if not next_ids:
                 state["phase"] = "blocked"
                 state["blockedReason"] = f"tracker frontier has only blocked remaining tickets: {', '.join(blocked_ids)}"
-                return
-            if state.get("budgetExhausted"):
-                state["phase"] = "blocked"
-                state["blockedReason"] = f"token budget exhausted with remaining tickets: {', '.join(remaining_ids)}"
                 return
             state["authorizedNextTickets"] = next_ids
             state["pendingDispatch"] = None
@@ -2346,14 +2332,6 @@ def slot_for(mapping: dict[str, Any], key: str, label: str) -> dict[str, Any]:
     return {"slot": slot, "definition": definition}
 
 
-def budget_check(state: dict[str, Any], config: dict[str, Any], projection: int) -> None:
-    maximum = int(config.get("session_budget", {}).get("tokens_max", 0))
-    spent = int(state.get("tokensSpent", 0))
-    reserved = int(state.get("projectedTokens", 0))
-    fail(maximum <= 0, "config_invalid", "session_budget.tokens_max must be positive")
-    fail(spent + reserved + projection > maximum, "budget_exceeded", f"dispatch projection {spent + reserved + projection} exceeds token budget {maximum}", spent=spent, reserved=reserved, projection=projection, maximum=maximum)
-
-
 def command_prepare(cwd: Path, explicit_state_dir: str | None, request: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     def apply(state: dict[str, Any]) -> None:
         require_run_config(state, config)
@@ -2413,9 +2391,6 @@ def command_prepare(cwd: Path, explicit_state_dir: str | None, request: dict[str
         max_attempts = int(config.get("routing", {}).get("escalation", {}).get("max_attempts_per_subtask", 2))
         exhausted = sorted(ticket_id_value for ticket_id_value in ids if ticket_failure_count(state, ticket_id_value) >= max_attempts)
         fail(bool(exhausted), "retry_limit", f"retry limit reached for: {', '.join(exhausted)}")
-        per_ticket = int(config["omp"].get("budget_projection", {}).get("producer_per_ticket", 0))
-        projection = per_ticket * len(tickets)
-        budget_check(state, config, projection)
         wave_no = len(state["waves"]) + 1
         base_sha = None
         if any(ticket["write"] for ticket in tickets):
@@ -2504,7 +2479,6 @@ def command_prepare(cwd: Path, explicit_state_dir: str | None, request: dict[str
             "taskInput": task_input,
             "inputHash": digest(task_input),
             "createdAt": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "projection": projection,
         }
         wave = {
             "waveId": f"wave-{wave_no}",
@@ -2524,7 +2498,6 @@ def command_prepare(cwd: Path, explicit_state_dir: str | None, request: dict[str
         state["waves"].append(wave)
         state["currentWave"] = wave["waveId"]
         state["pendingDispatch"] = pending
-        state["projectedTokens"] = int(state.get("projectedTokens", 0)) + projection
         state["blockedReason"] = None
         state["authorizedNextTickets"] = None
         set_retry_ticket_ids(state, set())
@@ -3389,12 +3362,6 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
         pending["toolCallId"] = tool_call_id
         pending["executedInputHash"] = digest(executed_input)
         state["tokensSpent"] = int(state.get("tokensSpent", 0)) + observed_tokens
-        projection = int(pending.get("projection", 0))
-        if projection <= 0:
-            projection_key = "producer_per_ticket" if kind == "producer" else "lens_per_ticket"
-            projection_each = int(config["omp"].get("budget_projection", {}).get(projection_key, 0))
-            projection = projection_each * len(results)
-        state["projectedTokens"] = max(0, int(state.get("projectedTokens", 0)) - projection)
 
         if kind == "producer":
             wave = current_wave(state)
@@ -3933,9 +3900,6 @@ def command_prepare_lenses(cwd: Path, explicit_state_dir: str | None, request: d
         requested_retry_names = retry_lens_names(state)
         lens_names = ordered_lens_names(requested_retry_names) if requested_retry_names else list(LENS_NAMES)
         wave_id = require_text(wave.get("waveId"), "wave.waveId")
-        projection_each = int(config["omp"].get("budget_projection", {}).get("lens_per_ticket", 0))
-        projection = projection_each * len(lens_names) * len(producers)
-        budget_check(state, config, projection)
         capability = config["omp"].get("lenses", {}).get("capability")
         selected_reviewers = select_wave_reviewers(state, config, lens_names)
         wave["reviewerModelCollisions"] = reviewer_model_collisions(selected_reviewers, producers)
@@ -3998,9 +3962,7 @@ def command_prepare_lenses(cwd: Path, explicit_state_dir: str | None, request: d
             "taskInput": task_input,
             "inputHash": digest(task_input),
             "createdAt": dt.datetime.now(dt.timezone.utc).isoformat(),
-            "projection": projection,
         }
-        state["projectedTokens"] = int(state.get("projectedTokens", 0)) + projection
         state["phase"] = "lens_dispatch_pending"
         state["blockedReason"] = None
 
@@ -4160,7 +4122,6 @@ def command_accept(cwd: Path, explicit_state_dir: str | None, request: dict[str,
                 )
 
         shape = telemetry_shape_for_entry(config, state["entry"])
-        budget_exhausted = False
         already_recorded = recorded_telemetry_keys(config, state["runId"])
         for attempt in accepted:
             ticket = str(attempt["ticketId"])
@@ -4196,36 +4157,16 @@ def command_accept(cwd: Path, explicit_state_dir: str | None, request: dict[str,
                 )
             except subprocess.TimeoutExpired as exc:
                 raise RuntimeFailure("telemetry_failed", f"telemetry writer exceeded {TELEMETRY_TIMEOUT_SECONDS}s") from exc
-            if completed.returncode not in {0, 2}:
+            if completed.returncode != 0:
                 raise RuntimeFailure("telemetry_failed", completed.stderr.strip() or "telemetry writer rejected an acceptance record")
             telemetry_events.append({"ticket": ticket, "exitCode": completed.returncode, "stdout": completed.stdout.strip()})
             attempt["status"] = "recorded"
-            if completed.returncode == 2:
-                budget_exhausted = True
-        # Recompute the canonical run budget even when every PASS row was
-        # deduplicated after a prior writer timed out post-append. Exit code 2
-        # is part of the persisted budget verdict, not merely this process's
-        # transient writer result.
-        try:
-            budget_check = subprocess.run(
-                [sys.executable, str(TELEMETRY_TOOL), "--check-only", "--skill-dir", str(SKILL_DIR), "--run-id", state["runId"]],
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=TELEMETRY_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeFailure("telemetry_failed", f"telemetry budget check exceeded {TELEMETRY_TIMEOUT_SECONDS}s") from exc
-        if budget_check.returncode not in {0, 2}:
-            raise RuntimeFailure("telemetry_failed", budget_check.stderr.strip() or "telemetry writer could not reconstruct the run budget")
-        budget_exhausted = budget_check.returncode == 2
 
         if sweep is not None:
             sweep["acceptedTicketIds"] = sorted(set(sweep["acceptedTicketIds"]) | set(accepted_ticket_ids_now))
             set_sweep_progress(sweep)
             state["frontierExhausted"] = not sweep["remainingTicketIds"]
         state["telemetryRecorded"] = True
-        state["budgetExhausted"] = budget_exhausted
         state["telemetryEvents"] = telemetry_events
 
     state, _ = mutate(cwd, explicit_state_dir, request, apply)

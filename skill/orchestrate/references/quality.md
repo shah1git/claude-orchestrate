@@ -167,7 +167,7 @@ attempts. During partial acceptance the core routes each one directly from its r
 rejection cause, rather than exposing a separate `retry` step. Their repair is a new
 sealed producer attempt followed by its deterministic pre-gate and review binding;
 accepted tickets in the same wave remain accepted. The lead cannot turn a recoverable
-failure into automatic cancellation or a new run: attempt limits, budget, and
+failure into automatic cancellation or a new run: attempt limits, observed spend, and
 authorization stay with the durable run.
 
 **Proportionality stop.** When cumulative gate + fix spend crosses the configured ratio
@@ -180,24 +180,28 @@ concentrated in security/auth/transactional work — rounds beyond the caps re-d
 they do not converge; the 2026-07-12 a real project case (several "final reviews" costing
 more than the 210-line feature) is the incident that pinned this.
 
-**Session budget (v15; fuse v21).** The run-level counterpart of the proportionality
-stop: when the run's cumulative token spend across this run's §7 records crosses config
-`session_budget.tokens_max`, the core stops dispatching new tickets, lets in-flight
-tickets finish their authorized gates, and reports the remaining frontier as not-done.
-The same durable run retains its accepted tickets, remaining work, budget consumption, and
-attempt counters; a later OMP session hydrates that run rather than starting one that
-forgets the breach. The check is not the lead's memory — it is computed by
-`tools/telemetry_append.py` on every record append (records land at ticket acceptance,
-§7), printed as a running total, and a breach exits non-zero: the signal arrives exactly
-between the acceptance just logged and the dispatch it should stop. Between appends — e.g.
-before committing to one more parallel wave — the same arithmetic is available on demand:
-`tools/telemetry_append.py --check-only --task <run>`. Continuing after an authorized
-budget resolution is a named runtime transition, never a session reset. Grounding, twice
-over: the 2026-07-17 neighbour-project incident — an overnight loop with no external
-budget spun to 4× the volume of everything previously accepted — and the 2026-07-18 first
-live run under v17, which crossed the 3.0M ceiling at ~3.9M unnoticed until the run
-summary because the then-prose-only check ran at no dispatch point at all. Per-ticket caps
-bound the loops *inside* a ticket; this bounds the run.
+**Run token spend — observed, never a stop (v45, ADR-0015).** The run's cumulative token
+spend across this run's §7 records is counted and published: the durable run carries it as
+`tokensSpent`, accumulated as each attempt settles, and `tools/telemetry_append.py` prints
+the running total on every append (records land at ticket acceptance, §7). Between appends
+the same arithmetic is available on demand: `tools/telemetry_append.py --check-only --task
+<run>`. Spend is an observation and nothing else: no total ever withholds a dispatch. The
+same durable run retains its accepted tickets, remaining work, observed spend, and attempt
+counters; a later OMP session hydrates that run rather than starting one that forgets what
+was already paid for. What *does* bound the loops is per-ticket:
+`gates.review_loop.full_rounds_max`, the proportionality stop above, and
+`gates.pre_gate.max_diff_lines`.
+
+Why the run-level fuse existed and why it is gone. It was grounded twice over: the
+2026-07-17 neighbour-project incident — an overnight loop with no external budget spun to
+4× the volume of everything previously accepted — and the 2026-07-18 first live run under
+v17, which crossed the then-current 3.0M ceiling at ~3.9M unnoticed until the run summary.
+Both readings argued for a run-level number, and the number measured the wrong quantity:
+total spend is the price of the real work, not evidence of a spinning loop. The 3.0M figure
+was an initial guess of v21; it blocked a healthy run at 3,045,296 tokens, and raising it
+would only move the same wall further out. Owner's decision, 2026-08-06: the ceiling is
+removed outright. Bounding the cost of a run belongs to the owner and to provider quotas —
+the contour reports the spend and keeps dispatching.
 
 ## 4. Rubric templates by deliverable type
 
@@ -290,15 +294,14 @@ The complexity→tier rubric ships a priori; this log makes it empirical. The le
 appends one record per **delegated** ticket to `telemetry/routing-log.jsonl` in the
 skill directory — **at the moment the ticket's final verdict lands** (gate accepted,
 FAIL declared, MISROUTE voided), not batched at the end of the session. Two reasons,
-both paid for in telemetry: the session-budget fuse (§3) can only stop the next
-dispatch if the sum exists *during* the run, and a mid-run session death loses no
-records (the v20 resume-pack logic then reads an honest log). Every append goes
-through `tools/telemetry_append.py` — the tool is the §7 contract made executable
-(field names, the seven-value verdict vocabulary, the config stamp) and the budget
-fuse in one write path; hand-appended lines are how the vocabulary drifted three
-times. Step 5 then verifies completeness — every delegated ticket has its row — and
-appends the run-summary record. The file is data, not doctrine — read it for
-recalibration, never load it into a ticket.
+both paid for in telemetry: the run's observed spend (§3) is only a live figure if the sum
+exists *during* the run, and a mid-run session death loses no records (the v20 resume-pack
+logic then reads an honest log). Every append goes through `tools/telemetry_append.py` —
+the tool is the §7 contract made executable (field names, the seven-value verdict
+vocabulary, the config stamp) and the running spend total in one write path; hand-appended
+lines are how the vocabulary drifted three times. Step 5 then verifies completeness —
+every delegated ticket has its row — and appends the run-summary record. The file is
+data, not doctrine — read it for recalibration, never load it into a ticket.
 
 One JSON object per line:
 
@@ -354,18 +357,18 @@ routinely burning more than its tier is worth? — not just correctness; the two
 are what make the Step 2 rubric empirical. **v32 (owner's decision, 2026-07-30):** for a
 cross-provider record populated `--from-envelope`, `tokens` counts only NOT-cached
 tokens — a cached read is billed at roughly a tenth of a fresh token, and summing it at
-face value nearly doubled the recorded spend on a live run, tripping `session_budget`
-mid-run. `tools/telemetry_append.py`'s `envelope_tokens()` picks the accounting
-convention by the NAME of the usage counter actually present (never guessed from the
-lane/vendor): `cached_input_tokens` (OpenAI/codex) is a subset of `input_tokens` and is
-subtracted out; `cache_read_input_tokens` (Anthropic/xAI/Moonshot) is a sibling counter,
-excluded rather than subtracted from `input_tokens`. A counter that violates its own
-convention's invariant (a cached count larger than the total it should be a subset of, or
-a lone cache counter with no other witness at all) yields `"n/a"`, never a negative number
-or a manufactured zero — a broken witness must not silently move the running budget total
-the wrong direction. Records written before v32 are unaffected and not retroactively
-recomputed — they are read as their own config fingerprint's rule, per that snapshot's
-`session_budget` note.
+face value nearly doubled the recorded spend on a live run, tripping the then-current
+budget fuse mid-run (that fuse is gone since v45, ADR-0015). `tools/telemetry_append.py`'s
+`envelope_tokens()` picks the accounting convention by the NAME of the usage counter
+actually present (never guessed from the lane/vendor): `cached_input_tokens` (OpenAI/codex)
+is a subset of `input_tokens` and is subtracted out; `cache_read_input_tokens`
+(Anthropic/xAI/Moonshot) is a sibling counter, excluded rather than subtracted from
+`input_tokens`. A counter that violates its own convention's invariant (a cached count
+larger than the total it should be a subset of, or a lone cache counter with no other
+witness at all) yields `"n/a"`, never a negative number or a manufactured zero — a broken
+witness must not silently move the running spend total the wrong direction. Records
+written before v32 are unaffected and not retroactively recomputed — they are read as
+their own config fingerprint's rule, per that snapshot's own token-accounting note.
 
 Review-loop fields (optional, v8) — `rounds` (integer: full critic rounds consumed, §3b;
 delta re-verifications excluded) may be appended to gated records. Finding-scope counts

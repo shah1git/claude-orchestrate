@@ -44,8 +44,8 @@ OMP-агентам. Результат нельзя принять одним р
 
 Прямой путь не создаёт Pocock-Прогон, Карточку состояния или Линзы и никогда не
 принимает Фронтир либо Прочёс. После входа все три Головы используют одно
-исполнительное ядро; они не содержат собственных копий маршрутизации, Бюджетов,
-ретраев или правил приёмки.
+исполнительное ядро; они не содержат собственных копий маршрутизации, ретраев
+или правил приёмки.
 
 ### Архитектура
 
@@ -74,8 +74,8 @@ flowchart LR
 - **Управляющий контур** —
   [`skill/orchestrate/tools/omp_runtime.py`](skill/orchestrate/tools/omp_runtime.py).
   Он владеет единственным долговечным Прогоном рабочего каталога, фазами, допустимыми
-  переходами, маршрутизацией, лимитами попыток, резервом токенов, pre-gate, приёмкой и
-  HMAC-аутентифицированной Карточкой состояния на диске.
+  переходами, маршрутизацией, лимитами попыток, наблюдаемым расходом токенов, pre-gate,
+  приёмкой и HMAC-аутентифицированной Карточкой состояния на диске.
 - **Транспорт Pocock** — только нативный OMP `task` в пакетном режиме. Публичные
   Головы не запускают CLI отдельных вендоров и не строят вложенный оркестратор.
   Исключение до `pocock_enter` — строго ограниченный Прямой путь `/orchestrate`;
@@ -147,8 +147,10 @@ runId · revision · stateHash · configFingerprint · manifestFingerprint · ph
 `~/.local/state/pocock-omp`) по рабочему каталогу. Ядро допускает ровно один
 нетерминальный долговечный Прогон на этот каталог между всеми OMP-сессиями.
 Новая сессия вызывает `pocock_status` без `runId`; ядро находит Прогон на диске,
-а адаптер гидратирует его Карточку. Бюджет и счётчики попыток принадлежат Прогону
-и не сбрасываются новой сессией.
+а адаптер гидратирует его Карточку. Счётчики попыток и наблюдённый расход токенов
+принадлежат Прогону и не сбрасываются новой сессией; потолка расхода нет —
+он наблюдается, но никогда не останавливает раздачу
+([ADR-0015](docs/adr/0015-remove-token-ceiling.md)).
 
 Карточка аутентифицирована HMAC-ключом с правами `0600` и закрепляет снимок
 runtime/config/manifests. Устаревшая ревизия, повреждённый файл, подделанное
@@ -377,7 +379,9 @@ GPT、Gemini、Claude、Grok 或 Qwen 名称，也没有供应商白名单。角
 ### 状态、隔离与质量门
 
 控制面在每个工作目录中只允许一个非终态、持久化的 Pocock run。新 OMP 会话以没有
-`runId` 的 `pocock_status` 查找并水合它；预算和尝试计数不会重置。可恢复错误不会自动
+`runId` 的 `pocock_status` 查找并水合它；尝试计数与已观测的 token 消耗都会保留。
+token 消耗只是观测量，没有上限，也从不阻止派发
+（[ADR-0015](docs/adr/0015-remove-token-ceiling.md)）。可恢复错误不会自动
 cancel-and-re-enter；普通取消只允许明确的 owner abandonment。只有 core 自身确认已有
 `runtime_mismatch` 时，新入口才能替换活动 run；core 先持久化 replacement journal
 并完整写入非活动的 staged replacement，再取消旧 run，最后激活 staged replacement。
@@ -466,13 +470,15 @@ the batch settles, and records any sharing as an observation
 ### Durable state, isolation, and gates
 
 The control plane permits exactly one nonterminal durable run per workspace. A new OMP
-session calls `pocock_status` without `runId` to find and hydrate it; its budget and
-attempt counters persist. Recoverable failure never triggers automatic cancel-and-re-enter;
-explicit owner abandonment is the only ordinary cancellation path. A new entry may replace
-an active run only when the core itself proves `runtime_mismatch`; the core first persists
-the replacement journal and complete inactive staged replacement, then cancels the old run
-and activates the staged replacement. The adapter's Hub guard is session-local, and a
-settled native `task` is one-shot: it is never waited on or revived through Hub.
+session calls `pocock_status` without `runId` to find and hydrate it; its attempt counters
+and observed token spend persist. There is no token ceiling: spend is reported, never a
+stop ([ADR-0015](docs/adr/0015-remove-token-ceiling.md)). Recoverable failure never
+triggers automatic cancel-and-re-enter; explicit owner abandonment is the only ordinary
+cancellation path. A new entry may replace an active run only when the core itself proves
+`runtime_mismatch`; the core first persists the replacement journal and complete inactive
+staged replacement, then cancels the old run and activates the staged replacement. The
+adapter's Hub guard is session-local, and a settled native `task` is one-shot: it is never
+waited on or revived through Hub.
 
 The installer defaults to `task.isolation.mode: auto`; the runtime also accepts an
 explicit isolated OMP backend such as `rcopy`, but rejects `none`

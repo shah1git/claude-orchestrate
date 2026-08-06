@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 """telemetry_append.py — the one writer for §7 routing-log records, and the
-session-budget fuse (config `session_budget`, quality.md §3/§7).
+counter of observed token spend (quality.md §7).
 
-Born from two telemetry-verified failures of prose-only discipline:
-  (a) 2026-07-18, first live run under config v17: session_budget.tokens_max
-      3.0M was crossed at ~3.9M and noticed post-factum — the lead's manual
-      "sum at every dispatch point" check did not happen (its own run summary
-      records the lesson);
-  (b) the routing-log vocabulary drifted a THIRD time (ts/subtask/lowercase
-      verdicts, 2026-07-15..18) after two documented repair passes — the
-      Step 5 "self-check before append" rule is prose, and prose loses.
+Born from a telemetry-verified failure of prose-only discipline: the
+routing-log vocabulary drifted a THIRD time (ts/subtask/lowercase verdicts,
+2026-07-15..18) after two documented repair passes — the Step 5 "self-check
+before append" rule is prose, and prose loses. The invariants lived in
+instructions, not in the write path. This tool IS the write path: every
+record enters the log through it, so the vocabulary is enforced and the
+run's spend is summed at the exact moment the data is born — not
+reconstructed post-factum.
 
-Both failures share one root cause: the invariants lived in instructions, not
-in the write path. This tool IS the write path: every record enters the log
-through it, so vocabulary is enforced and the running budget is computed at
-the exact moment data is born — not reconstructed post-factum.
+The spend is an OBSERVATION, never a permission: this tool has no ceiling
+and never refuses a dispatch (owner's decision 2026-08-06, ADR-0015 —
+the v21 guess of 3.0M blocked a healthy run at 3,045,296 tokens, and
+raising the number only moves the same wall). It prints what was spent
+and exits 0.
 
 Usage:
     telemetry_append.py '<json-object>'          # append one record
     echo '<json-object>' | telemetry_append.py   # same, via stdin
     telemetry_append.py --from-envelope lane.json '<json-object>'
                                                 # populate observed facts
-    telemetry_append.py --check-only --task T    # budget verdict, no append
+    telemetry_append.py --check-only --task T    # report spend, no append
     telemetry_append.py --check-only --run-id R
 
 Options:
@@ -29,21 +30,12 @@ Options:
     --from-envelope PATH   run-lane JSON envelope; its observed model,
                            duration, token usage, and execution provenance
                            populate the supplied §7 record
-    --tokens-max N         run-declared ceiling overriding config
-                           session_budget.tokens_max (a ticket/plan-declared
-                           decision, made up front — mirrors max_diff_lines'
-                           override: ticket-declared-only)
-    --ack-over-budget R    named lead decision to continue past the ceiling;
-                           R is the reason and must be non-empty (config:
-                           "никогда молча")
+    --check-only           report the scope's observed spend without
+                           appending; needs --task or --run-id
 
 Exit codes:
-    0  appended / check passed (or breach explicitly acknowledged)
+    0  appended (or --check-only reported the spend)
     1  validation error — NOTHING was appended; fix the record and retry
-    2  budget exceeded — the record IS appended (the spend already happened;
-       the fuse stops future dispatches, not the bookkeeping), or --check-only
-       found the scope over budget. Per config session_budget.on_exceed:
-       stop-dispatch-finish-gates-report.
 """
 # Отложенные аннотации: системный python3 на macOS бывает 3.9, а в сигнатурах
 # используется синтаксис объединений (str | None) из 3.10.
@@ -207,11 +199,10 @@ def envelope_tokens(usage) -> int | str:
     A live конверт (2026-07-30) showed `input_tokens: 783472` /
     `cached_input_tokens: 667648`: summing both at face value counted the
     same tokens roughly twice over (a cached read is billed at roughly a
-    tenth of a fresh token), the session_budget fuse's running total was
-    off by nearly 2x, and it tripped `stop-dispatch-finish-gates-report`
-    in the middle of a perfectly healthy run. This function's old
-    docstring called including `cached_input_tokens` "deliberate" — that
-    reasoning no longer holds; it is exactly the bug.
+    tenth of a fresh token), so the run's reported spend was off by nearly
+    2x — a plainly false number about a perfectly healthy run. This
+    function's old docstring called including `cached_input_tokens`
+    "deliberate" — that reasoning no longer holds; it is exactly the bug.
 
     Which counter is a SUBSET of another, versus a SIBLING counted
     separately, differs by vendor naming — so the convention is picked BY
@@ -275,8 +266,8 @@ def envelope_tokens(usage) -> int | str:
             # witness reporting {"input_tokens": 10, "cached_input_tokens":
             # 500000, "output_tokens": 1} would otherwise subtract to -499989
             # and `spent()` would happily add a NEGATIVE number to the
-            # session-budget running total, silently DELAYING the fuse —
-            # the exact opposite of this fix's purpose. A broken invariant
+            # run's reported spend, under-reporting the very number this
+            # function exists to state truthfully. A broken invariant
             # is not "zero" and not "a negative number of tokens spent"; it
             # is an UNTRUSTWORTHY witness, so `"n/a"` (never clamped to 0 —
             # that would quietly relabel a broken counter as free work).
@@ -366,7 +357,7 @@ def load_envelope(path: Path) -> dict:
     return envelope
 
 
-# --- budget (config session_budget, quality.md §3) ---------------------------
+# --- observed spend (quality.md §7) ------------------------------------------
 
 def read_log(log_path: Path) -> list:
     if not log_path.is_file():
@@ -381,7 +372,7 @@ def read_log(log_path: Path) -> list:
                 rows.append(json.loads(line))
             except json.JSONDecodeError:
                 # A corrupt line is somebody's bypass of this tool; it must not
-                # silently shrink the budget sum.
+                # silently shrink the observed spend.
                 fail(f"{log_path}:{n} is not valid JSON — repair the log first")
     return rows
 
@@ -399,25 +390,11 @@ def spent(rows: list) -> int:
                if isinstance(r.get("tokens"), int))
 
 
-def budget_verdict(total: int, tokens_max: int, scope_label: str,
-                   ack: str | None) -> int:
-    print(f"budget: {total:,} / {tokens_max:,} tokens ({scope_label})")
-    if total <= tokens_max:
-        return 0
-    print(
-        f"SESSION BUDGET EXCEEDED ({total - tokens_max:,} tokens over).\n"
-        f"on_exceed: stop-dispatch-finish-gates-report — dispatch NO new\n"
-        f"tickets; let in-flight tickets finish their gates; report the\n"
-        f"remaining frontier as not-done with clean tracker state\n"
-        f"(quality.md §3, config session_budget)."
-    )
-    if ack:
-        print(f"over-budget acknowledged — named lead decision: {ack}\n"
-              f"(record the decision and reason in the run-summary note)")
-        return 0
-    print("To continue anyway: re-run with --ack-over-budget \"<reason>\" — "
-          "a named decision, never silent.")
-    return 2
+def report_spend(total: int, scope_label: str) -> int:
+    """Print the scope's observed spend. An observation, not a verdict: the
+    return value is always 0 (ADR-0015 — no ceiling lives here)."""
+    print(f"spend: {total:,} tokens ({scope_label})")
+    return 0
 
 
 def main(argv: list) -> int:
@@ -428,19 +405,9 @@ def main(argv: list) -> int:
     ap.add_argument("--check-only", action="store_true")
     ap.add_argument("--task")
     ap.add_argument("--run-id")
-    ap.add_argument("--tokens-max", type=int)
-    ap.add_argument("--ack-over-budget", metavar="REASON")
     args = ap.parse_args(argv)
 
-    if args.ack_over_budget is not None and not args.ack_over_budget.strip():
-        fail("--ack-over-budget requires a non-empty reason (never silent)")
-
     config = load_config(args.skill_dir)
-    tokens_max = args.tokens_max or (
-        config.get("session_budget", {}).get("tokens_max"))
-    if not isinstance(tokens_max, int):
-        fail("session_budget.tokens_max not found in config.yaml "
-             "and no --tokens-max given")
     log_path = args.skill_dir / config.get("telemetry", {}).get(
         "log", "telemetry/routing-log.jsonl")
 
@@ -449,8 +416,7 @@ def main(argv: list) -> int:
             fail("--check-only needs --task or --run-id to scope the run")
         rows = run_scope(read_log(log_path), args.task, args.run_id)
         label = f"run_id={args.run_id}" if args.run_id else f"task={args.task}"
-        return budget_verdict(spent(rows), tokens_max, label,
-                              args.ack_over_budget)
+        return report_spend(spent(rows), label)
 
     raw = args.record if args.record is not None else sys.stdin.read()
     try:
@@ -465,9 +431,8 @@ def main(argv: list) -> int:
 
     row = validate_record(row, config)
 
-    # Append BEFORE the budget verdict: the spend already happened, and a
-    # record must never be lost to its own fuse. Exit code 2 then stops the
-    # lead's NEXT dispatch, which is the only thing still preventable.
+    # Append BEFORE summing: the spend already happened, and the record is the
+    # only witness of it — the sum is read back from the log afterwards.
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(log_path, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -476,8 +441,7 @@ def main(argv: list) -> int:
     scope = run_scope(read_log(log_path), row.get("task"), row.get("run_id"))
     label = (f"run_id={row['run_id']}" if row.get("run_id")
              else f"task={row.get('task')}")
-    return budget_verdict(spent(scope), tokens_max, label,
-                          args.ack_over_budget)
+    return report_spend(spent(scope), label)
 
 
 if __name__ == "__main__":

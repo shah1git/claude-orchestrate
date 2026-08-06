@@ -292,6 +292,7 @@ def normalized_result(
     fallback: bool = False,
     suffix: str = ":medium",
     include_patch: bool = True,
+    tokens: int = 7,
 ) -> dict:
     artifact = tmp_path / f"{assignment['attemptId'].replace('/', '-')}.json"
     artifact.write_text(json.dumps({"attempt": assignment["attemptId"]}), encoding="utf-8")
@@ -307,7 +308,7 @@ def normalized_result(
         "resolvedModelIsFallback": fallback,
         "exitCode": 0,
         "aborted": False,
-        "tokens": 7,
+        "tokens": tokens,
         "usage": None,
         "outputPath": str(artifact),
         "patchPath": str(patch) if include_patch else None,
@@ -323,13 +324,14 @@ def settle_producer(
     config: dict,
     *,
     include_patch: bool = True,
+    tokens: int = 7,
 ) -> dict:
     state = authoritative(cwd, state_dir, sealed["card"]["runId"])
     results = []
     content = {}
     for attempt_id in sealed["attemptIds"]:
         assignment = state["attempts"][attempt_id]
-        results.append(normalized_result(tmp_path, assignment, include_patch=include_patch))
+        results.append(normalized_result(tmp_path, assignment, include_patch=include_patch, tokens=tokens))
         content[attempt_id] = producer_result()
     card = sealed["card"]
     return runtime.command_record_result(
@@ -848,7 +850,6 @@ def test_lost_settlement_can_be_abandoned_fail_closed_and_retry_is_bounded(tmp_p
     state = authoritative(cwd, state_dir, response["card"]["runId"])
     assert response["card"]["phase"] == "repair_pending"
     assert state["pendingDispatch"]["status"] == "abandoned"
-    assert state["projectedTokens"] == 0
     assert {attempt["status"] for attempt in state["attempts"].values()} == {"availability_failed"}
 
     response = transition(cwd, state_dir, response, "retry", {"diagnosis": "availability"})
@@ -1195,14 +1196,49 @@ def test_router_uses_alias_roles_and_rejects_under_routing(tmp_path, cwd, config
     assert error.value.code == "under_routing"
 
 
-def test_budget_projection_refuses_dispatch_before_task(tmp_path, cwd, config):
-    config["session_budget"]["tokens_max"] = config["omp"]["budget_projection"]["producer_per_ticket"] - 1
+def test_spend_over_the_former_ceiling_still_gets_dispatched(tmp_path, cwd, config, monkeypatch):
+    # Регресс-страж снятого потолка. 3 045 296 токенов — тот самый прогон,
+    # который прежний предохранитель заблокировал на ровном месте; теперь
+    # расход остаётся наблюдением и обязан пропустить следующую раздачу.
+    provenance = {**PROVENANCE, "tickets": ["T1", "T2"], "dependencies": {"T1": [], "T2": ["T1"]}}
     state_dir, response = start(tmp_path, cwd, config, "frontier")
-    response = admit_frontier(cwd, state_dir, response)
-    with pytest.raises(runtime.RuntimeFailure) as error:
-        prepare(cwd, state_dir, response, config)
-    assert error.value.code == "budget_exceeded"
-    assert runtime.command_status(cwd, state_dir, {"runId": response["card"]["runId"]})["card"]["phase"] == "ready"
+    response = admit_frontier(cwd, state_dir, response, provenance)
+    response = prepare(cwd, state_dir, response, config)
+    sealed = seal(cwd, state_dir, response, "producer")
+    response = settle_producer(tmp_path, cwd, state_dir, sealed, config, tokens=3_045_296)
+    response = pregate(cwd, state_dir, response, config)
+    response = prepare_lenses(cwd, state_dir, response, config)
+    sealed_lenses = seal(cwd, state_dir, response, "lenses")
+    response = settle_lenses(tmp_path, cwd, state_dir, sealed_lenses, config)
+    response = runtime.command_adjudicate(cwd, state_dir, reference(response["card"]))
+    assert authoritative(cwd, state_dir, response["card"]["runId"])["tokensSpent"] > 3_000_000
+
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "spend: 3,045,296 tokens\n", ""),
+    )
+    response = runtime.command_accept(cwd, state_dir, reference(response["card"]), config)
+    response = transition(
+        cwd,
+        state_dir,
+        response,
+        "continue_wave",
+        {
+            "remainingTicketIds": ["T2"],
+            "nextTicketIds": ["T2"],
+            "blockedTicketIds": [],
+            "evidence": "durable tracker reports T2 unblocked by accepted T1",
+        },
+    )
+    assert response["card"]["phase"] == "ready"
+    assert "blockedReason" not in response["card"]
+
+    response = prepare(cwd, state_dir, response, config, ticket_named("T2"))
+    state = authoritative(cwd, state_dir, response["card"]["runId"])
+    assert state["phase"] == "producer_dispatch_pending"
+    assert state["attempts"][state["pendingDispatch"]["attemptIds"][0]]["ticketId"] == "T2"
+    assert state["tokensSpent"] > 3_000_000
 
 
 def test_effective_omp_settings_are_fail_closed(monkeypatch, tmp_path):
@@ -2930,33 +2966,34 @@ def test_patch_applicability_timeout_is_infrastructure_failure(tmp_path, monkeyp
     assert error.value.code == "subprocess_timeout"
 
 
-def test_accept_reconstructs_budget_after_deduplicated_telemetry(tmp_path, cwd, config, monkeypatch):
+def test_accept_records_telemetry_without_a_budget_verdict(tmp_path, cwd, config, monkeypatch):
     state_dir, response = start(tmp_path, cwd, config, "full")
     response = advance_full(cwd, state_dir, response)
     sealed_lenses, _ = reach_adjudication(tmp_path, cwd, state_dir, response, config)
     response = settle_lenses(tmp_path, cwd, state_dir, sealed_lenses, config)
     response = runtime.command_adjudicate(cwd, state_dir, reference(response["card"]))
-    state = authoritative(cwd, state_dir, response["card"]["runId"])
-    accepted_attempt = state["attempts"][state["waves"][-1]["acceptedAttemptIds"][0]]
-    telemetry_path = runtime.telemetry_log_path(config)
-    telemetry_path.parent.mkdir(parents=True, exist_ok=True)
-    telemetry_path.write_text(
-        json.dumps(
-            {
-                "run_id": state["runId"],
-                "ticket": accepted_attempt["ticketId"],
-                "verdict": "PASS",
-            }
-        )
-        + "\n",
-        encoding="utf-8",
+
+    # Писатель телеметрии больше не предохранитель: ненулевой код теперь
+    # означает несостоявшуюся запись, а не вердикт о бюджете.
+    monkeypatch.setattr(
+        runtime.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 2, "", "routing log is not writable\n"),
     )
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.command_accept(cwd, state_dir, reference(response["card"]), config)
+    assert error.value.code == "telemetry_failed"
+    assert error.value.message == "routing log is not writable"
 
     monkeypatch.setattr(
         runtime.subprocess,
         "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 2, "budget exceeded\n", ""),
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, "spend: 3,045,296 tokens (run pocock-fixture)\n", ""
+        ),
     )
     observed = runtime.command_accept(cwd, state_dir, reference(response["card"]), config)
 
-    assert observed["card"]["budgetExhausted"] is True
+    assert observed["card"]["phase"] == "accepted"
+    assert "budgetExhausted" not in observed["card"]
+    assert [event["exitCode"] for event in observed["telemetry"]] == [0]

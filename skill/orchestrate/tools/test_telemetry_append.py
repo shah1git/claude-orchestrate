@@ -1,6 +1,6 @@
 """Tests for telemetry_append.py at its one seam: CLI invocation.
 
-argv (record JSON, --check-only/--task/--tokens-max/--ack-over-budget)
+argv (record JSON, --check-only/--task/--run-id)
 -> process exit code + stdout/stderr + the log file's resulting content.
 Every fixture lives in a pytest tmp_path; the real skill/orchestrate
 config and telemetry are never touched.
@@ -21,9 +21,6 @@ TOOL = Path(__file__).parent / "telemetry_append.py"
 # validate_config.py schema, so the two tools' tests don't couple.
 MINI_CONFIG = dedent("""\
     version: 21
-    session_budget:
-      tokens_max: 1000
-      on_exceed: stop-dispatch-finish-gates-report
     telemetry:
       log: telemetry/routing-log.jsonl
       entry_values: [full, frontier, sweep]
@@ -95,11 +92,11 @@ def write_envelope(tmp_path, **over):
     return path
 
 
-def test_valid_record_appends_and_reports_budget(tmp_path):
+def test_valid_record_appends_and_reports_spend(tmp_path):
     d = make_skill_dir(tmp_path)
     p = run(d, json.dumps(row()))
     assert p.returncode == 0, p.stderr
-    assert "budget: 100 / 1,000 tokens" in p.stdout
+    assert "spend: 100 tokens (task=demo)" in p.stdout
     assert log_rows(d) == [row()]
 
 
@@ -189,65 +186,40 @@ def test_missing_config_stamp_rejected_when_flag_on(tmp_path):
     assert "stamp" in p.stderr
 
 
-def test_breach_appends_row_but_exits_2(tmp_path):
-    d = make_skill_dir(tmp_path, log_lines=[row(ticket="t1", tokens=950)])
-    p = run(d, json.dumps(row(ticket="t2", tokens=100)))
-    assert p.returncode == 2
-    assert "SESSION BUDGET EXCEEDED" in p.stdout
-    assert "stop-dispatch-finish-gates-report" in p.stdout
-    assert len(log_rows(d)) == 2  # the spend happened; the record must survive
+def test_spend_far_over_the_old_ceiling_still_exits_0(tmp_path):
+    # ADR-0015: spend is an observation, never a permission. A total many
+    # times the retired 3,000,000 ceiling is printed as a fact — it stops
+    # neither the append nor the next dispatch.
+    d = make_skill_dir(tmp_path,
+                       log_lines=[row(ticket="t1", tokens=3_045_296)])
+    p = run(d, json.dumps(row(ticket="t2", tokens=6_954_704)))
+    assert p.returncode == 0, p.stderr
+    assert "spend: 10,000,000 tokens (task=demo)" in p.stdout
+    assert len(log_rows(d)) == 2
 
 
-def test_ack_over_budget_downgrades_to_exit_0(tmp_path):
-    d = make_skill_dir(tmp_path, log_lines=[row(ticket="t1", tokens=950)])
-    p = run(d, json.dumps(row(ticket="t2", tokens=100)),
-            "--ack-over-budget", "final gate of the last in-flight ticket")
-    assert p.returncode == 0
-    assert "acknowledged" in p.stdout
-
-
-def test_empty_ack_reason_rejected(tmp_path):
-    d = make_skill_dir(tmp_path)
-    p = run(d, json.dumps(row()), "--ack-over-budget", "  ")
-    assert p.returncode == 1
-    assert "never silent" in p.stderr
-
-
-def test_budget_scoped_by_task(tmp_path):
+def test_spend_scoped_by_task(tmp_path):
     d = make_skill_dir(tmp_path, log_lines=[row(task="other", tokens=900)])
     p = run(d, json.dumps(row(task="demo", tokens=100)))
     assert p.returncode == 0, p.stdout  # other run's 900 must not count
-    assert "budget: 100 / 1,000" in p.stdout
+    assert "spend: 100 tokens (task=demo)" in p.stdout
 
 
-def test_budget_scoped_by_run_id_when_present(tmp_path):
+def test_spend_scoped_by_run_id_when_present(tmp_path):
     d = make_skill_dir(tmp_path, log_lines=[
         row(ticket="t1", tokens=900, run_id="r1"),
         row(ticket="t2", tokens=900, run_id="r2")])
     p = run(d, json.dumps(row(ticket="t3", tokens=50, run_id="r1")))
     assert p.returncode == 0, p.stdout  # r2's spend must not count into r1
-    assert "budget: 950 / 1,000" in p.stdout
+    assert "spend: 950 tokens (run_id=r1)" in p.stdout
 
 
 def test_check_only_reports_without_appending(tmp_path):
     d = make_skill_dir(tmp_path, log_lines=[row(tokens=600)])
     p = run(d, "--check-only", "--task", "demo")
     assert p.returncode == 0
-    assert "budget: 600 / 1,000" in p.stdout
+    assert "spend: 600 tokens (task=demo)" in p.stdout
     assert len(log_rows(d)) == 1
-
-
-def test_check_only_exit_2_on_breach(tmp_path):
-    d = make_skill_dir(tmp_path, log_lines=[row(tokens=1200)])
-    p = run(d, "--check-only", "--task", "demo")
-    assert p.returncode == 2
-
-
-def test_tokens_max_flag_overrides_config(tmp_path):
-    d = make_skill_dir(tmp_path, log_lines=[row(tokens=1200)])
-    p = run(d, "--check-only", "--task", "demo", "--tokens-max", "5000000")
-    assert p.returncode == 0
-    assert "5,000,000" in p.stdout
 
 
 def test_health_event_row_skips_ticket_contract(tmp_path):
@@ -263,7 +235,7 @@ def test_na_tokens_accepted_ints_still_summed(tmp_path):
     d = make_skill_dir(tmp_path, log_lines=[row(ticket="t1", tokens=300)])
     p = run(d, json.dumps(row(ticket="t2", tokens="n/a")))
     assert p.returncode == 0, p.stderr
-    assert "budget: 300 / 1,000" in p.stdout
+    assert "spend: 300 tokens (task=demo)" in p.stdout
 
 
 def test_corrupt_log_line_is_a_hard_error(tmp_path):
