@@ -517,6 +517,30 @@ def test_start_rejects_legacy_lead_witness(tmp_path, cwd, config):
     assert error.value.code == "invalid_request"
 
 
+def test_run_id_carries_the_skilled_producer_model(tmp_path, cwd, config):
+    models = model_manifest()
+    models["builder"]["resolvedModel"] = "openai-codex/gpt-5.6-terra"
+    state_dir, response = start(tmp_path, cwd, config, "frontier", models=models)
+    run_id = response["card"]["runId"]
+
+    assert "-gpt-5.6-terra-" in run_id
+    assert runtime.RUN_ID_RE.match(run_id)
+    # The label must stay a label: the id is also the state file name, and the
+    # remaining four slot models live in the manifest, not in the identifier.
+    assert "/" not in run_id
+    assert runtime.state_paths(cwd, state_dir, run_id)[0].is_file()
+    assert authoritative(cwd, state_dir, run_id)["models"] == models
+
+
+def test_run_id_stays_valid_when_the_skilled_slot_has_no_witness(tmp_path, cwd, config):
+    config["omp"]["producers"]["skilled"]["slot"] = "absent-slot"
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    run_id = response["card"]["runId"]
+
+    assert runtime.RUN_ID_RE.match(run_id)
+    assert run_id.startswith("pocock-")
+
+
 def test_start_rejects_a_second_nonterminal_run_for_the_same_repository(tmp_path, cwd, config):
     state_dir, first = start(tmp_path, cwd, config, "frontier")
 

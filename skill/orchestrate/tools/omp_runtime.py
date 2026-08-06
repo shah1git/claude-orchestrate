@@ -1384,6 +1384,32 @@ def require_text(value: Any, field: str) -> str:
     return value.strip()
 
 
+RUN_ID_MODEL_SEGMENT_MAX = 32
+
+
+def run_id_model_segment(models: dict[str, Any], config: dict[str, Any]) -> str:
+    """Label a run with the model behind its skilled producer slot.
+
+    A run has no single model: five slots may hold five different ones, and OMP
+    may substitute any of them mid-run. The skilled producer is the slot that
+    does the writing work, so its declared model is the one label worth carrying
+    in the identifier; `state["models"]` keeps the full manifest, which the id
+    deliberately does not try to reproduce. The segment is dropped — rather than
+    failing run creation — when the configured slot has no witness, because a
+    cosmetic label must never decide whether a run may start.
+    """
+    slot = nullable_text(config["omp"].get("producers", {}).get("skilled", {}).get("slot"))
+    witness = models.get(slot) if slot is not None else None
+    resolved = nullable_text(witness.get("resolvedModel")) if isinstance(witness, dict) else None
+    if resolved is None:
+        return ""
+    # The provider prefix is noise here, and `/` cannot appear in a run id: the
+    # id is also the state file name (RUN_ID_RE forbids everything but
+    # alphanumerics, dot, dash, underscore).
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "-", resolved.rsplit("/", 1)[-1])
+    return sanitized[:RUN_ID_MODEL_SEGMENT_MAX].strip("-._")
+
+
 def command_start(cwd: Path, explicit_state_dir: str | None, request: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     entry = request.get("entry")
     fail(entry not in {"full", "frontier", "sweep"}, "invalid_entry", "entry must be full, frontier, or sweep")
@@ -1413,7 +1439,10 @@ def command_start(cwd: Path, explicit_state_dir: str | None, request: dict[str, 
 
     with with_lock(start_lock_path(cwd, explicit_state_dir)):
         recover_replacement_transactions(cwd, explicit_state_dir)
-        run_id = f"pocock-{int(time.time())}-{uuid.uuid4().hex[:12]}"
+        model_segment = run_id_model_segment(models, config)
+        run_id = "-".join(
+            part for part in ("pocock", str(int(time.time())), model_segment, uuid.uuid4().hex[:12]) if part
+        )
         state_path, lock_path = state_paths(cwd, explicit_state_dir, run_id)
         state: dict[str, Any] = {
             "schemaVersion": SCHEMA_VERSION,
