@@ -116,6 +116,26 @@ class CoreCliError extends PocockError {
 	}
 }
 
+/**
+ * A mirrored run the core proved incompatible with the installed contour.
+ *
+ * The core refuses to hydrate or mutate such a run: `require_run_runtime`
+ * checks the runtime fingerprint before revision and stateHash, so even
+ * `cancel` is unreachable. Its only recovery is `status`, which proves
+ * `runtimeMismatch`, followed by `enter`, which transactionally supersedes it.
+ */
+class IncompatibleRunError extends PocockError {}
+
+/** Core diagnostics that prove the mirrored run is stale, not the mirror untrustworthy. */
+const INCOMPATIBLE_RUN_CODES: Record<string, true> = { runtime_changed: true, config_changed: true };
+
+function isIncompatibleRun(error: unknown): boolean {
+	if (error instanceof IncompatibleRunError) return true;
+	if (!(error instanceof CoreCliError) || !isRecord(error.diagnostic)) return false;
+	const code = nonEmptyString(error.diagnostic.code);
+	return code !== undefined && INCOMPATIBLE_RUN_CODES[code] === true;
+}
+
 const extensionDirectory = dirname(fileURLToPath(import.meta.url));
 
 function asRuntimeContext(context: unknown): RuntimeContext {
@@ -300,7 +320,8 @@ export function pinRuntimeForSession(sessionId: string, observed: RuntimePin, ad
 	throw new PocockError(
 		`Pocock runtime changed after the same OMP session pinned it: ${pinned.path}; ` +
 			`expected sha256=${pinned.sha256}, observed sha256=${observed.sha256}. ` +
-			"Inspect the run with status; the core authorizes a replacement run that adopts the updated runtime.",
+			"Inspect the run with status; the core authorizes a replacement run that adopts the updated runtime. " +
+			"If the contour was just updated, restart OMP so it loads the adapter that matches these runtime bytes.",
 	);
 }
 
@@ -404,6 +425,20 @@ export function isDispatchPlaceholder(input: unknown): boolean {
 
 function isTerminal(card: StateCard): boolean {
 	return TERMINAL_PHASES[card.phase] === true;
+}
+
+/**
+ * A card the adapter must not treat as a drivable run.
+ *
+ * A terminal run is finished. A card carrying core-proven `runtimeMismatch` is
+ * incompatible with the installed contour and refuses every mutation — even
+ * `cancel`, because the core checks the runtime fingerprint before revision and
+ * stateHash. Neither can hold a sealed dispatch, so gating native delegation on
+ * them protects nothing; gating on the second one is exactly what left a
+ * session able to neither orchestrate nor delegate.
+ */
+function isInert(card: StateCard): boolean {
+	return isTerminal(card) || isRecord(card.runtimeMismatch);
 }
 
 function observeModel(model: unknown): ModelWitness {
@@ -876,6 +911,12 @@ function updateDispatchWidget(pi: ExtensionAPI, context: RuntimeContext | undefi
 }
 let activeRun: ActiveRun | undefined;
 let vetoReason: string | undefined;
+/**
+ * A mirrored run released for supersession. It vetoes nothing — the core
+ * refuses every mutation of it anyway — but it must be announced, because an
+ * unannounced one reads as "orchestration silently captured delegation".
+ */
+let supersedableRun: { runId: string; phase: string; reason: string } | undefined;
 let sealingToolCallId: string | undefined;
 const pendingWitnesses = new Map<string, PendingWitness>();
 let lifecycleEpoch = 0;
@@ -892,11 +933,32 @@ function serialize<T>(operation: () => Promise<T>): Promise<T> {
 	return next;
 }
 
-function failClosed(pi: ExtensionAPI, reason: string, context?: RuntimeContext): void {
+function resetRunState(): void {
 	activeRun = undefined;
 	sealingToolCallId = undefined;
 	pendingWitnesses.clear();
+}
+
+function failClosed(pi: ExtensionAPI, reason: string, context?: RuntimeContext): void {
+	resetRunState();
+	supersedableRun = undefined;
 	vetoReason = reason;
+	updateDispatchWidget(pi, context);
+	pi.logger.warn(`[pocock-control] ${reason}`);
+}
+
+/**
+ * Release a mirrored run the core proved incompatible with the installed contour.
+ *
+ * Vetoing native `task` and `hub` here protects nothing: the core rejects every
+ * mutation of such a run, and a session that has just started holds no sealed
+ * dispatch that ordinary delegation could be confused with. The veto only cost
+ * the owner the ability to work at all, so the run is released and announced.
+ */
+function releaseIncompatibleRun(pi: ExtensionAPI, context: RuntimeContext, card: StateCard, reason: string): void {
+	resetRunState();
+	vetoReason = undefined;
+	supersedableRun = { runId: card.runId, phase: card.phase, reason };
 	updateDispatchWidget(pi, context);
 	pi.logger.warn(`[pocock-control] ${reason}`);
 }
@@ -936,6 +998,15 @@ function commitCard(
 	};
 	updateDispatchWidget(pi, context, card);
 	vetoReason = undefined;
+	// A committed mismatch card keeps the run announceable: `status` proves the
+	// incompatibility, and the announcement must survive until `enter` replaces it.
+	supersedableRun = isRecord(card.runtimeMismatch)
+		? {
+			runId: card.runId,
+			phase: card.phase,
+			reason: nonEmptyString(card.blockedReason) ?? "the core proved this run incompatible with the installed contour",
+		}
+		: undefined;
 	return activeRun;
 }
 
@@ -1005,6 +1076,7 @@ async function hydrateSession(pi: ExtensionAPI, context: RuntimeContext): Promis
 		// A child without a state card is deliberately inert: it must not inherit
 		// the parent's sealed dispatch or make the adapter manufacture one.
 		vetoReason = undefined;
+		supersedableRun = undefined;
 		return;
 	}
 	if (!mirror.card) {
@@ -1024,7 +1096,7 @@ async function hydrateSession(pi: ExtensionAPI, context: RuntimeContext): Promis
 			if (epoch !== lifecycleEpoch || context.sessionManager.getSessionId() !== sessionId) return;
 			const card = requireCard(response, "hydrate");
 			if (card.manifestFingerprint !== manifest.manifestFingerprint) {
-				throw new PocockError("Installed Pocock agent manifests differ from the run snapshot");
+				throw new IncompatibleRunError("Installed Pocock agent manifests differ from the run snapshot");
 			}
 			commitCard(pi, context, card, {
 				expectedRunId: mirror.card!.runId,
@@ -1034,9 +1106,12 @@ async function hydrateSession(pi: ExtensionAPI, context: RuntimeContext): Promis
 				resetDispatch: true,
 			});
 		} catch (error) {
-			if (epoch === lifecycleEpoch && context.sessionManager.getSessionId() === sessionId) {
-				failClosed(pi, `Pocock session hydration failed: ${errorMessage(error)}`, context);
+			if (epoch !== lifecycleEpoch || context.sessionManager.getSessionId() !== sessionId) return;
+			if (isIncompatibleRun(error)) {
+				releaseIncompatibleRun(pi, context, mirror.card!, errorMessage(error));
+				return;
 			}
+			failClosed(pi, `Pocock session hydration failed: ${errorMessage(error)}`, context);
 		}
 	});
 }
@@ -1061,9 +1136,20 @@ export default function pocockControl(pi: ExtensionAPI): void {
 	pi.on("session_stop", (event, context) => {
 		const runtime = asRuntimeContext(context);
 		const run = activeFor(runtime);
-		if (!run || vetoReason || event.stop_hook_active || isTerminal(run.card)) return;
 		const nudgeKey = `${event.session_id}:${event.turn_id}`;
-		if (lastStopNudge === nudgeKey) return;
+		if (event.stop_hook_active || vetoReason || lastStopNudge === nudgeKey) return;
+		if (supersedableRun && (!run || isInert(run.card))) {
+			lastStopNudge = nudgeKey;
+			return {
+				continue: true,
+				additionalContext:
+					`Pocock run ${supersedableRun.runId} is mirrored in this session but incompatible with the installed `
+					+ `contour in phase ${supersedableRun.phase}: ${supersedableRun.reason}. `
+					+ "It cannot be hydrated, resumed, or cancelled; prove the mismatch with pocock_status and supersede "
+					+ "it with pocock_enter. It blocks no native task delegation.",
+			};
+		}
+		if (!run || isInert(run.card)) return;
 		lastStopNudge = nudgeKey;
 		return {
 			continue: true,
@@ -1086,7 +1172,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 				const response = await serialize(async () => {
 					const runtime = asRuntimeContext(context);
 					const current = activeFor(runtime);
-					if (current && !isTerminal(current.card) && !isRecord(current.card.runtimeMismatch)) {
+					if (current && !isInert(current.card)) {
 						throw new PocockError(
 							`Pocock run ${current.card.runId} is still active in phase ${current.card.phase}; resume or cancel it before entering another run`,
 						);
@@ -1284,8 +1370,8 @@ export default function pocockControl(pi: ExtensionAPI): void {
 				const response = await serialize(async () => {
 					const runtime = asRuntimeContext(context);
 					const current = activeFor(runtime);
-					const runId = params.runId ?? (current && !isTerminal(current.card) ? current.card.runId : undefined);
-					if (current && !isTerminal(current.card) && runId && current.card.runId !== runId) {
+					const runId = params.runId ?? (current && !isInert(current.card) ? current.card.runId : undefined);
+					if (current && !isInert(current.card) && runId && current.card.runId !== runId) {
 						throw new PocockError(
 							`Pocock run ${current.card.runId} is still active; pocock_status cannot replace its mirror with ${runId}`,
 						);
@@ -1330,7 +1416,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 						reason: `Pocock is fail-closed after an unsettled sealed task: ${vetoReason}`,
 					};
 				}
-				if (!run || isTerminal(run.card)) return;
+				if (!run || isInert(run.card)) return;
 				return {
 					block: true,
 					reason:
@@ -1342,7 +1428,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 		if (event.toolName === "browser" || event.toolName === "write") {
 			return serialize(async () => {
 				const run = activeFor(runtime);
-				if (!run || isTerminal(run.card) || vetoReason) return;
+				if (!run || isInert(run.card) || vetoReason) return;
 				const binding = uiEvidenceBinding(run.card, event);
 				if (!binding || binding.stage !== "witness" || !binding.witness || !binding.generatedInput) return;
 				if (pendingWitnesses.has(event.toolCallId)) {
@@ -1363,7 +1449,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 			const runtime = asRuntimeContext(context);
 			if (vetoReason) return { block: true, reason: vetoReason };
 			const run = activeFor(runtime);
-			if (!run || isTerminal(run.card)) return;
+			if (!run || isInert(run.card)) return;
 
 			if (run.dispatch) {
 				if (run.dispatch.toolCallId === event.toolCallId && isDispatchPlaceholder(event.input)) {
@@ -1421,7 +1507,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 		if (event.toolName === "task") {
 			return serialize(async () => {
 				const run = activeFor(runtime);
-				if (!run || isTerminal(run.card)) return;
+				if (!run || isInert(run.card)) return;
 				if (vetoReason) return toolFailure(vetoReason);
 				try {
 					requireCurrentManifest(run, runtime);
@@ -1508,7 +1594,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 					return toolFailure("Pocock declarative witness execution did not succeed");
 				}
 				const run = activeFor(runtime);
-				if (!run || isTerminal(run.card) || vetoReason || run.card.runId !== pending.runId) {
+				if (!run || isInert(run.card) || vetoReason || run.card.runId !== pending.runId) {
 					return toolFailure("Pocock declarative witness result does not match the active run");
 				}
 				const request: JsonRecord = {
@@ -1540,7 +1626,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 		if (event.isError) return;
 		return serialize(async () => {
 			const run = activeFor(runtime);
-			if (!run || isTerminal(run.card) || vetoReason) return;
+			if (!run || isInert(run.card) || vetoReason) return;
 			const binding = uiEvidenceBinding(run.card, event);
 			if (!binding || binding.stage !== "open") return;
 

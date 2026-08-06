@@ -114,6 +114,75 @@ test("a runtime replaced under a live session stays readable through status and 
 	}
 });
 
+test("a mirrored run the core proved incompatible releases native delegation and announces itself", async () => {
+	const manifestFingerprint = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+	const blockedReason = "effective Pocock runtime differs from the runtime that created this run";
+	const harness = adapterHarness(command => {
+		if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+		if (command === "hydrate") return coreFailure("runtime_changed", blockedReason);
+		if (command === "status") {
+			return coreCard({
+				...card("wedged-run", 3, "preparation"),
+				manifestFingerprint,
+				nextActions: [],
+				blockedReason,
+				runtimeMismatch: { expected: "old", observed: "new" },
+			});
+		}
+		if (command === "start") return coreCard({ ...card("replacement-run", 0, "frontier_admission"), manifestFingerprint });
+		throw new Error(`Unexpected core command ${command}`);
+	});
+	harness.mirror(card("wedged-run", 3, "preparation"));
+
+	await harness.sessionStart({}, harness.context);
+
+	// The core refuses every mutation of an incompatible run, so this session
+	// holds no sealed dispatch that ordinary delegation could be confused with.
+	const delegation = { toolName: "task", toolCallId: "consilium", input: { context: "review", tasks: [{ task: "Read the module" }] } };
+	expect(await harness.toolCall(delegation, harness.context)).toBeUndefined();
+	expect(await harness.toolCall({ toolName: "hub", toolCallId: "hub-released", input: { op: "list" } }, harness.context)).toBeUndefined();
+
+	const announcement = await harness.sessionStop(
+		{ session_id: "stop-session", turn_id: "released", stop_hook_active: false },
+		harness.context,
+	);
+	expect(JSON.stringify(announcement)).toContain("wedged-run");
+	expect(JSON.stringify(announcement)).toContain("pocock_enter");
+
+	// The recovery must survive its own first step: status commits a mismatch
+	// card, and a committed mismatch card must not re-block delegation.
+	const status = await harness.status("status-wedged", {}, undefined, undefined, harness.context);
+	expect(status.isError).not.toBe(true);
+	expect(await harness.toolCall({ ...delegation, toolCallId: "consilium-after-status" }, harness.context)).toBeUndefined();
+
+	const replacement = await harness.enter(
+		"enter-replacement",
+		{ entry: "frontier", objective: "Supersede the run the installed contour cannot drive" },
+		undefined,
+		undefined,
+		harness.context,
+	);
+	expect(replacement.isError).not.toBe(true);
+});
+
+test("hydration that fails for any other reason still locks native delegation", async () => {
+	const harness = adapterHarness(command => {
+		if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+		if (command === "hydrate") return coreFailure("state_corrupt", "state snapshot hash chain is broken");
+		throw new Error(`Unexpected core command ${command}`);
+	});
+	harness.mirror(card("corrupt-run", 2, "ready"));
+
+	await harness.sessionStart({}, harness.context);
+
+	const blocked = await harness.toolCall(
+		{ toolName: "task", toolCallId: "locked", input: { context: "review", tasks: [{ task: "Read the module" }] } },
+		harness.context,
+	);
+	expect(blocked).toMatchObject({ block: true });
+	expect(JSON.stringify(blocked)).toContain("hydration failed");
+});
+
 test("a runtime-mismatched mirror can be replaced by a new run", async () => {
 	const manifestFingerprint = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 	const harness = adapterHarness((command, request) => {
@@ -205,7 +274,14 @@ type ToolExecute = (
 }>;
 
 type RegisteredHook = (event: Record<string, unknown>, context: unknown) => Promise<unknown> | unknown;
-type CoreResponder = (command: string, request: Record<string, unknown>) => Record<string, unknown> | Error;
+type CoreResponder = (command: string, request: Record<string, unknown>) => Record<string, unknown> | Error | CoreFailure;
+
+/** A core refusal: exit 1 plus the machine-readable diagnostic the core writes to stderr. */
+type CoreFailure = { exit: 1; diagnostic: Record<string, unknown> };
+
+function coreFailure(code: string, message: string): CoreFailure {
+	return { exit: 1, diagnostic: { code, message } };
+}
 
 function isJsonRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -237,6 +313,7 @@ function adapterHarness(respond?: CoreResponder) {
 	const entries: Array<{ customType: string; data: unknown }> = [];
 	const widgets: Array<{ name: string; content: unknown; options: unknown }> = [];
 	const messages: unknown[][] = [];
+	const branch: unknown[] = [];
 	let appendError: Error | undefined;
 	// The adapter builds schemas from shared field definitions; OMP's injected
 	// omptype-backed zod shim has no `ZodObject.extend`, so the mock mirrors only
@@ -265,7 +342,7 @@ function adapterHarness(respond?: CoreResponder) {
 		},
 		sessionManager: {
 			getSessionId: () => sessionId,
-			getBranch: () => [],
+			getBranch: () => branch,
 		},
 		models: {
 			resolve: () => ({ provider: "openai", id: "gpt-5" }),
@@ -304,6 +381,10 @@ function adapterHarness(respond?: CoreResponder) {
 						: coreCard(card(String(request.runId), Number(request.revision) + 1, "completed"))
 			);
 			if (response instanceof Error) throw response;
+			const failure = response as CoreFailure;
+			if (failure.exit === 1) {
+				return { code: 1, killed: false, stdout: "", stderr: JSON.stringify(failure.diagnostic) };
+			}
 			return { code: 0, killed: false, stdout: JSON.stringify(response), stderr: "" };
 		},
 	};
@@ -317,6 +398,11 @@ function adapterHarness(respond?: CoreResponder) {
 		widgets,
 		messages,
 		context,
+		// The session mirror OMP replays at session start; the adapter reads it
+		// through `getBranch`, never through its own bookkeeping.
+		mirror: (value: Record<string, unknown>) => {
+			branch.push({ type: "custom", customType: "pocock-state", data: value });
+		},
 		failNextAppend: (error: Error) => {
 			appendError = error;
 		},
