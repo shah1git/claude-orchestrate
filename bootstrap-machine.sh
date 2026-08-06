@@ -27,8 +27,14 @@ install_omp_if_missing() {
 }
 
 ensure_checkout() {
-  local parent entries
-  if [ -d "${CLAUDE_ORCHESTRATE_DIR}/.git" ]; then
+  local parent entries top
+  # Готовность чекаута определяет сам Git: в связанном worktree
+  # (`git worktree add`) `.git` — файл-указатель, а не каталог, поэтому проверка
+  # `-d .../.git` считала бы такой чекаут отсутствующим и клонировала бы поверх
+  # непустого каталога. Сравнение с вершиной рабочего дерева сохраняет прежнюю
+  # защиту: подкаталог чужого репозитория чекаутом не считается.
+  top="$(git -C "${CLAUDE_ORCHESTRATE_DIR}" rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "${top}" ] && [ "${top}" = "$(cd "${CLAUDE_ORCHESTRATE_DIR}" 2>/dev/null && pwd -P)" ]; then
     git -C "${CLAUDE_ORCHESTRATE_DIR}" pull --ff-only
     ok "обновлён ${CLAUDE_ORCHESTRATE_DIR}"
     return

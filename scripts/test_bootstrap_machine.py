@@ -687,6 +687,9 @@ def test_bootstrap_mac_creates_a_missing_upstream_cache_parent(tmp_path: Path) -
     (checkout / "skill" / "orchestrate" / "tools" / "omp_runtime.py").write_text("")
     (checkout / ".omp" / "agents").mkdir(parents=True)
     (checkout / ".omp" / "extensions" / "pocock-control").mkdir(parents=True)
+    # Bootstrap now recognises its own checkout through Git rather than through
+    # a `.git` directory, so the fixture must look like one to the stub below.
+    (checkout / ".git").mkdir()
     (checkout / "bootstrap-mac.sh").write_bytes(BOOTSTRAP_MAC.read_bytes())
     (checkout / "bootstrap-mac.sh").chmod(0o755)
     fake_bin = tmp_path / "bin"
@@ -697,6 +700,11 @@ def test_bootstrap_mac_creates_a_missing_upstream_cache_parent(tmp_path: Path) -
         "set -eu\n"
         'printf "%s\\n" "$*" >> "$GIT_LOG"\n'
         'if [ "$1" = clone ]; then mkdir -p "$3/.git"; exit 0; fi\n'
+        'if [ "$1" = -C ] && [ "${3:-}" = rev-parse ] && [ "${4:-}" = --show-toplevel ]; then\n'
+        '    [ -e "$2/.git" ] || exit 1\n'
+        '    (cd "$2" && pwd -P)\n'
+        "    exit 0\n"
+        "fi\n"
         'for arg in "$@"; do\n'
         '    if [ "$arg" = rev-parse ]; then printf "%s\\n" deadbeef; exit 0; fi\n'
         "done\n"
@@ -732,6 +740,77 @@ def test_bootstrap_mac_creates_a_missing_upstream_cache_parent(tmp_path: Path) -
     git_log = (tmp_path / "git.log").read_text(encoding="utf-8")
     assert f"clone https://github.com/mattpocock/skills.git {cache}" in git_log
 
+
+
+def test_bootstrap_mac_updates_a_linked_worktree_checkout(tmp_path: Path) -> None:
+    """A `git worktree` checkout carries a `.git` file, not a `.git` directory.
+
+    The retired `-d "${dir}/.git"` probe read that as "no checkout here" and sent
+    bootstrap to clone over a non-empty directory, where Git died with
+    `destination path already exists`. Running bootstrap from a worktree is
+    ordinary: that is how a second branch of this repository is kept beside the
+    main checkout. Real Git is used throughout, because the defect lives in what
+    Git reports about a worktree.
+    """
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    origin = tmp_path / "origin.git"
+    git(stage, "init", "--quiet", "--bare", "--initial-branch=main", str(origin))
+
+    seed = tmp_path / "seed"
+    git(stage, "clone", "--quiet", str(origin), str(seed))
+    # The script refuses to run outside a complete contour, so the fixture
+    # provides exactly the four paths that sanity check requires.
+    (seed / "skill" / "orchestrate" / "tools").mkdir(parents=True)
+    (seed / "skill" / "orchestrate" / "tools" / "omp_runtime.py").write_text("")
+    (seed / ".omp" / "agents").mkdir(parents=True)
+    # Git tracks files, not directories: without content these two never reach
+    # the worktree, and the contour sanity check would fail before the defect.
+    (seed / ".omp" / "agents" / "pocock-scout.md").write_text("---\nname: pocock-scout\n---\n")
+    (seed / ".omp" / "extensions" / "pocock-control").mkdir(parents=True)
+    (seed / ".omp" / "extensions" / "pocock-control" / "index.ts").write_text("export default () => {};\n")
+    (seed / "bootstrap-mac.sh").write_bytes(BOOTSTRAP_MAC.read_bytes())
+    (seed / "bootstrap-mac.sh").chmod(0o755)
+    commit_fixture_repository(seed, "Fixture contour")
+    git(seed, "push", "--quiet", "origin", "main")
+
+    worktree = tmp_path / "worktree"
+    git(seed, "worktree", "add", "--quiet", "--track", "-b", "side", str(worktree), "origin/main")
+    assert (worktree / ".git").is_file(), "the fixture must reproduce a linked worktree"
+
+    # A real upstream cache keeps the run offline: its own clone_or_pull call
+    # takes the pull branch instead of reaching for github.com.
+    cache = tmp_path / "cache" / "mattpocock-skills"
+    git(stage, "clone", "--quiet", str(origin), str(cache))
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for command in ("gh", "omp"):
+        executable = fake_bin / command
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    result = subprocess.run(
+        ["bash", str(worktree / "bootstrap-mac.sh")],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+            "POCOCK_CACHE_DIR": str(cache),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_TERMINAL_PROMPT": "0",
+        },
+    )
+
+    combined = result.stdout + result.stderr
+    assert "already exists" not in combined, combined
+    assert "не является git checkout" not in combined, combined
+    assert f"обновлён {worktree}" in combined, combined
 
 
 def isolated_exporter(tmp_path: Path) -> tuple[Path, Path]:
