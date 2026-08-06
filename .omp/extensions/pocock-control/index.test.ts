@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import pocockControl, { isDispatchPlaceholder, pinRuntimeForSession, uiEvidenceBinding } from "./index";
+import { writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const context = "Pocock sealed dispatch";
 const task = "Pocock sealed dispatch placeholder";
@@ -34,6 +37,81 @@ describe("runtime pin lifecycle", () => {
 		pinRuntimeForSession(secondSession, updated);
 		expect(() => pinRuntimeForSession(firstSession, updated)).toThrow(/same OMP session pinned/);
 	});
+
+	test("an adopting command takes over runtime bytes replaced under the same session", () => {
+		const session = `runtime-pin-adopt-${Date.now()}`;
+		const original = { path: "/opt/pocock/omp_runtime.py", sha256: "a".repeat(64) };
+		const updated = { path: original.path, sha256: "b".repeat(64) };
+
+		pinRuntimeForSession(session, original);
+		expect(() => pinRuntimeForSession(session, updated)).toThrow(/same OMP session pinned/);
+
+		pinRuntimeForSession(session, updated, true);
+		// The adopted bytes become the pin, so the replaced runtime is now the
+		// one a mutating command must match — and the superseded bytes are not.
+		pinRuntimeForSession(session, updated);
+		expect(() => pinRuntimeForSession(session, original)).toThrow(/same OMP session pinned/);
+	});
+});
+
+test("a runtime replaced under a live session stays readable through status and refused for mutations", async () => {
+	const manifestFingerprint = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+	const runtimePath = join(tmpdir(), `pocock-runtime-${Date.now()}-${Math.random().toString(36).slice(2)}.py`);
+	writeFileSync(runtimePath, "# runtime bytes v1\n");
+	const previousOverride = process.env.POCOCK_RUNTIME;
+	process.env.POCOCK_RUNTIME = runtimePath;
+	try {
+		const harness = adapterHarness(command => {
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "status") {
+				return coreCard({
+					...card("wedged-run", 3, "preparation"),
+					manifestFingerprint,
+					nextActions: [],
+					blockedReason: "effective Pocock runtime differs",
+					runtimeMismatch: { expected: "old", observed: "new" },
+				});
+			}
+			if (command === "start") return coreCard({ ...card("replacement-run", 0, "frontier_admission"), manifestFingerprint });
+			throw new Error(`Unexpected core command ${command}`);
+		});
+
+		const pinned = await harness.status("status-pinned", {}, undefined, undefined, harness.context);
+		expect(pinned.isError).not.toBe(true);
+
+		// The runtime is replaced under the live session: doctrine sync, install,
+		// or an edit to omp_runtime.py all produce exactly this.
+		writeFileSync(runtimePath, "# runtime bytes v2\n");
+
+		const observed = await harness.status("status-after-swap", {}, undefined, undefined, harness.context);
+		expect(observed.isError).not.toBe(true);
+		expect(harness.requests.filter(request => request.command === "status")).toHaveLength(2);
+
+		const replacement = await harness.enter(
+			"enter-replacement",
+			{ entry: "frontier", objective: "Replace the run whose runtime was swapped" },
+			undefined,
+			undefined,
+			harness.context,
+		);
+		expect(replacement.isError).not.toBe(true);
+
+		writeFileSync(runtimePath, "# runtime bytes v3\n");
+		const mutation = await harness.transition(
+			"transition-after-swap",
+			{ runId: "replacement-run", revision: 0, stateHash: "replacement-run-0-hash", action: "project" },
+			undefined,
+			undefined,
+			harness.context,
+		);
+		expect(mutation.isError).toBe(true);
+		expect(JSON.stringify(mutation)).toContain("runtime changed after the same OMP session pinned it");
+		expect(harness.requests.some(request => request.command === "transition")).toBe(false);
+	} finally {
+		if (previousOverride === undefined) delete process.env.POCOCK_RUNTIME;
+		else process.env.POCOCK_RUNTIME = previousOverride;
+		rmSync(runtimePath, { force: true });
+	}
 });
 
 test("a runtime-mismatched mirror can be replaced by a new run", async () => {

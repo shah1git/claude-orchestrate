@@ -272,21 +272,39 @@ function runtimeCandidates(): string[] {
 	];
 }
 
-export function pinRuntimeForSession(sessionId: string, observed: RuntimePin): void {
+/**
+ * Commands that may observe a runtime replaced under a live OMP session.
+ *
+ * `status` mutates nothing and is the ONLY place the core proves
+ * `runtimeMismatch`; `metadata` reads no run at all; `start` records the new
+ * fingerprint into a new run and is the documented replacement path. Refusing
+ * these three wedged the session: the core rejects every mutation of the
+ * mismatched run — `mutate` checks the runtime before revision and stateHash,
+ * so even `cancel` is unreachable — while the adapter refused the status call
+ * that would authorize the replacement. Mutating commands keep the hard
+ * refusal as defence in depth over the core's per-run fingerprint.
+ */
+const RUNTIME_ADOPTING_COMMANDS: Record<string, true> = { status: true, metadata: true, start: true };
+
+export function pinRuntimeForSession(sessionId: string, observed: RuntimePin, adopt = false): void {
 	const pinned = pinnedRuntimes.get(sessionId);
 	if (!pinned) {
 		pinnedRuntimes.set(sessionId, observed);
 		return;
 	}
 	if (pinned.path === observed.path && pinned.sha256 === observed.sha256) return;
+	if (adopt) {
+		pinnedRuntimes.set(sessionId, observed);
+		return;
+	}
 	throw new PocockError(
 		`Pocock runtime changed after the same OMP session pinned it: ${pinned.path}; ` +
 			`expected sha256=${pinned.sha256}, observed sha256=${observed.sha256}. ` +
-			"Open a new OMP session to adopt the updated runtime; start a new Pocock run if the core reports runtime_changed.",
+			"Inspect the run with status; the core authorizes a replacement run that adopts the updated runtime.",
 	);
 }
 
-function discoverRuntime(sessionId: string): string {
+function discoverRuntime(sessionId: string, adopt: boolean): string {
 	const candidates = runtimeCandidates();
 	const override = process.env.POCOCK_RUNTIME?.trim();
 	let selected: string | undefined;
@@ -305,7 +323,7 @@ function discoverRuntime(sessionId: string): string {
 	if (!selected) throw new PocockError(`Pocock runtime was not found. Candidates: ${candidates.join(", ")}`);
 
 	const sha256 = createHash("sha256").update(readFileSync(selected)).digest("hex");
-	pinRuntimeForSession(sessionId, { path: selected, sha256 });
+	pinRuntimeForSession(sessionId, { path: selected, sha256 }, adopt);
 	return selected;
 }
 
@@ -928,7 +946,10 @@ async function invokeCore(
 	request: JsonRecord,
 	signal?: AbortSignal,
 ): Promise<JsonRecord> {
-	const runtime = discoverRuntime(context.sessionManager.getSessionId());
+	const runtime = discoverRuntime(
+		context.sessionManager.getSessionId(),
+		RUNTIME_ADOPTING_COMMANDS[command] === true,
+	);
 	const requestDirectory = mkdtempSync(join(tmpdir(), "pocock-core-"));
 	const requestPath = join(requestDirectory, "request.json");
 	const timeoutMs = command === "pregate" ? PREGATE_CORE_TIMEOUT_MS : CORE_TIMEOUT_MS;
