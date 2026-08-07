@@ -28,8 +28,10 @@ contains only one ordinary-looking ticket.
 ## Обязательный протокол исполнения
 
 До первой мутации runtime прочитайте
-[единый протокол исполнения](../orchestrate/references/execution-protocol.md). После
-допуска следуйте ему без исключений; эта Голова не имеет прямого пути.
+[единый протокол исполнения](../orchestrate/references/execution-protocol.md) и
+следуйте ему без исключений с этой самой мутации: «Payload переходов» задаёт форму
+payload уже для `admit_frontier`, «Исполнительный цикл» — после допуска. Эта Голова
+не имеет прямого пути.
 Читайте его точным путём — `skill://orchestrate/references/execution-protocol.md`
 либо `skill/orchestrate/references/execution-protocol.md` в репозитории. Шаблоны
 вида `skill://orchestrate/**` инструменты поиска отклоняют: внутренние URL
