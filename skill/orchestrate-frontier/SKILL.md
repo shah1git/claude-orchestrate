@@ -30,6 +30,10 @@ contains only one ordinary-looking ticket.
 До первой мутации runtime прочитайте
 [единый протокол исполнения](../orchestrate/references/execution-protocol.md). После
 допуска следуйте ему без исключений; эта Голова не имеет прямого пути.
+Читайте его точным путём — `skill://orchestrate/references/execution-protocol.md`
+либо `skill/orchestrate/references/execution-protocol.md` в репозитории. Шаблоны
+вида `skill://orchestrate/**` инструменты поиска отклоняют: внутренние URL
+принимают только точный путь.
 
 ## Frontier admission
 
