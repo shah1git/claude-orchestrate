@@ -414,6 +414,7 @@ function adapterHarness(respond?: CoreResponder) {
 		toolCall: hooks.get("tool_call")!,
 		toolResult: hooks.get("tool_result")!,
 		sessionStop: hooks.get("session_stop")!,
+		sessionShutdown: hooks.get("session_shutdown")!,
 	};
 }
 
@@ -777,6 +778,7 @@ describe("Pocock live dispatch observability", () => {
 					results: [
 						{
 							output: "first",
+							name: "P1T1A1",
 							agent: "producer-1",
 							agentSource: "omp",
 							resolvedModel: "anthropic/claude-4",
@@ -795,6 +797,9 @@ describe("Pocock live dispatch observability", () => {
 		const results = ((record?.details as Record<string, unknown>).results as Array<Record<string, unknown>>);
 		expect(results[0]).toMatchObject({
 			attemptId: "attempt-1",
+			// The host's worker label travels to the core untouched: it is what
+			// binds a settled result to its sealed attempt, in place of position.
+			name: "P1T1A1",
 			declaredAgent: "task",
 			declaredModel: null,
 			observedAgent: "producer-1",
@@ -803,6 +808,8 @@ describe("Pocock live dispatch observability", () => {
 			resolvedModelIsFallback: true,
 			tokens: 0,
 		});
+		// A host result without a name is reported as such, not silently invented.
+		expect(results[1]).toMatchObject({ attemptId: "attempt-2", name: null });
 	});
 
 	test("gates nonterminal sessions but allows terminal sessions to stop", async () => {
@@ -971,6 +978,165 @@ describe("Hub lifecycle guard", () => {
 	});
 });
 
+describe("Session-scoped run state", () => {
+	const dispatchPhase = (runId: string) => (command: string) => {
+		if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+		if (command === "start") return coreCard(card(runId, 0, "producer_dispatch_pending"));
+		if (command === "transition") return coreCard(card(runId, 1, "producer_dispatch_pending"));
+		throw new Error(`Unexpected core command ${command}`);
+	};
+	const hubWait = (harness: { toolCall: RegisteredHook; context: unknown }, id: string) => harness.toolCall(
+		{ toolName: "hub", toolCallId: id, input: { op: "wait" } },
+		harness.context,
+	);
+
+	test("a second session entering its own run does not capture the first session's run", async () => {
+		const first = adapterHarness(dispatchPhase("first-session-run"));
+		const second = adapterHarness(dispatchPhase("second-session-run"));
+		await first.enter("enter-first", { entry: "full", objective: "Drive the first run" }, undefined, undefined, first.context);
+		expect(await hubWait(second, "hub-second-neutral")).toBeUndefined();
+
+		await second.enter("enter-second", { entry: "full", objective: "Drive the second run" }, undefined, undefined, second.context);
+
+		expect(await hubWait(first, "hub-first-after")).toEqual({
+			block: true,
+			reason: expect.stringContaining("sealed blocking task is one-shot"),
+		});
+		const owned = await first.transition(
+			"transition-first",
+			{ runId: "first-session-run", revision: 0, stateHash: "first-session-run-0-hash", action: "project" },
+			undefined,
+			undefined,
+			first.context,
+		);
+		expect(owned.isError).not.toBe(true);
+	});
+
+	test("one session's fail-closed veto leaves a neutral session free to delegate", async () => {
+		const failing = adapterHarness(dispatchPhase("failing-session-run"));
+		const neutral = adapterHarness(dispatchPhase("neutral-session-run"));
+		await failing.enter("enter-failing", { entry: "full", objective: "Fail closed" }, undefined, undefined, failing.context);
+		failing.failNextAppend(new Error("mirror write failed"));
+		const failure = await failing.transition(
+			"transition-failing",
+			{ runId: "failing-session-run", revision: 0, stateHash: "failing-session-run-0-hash", action: "project" },
+			undefined,
+			undefined,
+			failing.context,
+		);
+
+		expect(failure.isError).toBe(true);
+		expect(await hubWait(failing, "hub-failing")).toEqual({
+			block: true,
+			reason: expect.stringContaining("fail-closed after an unsettled sealed task"),
+		});
+		expect(await hubWait(neutral, "hub-neutral")).toBeUndefined();
+		expect(await neutral.toolCall(
+			{ toolName: "task", toolCallId: "neutral-task", input: { context: "ordinary", tasks: [{ task: "Do the work" }] } },
+			neutral.context,
+		)).toBeUndefined();
+
+		// A session that hydrates without a state mirror is inert; it must not
+		// lift the veto another session earned.
+		await neutral.sessionStart({}, neutral.context);
+		expect(await hubWait(failing, "hub-failing-after-neutral-start")).toEqual({
+			block: true,
+			reason: expect.stringContaining("fail-closed after an unsettled sealed task"),
+		});
+	});
+
+	test("refuses to drop the settled result of a sealed dispatch observed elsewhere", async () => {
+		const sealedTaskInput = { context: "sealed result transport", tasks: [{ task: "First", agent: "task" }] };
+		let manifestFingerprint = "";
+		const owner = adapterHarness((command, request) => {
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") {
+				manifestFingerprint = String(request.manifestFingerprint);
+				return coreCard({ ...card("abandoned-run", 0, "producer_dispatch_pending"), manifestFingerprint });
+			}
+			if (command === "seal-task") {
+				return coreResponse({
+					card: { ...card("abandoned-run", 1, "producer_running"), manifestFingerprint },
+					dispatchId: "dispatch-abandoned",
+					attemptIds: ["attempt-1"],
+					taskInput: sealedTaskInput,
+				});
+			}
+			throw new Error(`Unexpected core command ${command}`);
+		});
+		await owner.enter("enter-abandoned", { entry: "full", objective: "Seal a dispatch" }, undefined, undefined, owner.context);
+		await owner.toolCall(
+			{ toolName: "task", toolCallId: "abandoned-call", input: { context, tasks: [{ task }] } },
+			owner.context,
+		);
+
+		const observer = adapterHarness(dispatchPhase("observer-run"));
+		const observed = await observer.toolResult({
+			toolName: "task",
+			toolCallId: "abandoned-call",
+			input: sealedTaskInput,
+			details: { results: [{ output: "first", name: "P1T1A1" }] },
+			isError: false,
+		}, observer.context);
+		const foreign = await observer.toolResult({
+			toolName: "task",
+			toolCallId: "unrelated-call",
+			input: { context: "ordinary", tasks: [{ task: "Do the work" }] },
+			details: { results: [{ output: "unrelated" }] },
+			isError: false,
+		}, observer.context);
+
+		expect(observed).toMatchObject({
+			isError: true,
+			details: { error: expect.stringContaining("abandon_dispatch") },
+		});
+		expect(foreign).toBeUndefined();
+	});
+
+	test("the sealing session still refuses a late sealed result after hydration finds no mirror", async () => {
+		const sealedTaskInput = { context: "sealed result transport", tasks: [{ task: "First", agent: "task" }] };
+		let manifestFingerprint = "";
+		const owner = adapterHarness((command, request) => {
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") {
+				manifestFingerprint = String(request.manifestFingerprint);
+				return coreCard({ ...card("orphaned-run", 0, "producer_dispatch_pending"), manifestFingerprint });
+			}
+			if (command === "seal-task") {
+				return coreResponse({
+					card: { ...card("orphaned-run", 1, "producer_running"), manifestFingerprint },
+					dispatchId: "dispatch-orphaned",
+					attemptIds: ["attempt-1"],
+					taskInput: sealedTaskInput,
+				});
+			}
+			throw new Error(`Unexpected core command ${command}`);
+		});
+		await owner.enter("enter-orphaned", { entry: "full", objective: "Seal a dispatch" }, undefined, undefined, owner.context);
+		await owner.toolCall(
+			{ toolName: "task", toolCallId: "orphaned-call", input: { context, tasks: [{ task }] } },
+			owner.context,
+		);
+
+		// Hydration without a mirror drops this session's run record. The core's
+		// attempt is untouched by that, so the late result is still owed a
+		// refusal in words rather than a silent drop.
+		await owner.sessionStart({}, owner.context);
+
+		const observed = await owner.toolResult({
+			toolName: "task",
+			toolCallId: "orphaned-call",
+			input: sealedTaskInput,
+			details: { results: [{ output: "first", name: "P1T1A1" }] },
+			isError: false,
+		}, owner.context);
+		expect(observed).toMatchObject({
+			isError: true,
+			details: { error: expect.stringContaining("abandon_dispatch") },
+		});
+	});
+});
+
 describe("uiEvidenceBinding", () => {
 	const challenge = {
 		attemptId: "run.w1.T1.a1",
@@ -980,22 +1146,55 @@ describe("uiEvidenceBinding", () => {
 		requiredStages: ["open", "witness"],
 		completedStages: ["open"],
 	};
+	// A second, independent question about the same page: one challenge's probe
+	// must not be mistaken for a racing second reading of another's.
+	const secondChallenge = {
+		attemptId: "run.w1.T1.a2",
+		token: "pocock-ui-second",
+		target: "http://fixture.test/second",
+		criterion: "second fixture renders",
+		requiredStages: ["open", "witness"],
+		completedStages: ["open"],
+	};
 	const stateCard = {
 		runId: "run-1",
 		revision: 3,
 		stateHash: "hash",
 		manifestFingerprint: "manifest",
 		phase: "pregate_pending",
-		evidenceRequests: [challenge],
+		evidenceRequests: [challenge, secondChallenge],
+	};
+	// The host's own async function constructor: generated witness code must be
+	// exercised exactly as the browser tool would run it.
+	const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
+		...args: string[]
+	) => (...values: unknown[]) => Promise<unknown>;
+	const hostAssert = (observed: unknown, message: string) => {
+		if (!observed) throw new Error(message);
 	};
 
-	test("binds a closed DOM or URL probe and generates adapter-owned code", () => {
+	/**
+	 * Run generated witness code the way the browser tool would: `location` and
+	 * `document` are parameters, so the callback reads this fixture page rather
+	 * than whatever globals the test host exposes.
+	 */
+	const runProbe = (code: string, href: string, document?: unknown): Promise<unknown> => {
+		const execute = new AsyncFunction("tab", "assert", "location", "document", code);
+		const tab = { evaluate: async (probe: (value: unknown) => unknown, value: unknown) => probe(value) };
+		return execute(tab, hostAssert, { href }, document);
+	};
+
+	const urlProbeFor = (issued: { token: string; target: string }) => ({
+		action: "run",
+		name: issued.token,
+		witness: { version: 1, probe: { kind: "url", expected: issued.target } },
+	});
+
+	test("binds a closed DOM or URL probe and generates code that reads values, not code", async () => {
 		const expected = `text "quoted" \\\\ ${"unicode ✓"}`;
-		const invocation = {
-			action: "run",
-			name: challenge.token,
-			witness: { version: 1, probe: { kind: "dom", selector: `#target'); throw new Error('injected`, expected } },
-		};
+		const selector = `#target'); throw new Error('injected`;
+		const probe = { kind: "dom", href: challenge.target, selector, expected };
+		const invocation = { action: "run", name: challenge.token, witness: { version: 1, probe } };
 		const binding = uiEvidenceBinding(stateCard, { toolName: "browser", input: invocation });
 		expect(binding).toMatchObject({
 			challenge,
@@ -1007,44 +1206,125 @@ describe("uiEvidenceBinding", () => {
 				attemptId: challenge.attemptId,
 				challengeToken: challenge.token,
 				criterion: challenge.criterion,
-				probe: invocation.witness.probe,
+				probe,
 			},
 		});
-		const generated = binding?.generatedInput as { code: string };
-		const values = JSON.stringify({ expected, selector: invocation.witness.probe.selector });
-		expect(generated).toEqual({
-			action: "run",
-			name: challenge.token,
-			code: `const observed = await tab.evaluate(({ selector, expected }) => document.querySelector(selector)?.textContent === expected, ${values});\nassert(observed, ${JSON.stringify(challenge.criterion)});`,
-		});
+		const generated = binding?.generatedInput as { action: string; name: string; code: string };
+		expect(Object.keys(generated).sort()).toEqual(["action", "code", "name"]);
+		expect(generated).toMatchObject({ action: "run", name: challenge.token });
+
+		// The injection payload reaches `querySelector` verbatim and the quoted
+		// text is compared, not executed: the probe passes and nothing is thrown
+		// by the selector itself.
+		const asked: string[] = [];
+		const page = {
+			querySelector: (value: string) => {
+				asked.push(value);
+				return value === selector ? { textContent: expected } : null;
+			},
+		};
+		await expect(runProbe(generated.code, challenge.target, page)).resolves.toBeUndefined();
+		expect(asked).toEqual([selector]);
+		await expect(runProbe(generated.code, challenge.target, { querySelector: () => ({ textContent: "other text" }) }))
+			.rejects.toThrow(challenge.criterion);
+
 		expect(uiEvidenceBinding(stateCard, {
 			toolName: "write",
 			input: {
 				path: "xd://browser",
-				content: JSON.stringify({
-					action: "run",
-					name: challenge.token,
-					witness: { version: 1, probe: { kind: "url", expected: " http://fixture.test " } },
-				}),
+				content: JSON.stringify(urlProbeFor(challenge)),
 			},
-		})?.witness?.probe).toEqual({ kind: "url", expected: " http://fixture.test " });
+		})?.witness?.probe).toEqual({ kind: "url", expected: challenge.target });
+	});
+
+	test("the generated probe accepts the target the browser normalized and refuses another page", async () => {
+		const urlBinding = uiEvidenceBinding(stateCard, { toolName: "browser", input: urlProbeFor(challenge) });
+		const domBinding = uiEvidenceBinding(stateCard, {
+			toolName: "browser",
+			input: {
+				action: "run",
+				name: challenge.token,
+				witness: { version: 1, probe: { kind: "dom", href: challenge.target, selector: "#target", expected: "ok" } },
+			},
+		});
+		const page = { querySelector: () => ({ textContent: "ok" }) };
+		for (const binding of [urlBinding, domBinding]) {
+			const { code } = binding?.generatedInput as { code: string };
+			// The browser reports the parsed URL, so the issued origin comes back
+			// carrying the root path the producer never typed.
+			await expect(runProbe(code, `${challenge.target}/`, page)).resolves.toBeUndefined();
+			await expect(runProbe(code, "http://attacker.test/", page)).rejects.toThrow(challenge.criterion);
+			await expect(runProbe(code, `${challenge.target}/other`, page)).rejects.toThrow(challenge.criterion);
+		}
+	});
+
+	test("refuses a challenge target the browser cannot parse instead of sealing a doomed probe", async () => {
+		const target = "fixture.test/dashboard";
+		const issued = { ...challenge, target };
+		const binding = uiEvidenceBinding(
+			{ ...stateCard, evidenceRequests: [issued] },
+			{ toolName: "browser", input: urlProbeFor(issued) },
+		);
+		expect(binding?.generatedInput).toBeUndefined();
+		expect(binding?.refusal).toContain(target);
+
+		const active = { ...card("unusable-target-run", 0, "pregate_pending"), evidenceRequests: [issued] };
+		const harness = adapterHarness(command => {
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") return coreCard(active);
+			throw new Error(`Unexpected core command ${command}`);
+		});
+		await harness.enter("enter-unusable", { entry: "full", objective: "Probe an unusable target" }, undefined, undefined, harness.context);
+		expect(await harness.toolCall(
+			{ toolName: "browser", toolCallId: "unusable-probe", input: urlProbeFor(issued) },
+			harness.context,
+		)).toMatchObject({ block: true, reason: expect.stringContaining(target) });
+	});
+
+	test("refuses every probe that does not observe the issued challenge target", () => {
+		for (const probe of [
+			{ kind: "url", expected: `${challenge.target}/` },
+			{ kind: "url", expected: " http://fixture.test " },
+			{ kind: "url", expected: "http://attacker.test" },
+			{ kind: "dom", href: "http://attacker.test", selector: "#target", expected: "ok" },
+			// The pre-binding DOM shape: a reading taken in whatever tab is open.
+			{ kind: "dom", selector: "#target", expected: "ok" },
+		]) {
+			expect(uiEvidenceBinding(stateCard, {
+				toolName: "browser",
+				input: { action: "run", name: challenge.token, witness: { version: 1, probe } },
+			})).toBeUndefined();
+		}
+	});
+
+	test("a DOM witness observes the issued target before it reads the selector", async () => {
+		const binding = uiEvidenceBinding(stateCard, {
+			toolName: "browser",
+			input: {
+				action: "run",
+				name: challenge.token,
+				witness: { version: 1, probe: { kind: "dom", href: challenge.target, selector: "#target", expected: "ok" } },
+			},
+		});
+		const generated = binding?.generatedInput as { code: string };
+		// `location` and `document` are parameters, so the generated callback reads
+		// this fixture page rather than whatever globals the test host exposes.
+		const execute = new AsyncFunction("tab", "assert", "location", "document", generated.code);
+		const tab = { evaluate: async (probe: (value: unknown) => unknown, value: unknown) => probe(value) };
+		const document = { querySelector: () => ({ textContent: "ok" }) };
+		await expect(execute(tab, hostAssert, { href: challenge.target }, document)).resolves.toBeUndefined();
+		await expect(execute(tab, hostAssert, { href: "http://elsewhere.test" }, document)).rejects.toThrow(challenge.criterion);
 	});
 
 	test("host assertion alone decides successful and false observations", async () => {
 		const invocation = {
 			action: "run",
 			name: challenge.token,
-			witness: { version: 1, probe: { kind: "url", expected: "http://fixture.test/" } },
+			witness: { version: 1, probe: { kind: "url", expected: challenge.target } },
 		};
 		const binding = uiEvidenceBinding(stateCard, { toolName: "browser", input: invocation });
 		const generated = binding?.generatedInput as { code: string };
-		const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (
-			...args: string[]
-		) => (...values: unknown[]) => Promise<unknown>;
 		const execute = new AsyncFunction("tab", "assert", generated.code);
-		const hostAssert = (observed: unknown, message: string) => {
-			if (!observed) throw new Error(message);
-		};
 		await expect(execute({ evaluate: async () => false }, hostAssert)).rejects.toThrow(challenge.criterion);
 		await expect(execute({ evaluate: async () => true }, hostAssert)).resolves.toBeUndefined();
 	});
@@ -1098,21 +1378,21 @@ describe("uiEvidenceBinding", () => {
 		const invocation = {
 			action: "run",
 			name: challenge.token,
-			witness: { version: 1, probe: { kind: "url", expected: "http://fixture.test/" } },
+			witness: { version: 1, probe: { kind: "url", expected: challenge.target } },
 		};
 		const replacement = await harness.toolCall({
 			toolName: "browser",
 			toolCallId: "witness-call",
 			input: invocation,
 		}, harness.context);
-		expect(replacement).toEqual({
-			input: {
-				action: "run",
-				name: challenge.token,
-				code: `const observed = await tab.evaluate((expected) => location.href === expected, ${JSON.stringify(invocation.witness.probe.expected)});\nassert(observed, ${JSON.stringify(challenge.criterion)});`,
-			},
-		});
+		expect(replacement).toMatchObject({ input: { action: "run", name: challenge.token } });
 		if (!isJsonRecord(replacement) || !isJsonRecord(replacement.input)) throw new Error("Witness replacement is malformed");
+		expect(Object.keys(replacement.input).sort()).toEqual(["action", "code", "name"]);
+		// The sealed probe is what the browser will run: exercise the code on the
+		// location the browser reports, rather than comparing its source text.
+		const sealedCode = String(replacement.input.code);
+		await expect(runProbe(sealedCode, `${challenge.target}/`)).resolves.toBeUndefined();
+		await expect(runProbe(sealedCode, "http://attacker.test/")).rejects.toThrow(challenge.criterion);
 		await harness.toolResult({
 			toolName: "browser",
 			toolCallId: "witness-call",
@@ -1161,7 +1441,7 @@ describe("uiEvidenceBinding", () => {
 		const valid = {
 			action: "run",
 			name: challenge.token,
-			witness: { version: 1, probe: { kind: "url", expected: "http://fixture.test/" } },
+			witness: { version: 1, probe: { kind: "url", expected: challenge.target } },
 		};
 		await harness.toolCall({ toolName: "browser", toolCallId: "failed-witness", input: valid }, harness.context);
 		const failure = await harness.toolResult({
@@ -1175,7 +1455,7 @@ describe("uiEvidenceBinding", () => {
 		expect(await harness.toolCall({
 			toolName: "browser",
 			toolCallId: "forged-witness",
-			input: { ...valid, witness: { version: 1, probe: { kind: "url", expected: "http://fixture.test/", extra: true } } },
+			input: { ...valid, witness: { version: 1, probe: { kind: "url", expected: challenge.target, extra: true } } },
 		}, harness.context)).toBeUndefined();
 		await harness.toolResult({
 			toolName: "browser",
@@ -1185,5 +1465,157 @@ describe("uiEvidenceBinding", () => {
 			isError: false,
 		}, harness.context);
 		expect(harness.requests.filter(entry => entry.command === "record-evidence")).toHaveLength(0);
+	});
+
+	test("admits one unsettled probe per challenge and blocks only a second probe of the same challenge", async () => {
+		const active = {
+			...card("racing-witness-run", 0, "pregate_pending"),
+			evidenceRequests: [challenge, secondChallenge],
+		};
+		const harness = adapterHarness(command => {
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") return coreCard(active);
+			throw new Error(`Unexpected core command ${command}`);
+		});
+		await harness.enter("enter-racing", { entry: "full", objective: "Race a probe" }, undefined, undefined, harness.context);
+
+		expect(await harness.toolCall(
+			{ toolName: "browser", toolCallId: "probe-first", input: urlProbeFor(challenge) },
+			harness.context,
+		)).toMatchObject({ input: { name: challenge.token } });
+		// A different challenge is a different question, so its probe is not the
+		// racing second reading the ceiling exists to refuse.
+		expect(await harness.toolCall(
+			{ toolName: "browser", toolCallId: "probe-other-challenge", input: urlProbeFor(secondChallenge) },
+			harness.context,
+		)).toMatchObject({ input: { name: secondChallenge.token } });
+		expect(await harness.toolCall(
+			{ toolName: "browser", toolCallId: "probe-second", input: urlProbeFor(challenge) },
+			harness.context,
+		)).toEqual({ block: true, reason: expect.stringContaining(challenge.token) });
+	});
+
+	test("counts failed probes across a status refresh and a rehydration, then fails closed", async () => {
+		let manifestFingerprint = "";
+		const active = () => ({
+			...card("retried-witness-run", 0, "pregate_pending"),
+			manifestFingerprint,
+			evidenceRequests: [challenge],
+		});
+		const harness = adapterHarness((command, request) => {
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") {
+				manifestFingerprint = String(request.manifestFingerprint);
+				return coreCard(active());
+			}
+			if (command === "status" || command === "hydrate") return coreCard(active());
+			throw new Error(`Unexpected core command ${command}`);
+		});
+		await harness.enter("enter-retried", { entry: "full", objective: "Retry a probe" }, undefined, undefined, harness.context);
+		const invocation = urlProbeFor(challenge);
+		const failProbe = async (toolCallId: string) => {
+			await harness.toolCall({ toolName: "browser", toolCallId, input: invocation }, harness.context);
+			return harness.toolResult({
+				toolName: "browser",
+				toolCallId,
+				input: invocation,
+				details: { returned: false },
+				isError: true,
+			}, harness.context);
+		};
+
+		await failProbe("probe-a");
+		await failProbe("probe-b");
+
+		// Neither refreshing the mirror nor rebuilding it from the session is a
+		// witness, so neither returns the probes the producer already spent.
+		const status = await harness.status("status-mid-ceiling", {}, undefined, undefined, harness.context);
+		expect(status.isError).not.toBe(true);
+		harness.mirror(active());
+		await harness.sessionStart({}, harness.context);
+
+		const third = await failProbe("probe-c");
+		expect(third).toMatchObject({ isError: true, details: { error: expect.stringContaining(challenge.token) } });
+		expect(await harness.toolCall(
+			{ toolName: "hub", toolCallId: "hub-after-probes", input: { op: "wait" } },
+			harness.context,
+		)).toEqual({ block: true, reason: expect.stringContaining("fail-closed") });
+	});
+
+	test("only the end of the hosting process releases the probe ceiling", async () => {
+		const active = { ...card("shutdown-witness-run", 0, "pregate_pending"), evidenceRequests: [challenge] };
+		const harness = adapterHarness(command => {
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") return coreCard(active);
+			throw new Error(`Unexpected core command ${command}`);
+		});
+		await harness.enter("enter-shutdown", { entry: "full", objective: "Outlive a run record" }, undefined, undefined, harness.context);
+		const invocation = urlProbeFor(challenge);
+		const failProbe = async (toolCallId: string) => {
+			await harness.toolCall({ toolName: "browser", toolCallId, input: invocation }, harness.context);
+			return harness.toolResult({
+				toolName: "browser",
+				toolCallId,
+				input: invocation,
+				details: { returned: false },
+				isError: true,
+			}, harness.context);
+		};
+
+		await failProbe("shutdown-a");
+		await failProbe("shutdown-b");
+		await harness.sessionShutdown({}, harness.context);
+
+		// No session survives the process, so nothing is owed the two spent
+		// probes: this failure counts as the first one again.
+		await failProbe("shutdown-c");
+		const hub = await harness.toolCall(
+			{ toolName: "hub", toolCallId: "hub-after-shutdown", input: { op: "wait" } },
+			harness.context,
+		);
+		expect(hub).toMatchObject({ block: true });
+		expect(JSON.stringify(hub)).not.toContain("fail-closed");
+	});
+
+	test("a recorded witness spends the failed-probe count of its challenge", async () => {
+		// The core re-issues the same challenge after recording, so the producer
+		// probes the same token again with a count that must have restarted.
+		const active = { ...card("cleared-witness-run", 0, "pregate_pending"), evidenceRequests: [challenge] };
+		const harness = adapterHarness(command => {
+			if (command === "metadata") return coreResponse({ omp: { slots: { scout: { alias: "@pocock-scout" } } } });
+			if (command === "start") return coreCard(active);
+			if (command === "record-evidence") {
+				return coreCard({ ...active, revision: 1, stateHash: "cleared-witness-run-1-hash" });
+			}
+			throw new Error(`Unexpected core command ${command}`);
+		});
+		await harness.enter("enter-cleared", { entry: "full", objective: "Clear a spent count" }, undefined, undefined, harness.context);
+		const invocation = urlProbeFor(challenge);
+		const probe = async (toolCallId: string, isError: boolean) => {
+			await harness.toolCall({ toolName: "browser", toolCallId, input: invocation }, harness.context);
+			return harness.toolResult({
+				toolName: "browser",
+				toolCallId,
+				input: invocation,
+				details: { returned: !isError },
+				content: [{ type: "text", text: "true" }],
+				isError,
+			}, harness.context);
+		};
+
+		await probe("cleared-a", true);
+		await probe("cleared-b", true);
+		await probe("cleared-c", false);
+		expect(harness.requests.filter(entry => entry.command === "record-evidence")).toHaveLength(1);
+
+		// Without the recorded witness this fourth probe would be the third
+		// failure and would fail the session closed.
+		await probe("cleared-d", true);
+		const hub = await harness.toolCall(
+			{ toolName: "hub", toolCallId: "hub-after-cleared", input: { op: "wait" } },
+			harness.context,
+		);
+		expect(hub).toMatchObject({ block: true });
+		expect(JSON.stringify(hub)).not.toContain("fail-closed");
 	});
 });

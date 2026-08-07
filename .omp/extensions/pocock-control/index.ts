@@ -95,7 +95,6 @@ interface ManifestWitness {
 
 
 interface ActiveRun {
-	sessionId: string;
 	card: StateCard;
 	slotModels: Record<string, SlotModel>;
 	agents: Map<string, DeclaredAgent>;
@@ -520,9 +519,11 @@ function declaredAgents(metadata: JsonRecord, slotModels: Record<string, SlotMod
 }
 
 function activeFor(context: RuntimeContext): ActiveRun | undefined {
-	if (!activeRun) return undefined;
-	if (activeRun.sessionId === context.sessionManager.getSessionId()) return activeRun;
-	return undefined;
+	return activeRuns.get(context.sessionManager.getSessionId());
+}
+
+function vetoFor(context: RuntimeContext): string | undefined {
+	return vetoReasons.get(context.sessionManager.getSessionId());
 }
 
 function requireActive(context: RuntimeContext): ActiveRun {
@@ -576,7 +577,7 @@ function browserInvocation(event: { toolName: string; input: JsonRecord }): Json
 
 type WitnessProbe =
 	| { kind: "url"; expected: string }
-	| { kind: "dom"; selector: string; expected: string };
+	| { kind: "dom"; href: string; selector: string; expected: string };
 
 interface StructuredWitness {
 	version: 1;
@@ -589,6 +590,7 @@ interface StructuredWitness {
 }
 
 interface PendingWitness {
+	sessionId: string;
 	runId: string;
 	tool: "browser" | "xdev";
 	invocation: JsonRecord;
@@ -627,29 +629,67 @@ function canonicalJson(value: string | number | JsonRecord): string {
 	return `{${keys.map(key => `${JSON.stringify(key)}:${canonicalJson(value[key] as string | number | JsonRecord)}`).join(",")}}`;
 }
 
-function normalizedProbe(value: unknown): WitnessProbe | undefined {
+/**
+ * A probe is admissible only where it observes the page the core issued.
+ * Without that binding the producer chooses both the question and the page it
+ * is asked about, so a passing witness proves nothing about the challenge.
+ */
+function normalizedProbe(value: unknown, target: string): WitnessProbe | undefined {
 	if (!isRecord(value) || !nonEmptyWellFormedString(value.kind)) return undefined;
 	if (value.kind === "url") {
-		if (!sameKeys(value, ["kind", "expected"]) || !nonEmptyWellFormedString(value.expected)) return undefined;
+		if (
+			!sameKeys(value, ["kind", "expected"])
+			|| !nonEmptyWellFormedString(value.expected)
+			|| value.expected !== target
+		) return undefined;
 		return { expected: value.expected, kind: "url" };
 	}
 	if (value.kind === "dom") {
 		if (
-			!sameKeys(value, ["kind", "selector", "expected"])
+			!sameKeys(value, ["kind", "href", "selector", "expected"])
+			|| !nonEmptyWellFormedString(value.href)
 			|| !nonEmptyWellFormedString(value.selector)
 			|| !nonEmptyWellFormedString(value.expected)
+			|| value.href !== target
 		) return undefined;
-		return { expected: value.expected, kind: "dom", selector: value.selector };
+		return { expected: value.expected, href: value.href, kind: "dom", selector: value.selector };
 	}
 	return undefined;
 }
 
+/**
+ * The adapter compares the issued target and the probe byte for byte, because
+ * both strings come from the same core-issued ticket. The browser does not:
+ * `location.href` is the parsed, serialized URL, so an issued
+ * `http://host:3000` is read back as `http://host:3000/`. The generated code
+ * therefore compares normalized URLs; anything else makes a truthful probe of
+ * the right page fail on punctuation the producer never chose.
+ */
 function witnessCode(probe: WitnessProbe, criterion: string): string {
 	if (probe.kind === "url") {
-		return `const observed = await tab.evaluate((expected) => location.href === expected, ${JSON.stringify(probe.expected)});\nassert(observed, ${JSON.stringify(criterion)});`;
+		return `const observed = await tab.evaluate((expected) => new URL(location.href).href === new URL(expected).href, ${JSON.stringify(probe.expected)});\nassert(observed, ${JSON.stringify(criterion)});`;
 	}
-	const values = JSON.stringify({ expected: probe.expected, selector: probe.selector });
-	return `const observed = await tab.evaluate(({ selector, expected }) => document.querySelector(selector)?.textContent === expected, ${values});\nassert(observed, ${JSON.stringify(criterion)});`;
+	// One evaluation returns the conjunction: a DOM reading taken in whatever
+	// tab the producer left open is not evidence about the issued target, and
+	// two separate evaluations could straddle a navigation between them.
+	const values = JSON.stringify({ expected: probe.expected, href: probe.href, selector: probe.selector });
+	return `const observed = await tab.evaluate(({ href, selector, expected }) => new URL(location.href).href === new URL(href).href && document.querySelector(selector)?.textContent === expected, ${values});\nassert(observed, ${JSON.stringify(criterion)});`;
+}
+
+/**
+ * A target the browser cannot parse makes every generated probe throw inside
+ * the page, which reads as "the producer's observation failed" and burns the
+ * probe ceiling for a fault that is the core's, not the producer's. Refuse it
+ * before sealing, in words that name the unusable target.
+ */
+function unusableTargetReason(target: string): string | undefined {
+	try {
+		new URL(target);
+		return undefined;
+	} catch {
+		return `Pocock cannot generate a witness probe for challenge target ${JSON.stringify(target)}: `
+			+ "it is not an absolute URL the browser can compare against the observed page location";
+	}
 }
 
 function generatedBrowserInvocation(
@@ -673,6 +713,8 @@ export function uiEvidenceBinding(
 	invocation: JsonRecord;
 	witness?: StructuredWitness;
 	generatedInput?: JsonRecord;
+	/** Set instead of a witness when the challenge itself cannot be probed. */
+	refusal?: string;
 } | undefined {
 	const invocation = browserInvocation(event);
 	if (!invocation || !Array.isArray(card.evidenceRequests)) return undefined;
@@ -718,8 +760,10 @@ export function uiEvidenceBinding(
 		|| !sameKeys(invocation.witness, ["version", "probe"])
 		|| invocation.witness.version !== 1
 	) return undefined;
-	const probe = normalizedProbe(invocation.witness.probe);
+	const probe = normalizedProbe(invocation.witness.probe, challenge.target);
 	if (!probe) return undefined;
+	const refusal = unusableTargetReason(challenge.target);
+	if (refusal) return { challenge, stage: "witness", tool, invocation, refusal };
 	const probeHash = sha256(canonicalJson(probe));
 	const witness: StructuredWitness = {
 		version: 1,
@@ -766,6 +810,10 @@ function normalizedTaskResult(
 ): JsonRecord {
 	const normalized: JsonRecord = {
 		attemptId,
+		// The host's own label for the worker. The core binds results to sealed
+		// attempts by this name, because positional order proves nothing once a
+		// host reorders or drops a settled worker.
+		name: stringOrNull(result.name),
 		declaredAgent,
 		declaredModel,
 		observedAgent: stringOrNull(result.agent),
@@ -909,8 +957,15 @@ function updateDispatchWidget(pi: ExtensionAPI, context: RuntimeContext | undefi
 		pi.logger.warn(`[pocock-control] Cannot update the dispatch widget: ${errorMessage(error)}`);
 	}
 }
-let activeRun: ActiveRun | undefined;
-let vetoReason: string | undefined;
+/**
+ * One extension process can host several OMP sessions, so run ownership and the
+ * fail-closed veto are keyed by session exactly like the pinned runtime. As
+ * singletons they let a second session capture the first session's run through
+ * `commitCard`, and let one session's fail-closed veto lock a neutral session
+ * out of native delegation it never took part in.
+ */
+const activeRuns = new Map<string, ActiveRun>();
+const vetoReasons = new Map<string, string>();
 /**
  * A mirrored run released for supersession. It vetoes nothing — the core
  * refuses every mutation of it anyway — but it must be announced, because an
@@ -919,6 +974,56 @@ let vetoReason: string | undefined;
 let supersedableRun: { runId: string; phase: string; reason: string } | undefined;
 let sealingToolCallId: string | undefined;
 const pendingWitnesses = new Map<string, PendingWitness>();
+/**
+ * Failed probes are counted per session and challenge, and deliberately not
+ * inside the run record: a ceiling is what stops a producer from retrying a
+ * losing probe until some page happens to satisfy it, and `failClosed` and
+ * hydration rebuild the run record, so a counter kept there is spent by any
+ * `pocock_status` refresh — that is no ceiling at all. Only a recorded witness
+ * for the same challenge, or the end of the process, clears it.
+ */
+const witnessFailures = new Map<string, number>();
+const WITNESS_FAILURE_LIMIT = 3;
+
+function witnessFailureKey(sessionId: string, challengeToken: string): string {
+	// A NUL separator cannot occur in either component, so no pair of distinct
+	// session and token values can collide on one key.
+	return `${sessionId}\u0000${challengeToken}`;
+}
+
+function countWitnessFailure(sessionId: string, challengeToken: string): number {
+	const key = witnessFailureKey(sessionId, challengeToken);
+	const failures = (witnessFailures.get(key) ?? 0) + 1;
+	witnessFailures.set(key, failures);
+	return failures;
+}
+
+function clearWitnessFailures(sessionId: string, challengeToken: string): void {
+	witnessFailures.delete(witnessFailureKey(sessionId, challengeToken));
+}
+
+/**
+ * Native `task` call ids Pocock sealed whose attempt the core still holds open,
+ * keyed by the sealing session. It outlives the run record on purpose: after
+ * `failClosed` or a hydration that finds no mirror, the core's attempt is still
+ * open, so a late result for that call must be refused in words rather than
+ * dropped in silence.
+ */
+const sealedTaskCalls = new Map<string, Set<string>>();
+
+function rememberSealedTaskCall(sessionId: string, toolCallId: string): void {
+	const calls = sealedTaskCalls.get(sessionId);
+	if (calls) calls.add(toolCallId);
+	else sealedTaskCalls.set(sessionId, new Set([toolCallId]));
+}
+
+function forgetSealedTaskCall(sessionId: string, toolCallId: string): void {
+	const calls = sealedTaskCalls.get(sessionId);
+	if (!calls) return;
+	calls.delete(toolCallId);
+	if (calls.size === 0) sealedTaskCalls.delete(sessionId);
+}
+
 let lifecycleEpoch = 0;
 let lastStopNudge = "";
 let mutationTail: Promise<void> = Promise.resolve();
@@ -933,16 +1038,36 @@ function serialize<T>(operation: () => Promise<T>): Promise<T> {
 	return next;
 }
 
-function resetRunState(): void {
-	activeRun = undefined;
+function resetRunState(sessionId: string): void {
+	activeRuns.delete(sessionId);
 	sealingToolCallId = undefined;
-	pendingWitnesses.clear();
+	// Only this session's unsettled probes: another session's witness is still
+	// in flight and its result must stay bindable.
+	for (const [toolCallId, pending] of pendingWitnesses) {
+		if (pending.sessionId === sessionId) pendingWitnesses.delete(toolCallId);
+	}
 }
 
-function failClosed(pi: ExtensionAPI, reason: string, context?: RuntimeContext): void {
-	resetRunState();
+/**
+ * Whether a native `task` call was sealed by Pocock and its attempt is still
+ * open. The lookup spans every session because the session that observes the
+ * result need not be the session that sealed the call, and it reads the sealed
+ * registry rather than live run records because losing the run record is
+ * exactly the case where a silent drop would wedge the core.
+ */
+function isSealedTaskCall(toolCallId: string): boolean {
+	if (sealingToolCallId === toolCallId) return true;
+	for (const calls of sealedTaskCalls.values()) {
+		if (calls.has(toolCallId)) return true;
+	}
+	return false;
+}
+
+function failClosed(pi: ExtensionAPI, reason: string, context: RuntimeContext): void {
+	const sessionId = context.sessionManager.getSessionId();
+	resetRunState(sessionId);
 	supersedableRun = undefined;
-	vetoReason = reason;
+	vetoReasons.set(sessionId, reason);
 	updateDispatchWidget(pi, context);
 	pi.logger.warn(`[pocock-control] ${reason}`);
 }
@@ -956,8 +1081,9 @@ function failClosed(pi: ExtensionAPI, reason: string, context?: RuntimeContext):
  * the owner the ability to work at all, so the run is released and announced.
  */
 function releaseIncompatibleRun(pi: ExtensionAPI, context: RuntimeContext, card: StateCard, reason: string): void {
-	resetRunState();
-	vetoReason = undefined;
+	const sessionId = context.sessionManager.getSessionId();
+	resetRunState(sessionId);
+	vetoReasons.delete(sessionId);
 	supersedableRun = { runId: card.runId, phase: card.phase, reason };
 	updateDispatchWidget(pi, context);
 	pi.logger.warn(`[pocock-control] ${reason}`);
@@ -988,16 +1114,16 @@ function commitCard(
 	}
 
 	const reset = options.resetDispatch === true || isTerminal(card);
-	activeRun = {
-		sessionId,
+	const run: ActiveRun = {
 		card,
 		slotModels: options.slotModels ?? previous?.slotModels ?? {},
 		agents: options.agents ?? previous?.agents ?? new Map(),
 		manifestFingerprint: options.manifestFingerprint ?? previous?.manifestFingerprint ?? card.manifestFingerprint,
 		dispatch: reset ? undefined : previous?.dispatch,
 	};
+	activeRuns.set(sessionId, run);
 	updateDispatchWidget(pi, context, card);
-	vetoReason = undefined;
+	vetoReasons.delete(sessionId);
 	// A committed mismatch card keeps the run announceable: `status` proves the
 	// incompatibility, and the announcement must survive until `enter` replaces it.
 	supersedableRun = isRecord(card.runtimeMismatch)
@@ -1007,7 +1133,7 @@ function commitCard(
 			reason: nonEmptyString(card.blockedReason) ?? "the core proved this run incompatible with the installed contour",
 		}
 		: undefined;
-	return activeRun;
+	return run;
 }
 
 async function invokeCore(
@@ -1067,15 +1193,13 @@ async function hydrateSession(pi: ExtensionAPI, context: RuntimeContext): Promis
 	const mirror = locateMirror(context);
 	const sessionId = context.sessionManager.getSessionId();
 	const epoch = ++lifecycleEpoch;
-	activeRun = undefined;
-	sealingToolCallId = undefined;
-	pendingWitnesses.clear();
+	resetRunState(sessionId);
 
 	updateDispatchWidget(pi, context);
 	if (!mirror.found) {
 		// A child without a state card is deliberately inert: it must not inherit
 		// the parent's sealed dispatch or make the adapter manufacture one.
-		vetoReason = undefined;
+		vetoReasons.delete(sessionId);
 		supersedableRun = undefined;
 		return;
 	}
@@ -1133,11 +1257,19 @@ export default function pocockControl(pi: ExtensionAPI): void {
 	pi.on("session_branch", async (_event, context) => hydrateSession(pi, asRuntimeContext(context)));
 	pi.on("session_tree", async (_event, context) => hydrateSession(pi, asRuntimeContext(context)));
 
+	// The probe ceiling and the sealed-call registry outlive every run record on
+	// purpose, so the end of the hosting process is the one point where they are
+	// dropped: no session survives it to be owed a refusal or a count.
+	pi.on("session_shutdown", () => {
+		witnessFailures.clear();
+		sealedTaskCalls.clear();
+	});
+
 	pi.on("session_stop", (event, context) => {
 		const runtime = asRuntimeContext(context);
 		const run = activeFor(runtime);
 		const nudgeKey = `${event.session_id}:${event.turn_id}`;
-		if (event.stop_hook_active || vetoReason || lastStopNudge === nudgeKey) return;
+		if (event.stop_hook_active || vetoFor(runtime) || lastStopNudge === nudgeKey) return;
 		if (supersedableRun && (!run || isInert(run.card))) {
 			lastStopNudge = nudgeKey;
 			return {
@@ -1410,10 +1542,11 @@ export default function pocockControl(pi: ExtensionAPI): void {
 		if (event.toolName === "hub") {
 			return serialize(async () => {
 				const run = activeFor(runtime);
-				if (vetoReason) {
+				const veto = vetoFor(runtime);
+				if (veto) {
 					return {
 						block: true,
-						reason: `Pocock is fail-closed after an unsettled sealed task: ${vetoReason}`,
+						reason: `Pocock is fail-closed after an unsettled sealed task: ${veto}`,
 					};
 				}
 				if (!run || isInert(run.card)) return;
@@ -1428,13 +1561,30 @@ export default function pocockControl(pi: ExtensionAPI): void {
 		if (event.toolName === "browser" || event.toolName === "write") {
 			return serialize(async () => {
 				const run = activeFor(runtime);
-				if (!run || isInert(run.card) || vetoReason) return;
+				if (!run || isInert(run.card) || vetoFor(runtime)) return;
 				const binding = uiEvidenceBinding(run.card, event);
-				if (!binding || binding.stage !== "witness" || !binding.witness || !binding.generatedInput) return;
-				if (pendingWitnesses.has(event.toolCallId)) {
-					return { block: true, reason: "A Pocock witness invocation is already sealed for this tool call" };
+				if (!binding || binding.stage !== "witness") return;
+				// The challenge cannot be probed at all: say so instead of sealing a
+				// probe whose only possible outcome is a page-side exception.
+				if (binding.refusal) return { block: true, reason: binding.refusal };
+				if (!binding.witness || !binding.generatedInput) return;
+				// One challenge admits one probe in flight. Sealing a second one
+				// lets a producer race several readings of the same criterion and
+				// keep whichever happens to pass.
+				const sessionId = runtime.sessionManager.getSessionId();
+				const challengeToken = binding.witness.challengeToken;
+				for (const [toolCallId, pending] of pendingWitnesses) {
+					if (pending.sessionId !== sessionId) continue;
+					if (toolCallId !== event.toolCallId && pending.witness.challengeToken !== challengeToken) continue;
+					return {
+						block: true,
+						reason:
+							`A Pocock witness invocation for challenge ${challengeToken} is already sealed and unsettled; `
+							+ "its result must settle before this challenge admits another probe",
+					};
 				}
 				pendingWitnesses.set(event.toolCallId, {
+					sessionId,
 					runId: run.card.runId,
 					tool: binding.tool,
 					invocation: binding.invocation,
@@ -1447,7 +1597,8 @@ export default function pocockControl(pi: ExtensionAPI): void {
 		if (event.toolName !== "task") return;
 		return serialize(async () => {
 			const runtime = asRuntimeContext(context);
-			if (vetoReason) return { block: true, reason: vetoReason };
+			const veto = vetoFor(runtime);
+			if (veto) return { block: true, reason: veto };
 			const run = activeFor(runtime);
 			if (!run || isInert(run.card)) return;
 
@@ -1493,6 +1644,9 @@ export default function pocockControl(pi: ExtensionAPI): void {
 					kind,
 					settled: false,
 				};
+				// The core now holds this attempt open; remembering the call outside
+				// the run record is what keeps its late result refusable.
+				rememberSealedTaskCall(runtime.sessionManager.getSessionId(), event.toolCallId);
 				return { input: taskInput };
 			} catch (error) {
 				return { block: true, reason: errorMessage(error) };
@@ -1507,8 +1661,21 @@ export default function pocockControl(pi: ExtensionAPI): void {
 		if (event.toolName === "task") {
 			return serialize(async () => {
 				const run = activeFor(runtime);
-				if (!run || isInert(run.card)) return;
-				if (vetoReason) return toolFailure(vetoReason);
+				if (!run || isInert(run.card)) {
+					// A result for a call Pocock sealed is never a foreign result. The
+					// core still holds that attempt open, so dropping it in silence
+					// would leave the run wedged with no record of what settled; only
+					// abandon_dispatch closes an attempt whose settlement was lost.
+					if (!isSealedTaskCall(event.toolCallId)) return;
+					const reason =
+						`Pocock observed the settled result of sealed task call ${event.toolCallId} while this session `
+						+ "mirrors no drivable run; the sealed attempt stays open and only the core's abandon_dispatch "
+						+ "transition, with confirmedLostSettlement, can release it";
+					failClosed(pi, reason, runtime);
+					return toolFailure(reason);
+				}
+				const veto = vetoFor(runtime);
+				if (veto) return toolFailure(veto);
 				try {
 					requireCurrentManifest(run, runtime);
 				} catch (error) {
@@ -1573,6 +1740,8 @@ export default function pocockControl(pi: ExtensionAPI): void {
 					const card = requireCard(response, "record-task-result");
 					const committed = commitCard(pi, runtime, card, { expectedRunId: run.card.runId });
 					committed.dispatch = { ...dispatch, settled: true };
+					// The core closed this attempt, so its call is no longer sealed.
+					forgetSealedTaskCall(runtime.sessionManager.getSessionId(), event.toolCallId);
 					return;
 				} catch (error) {
 					const reason = `Pocock could not bind the native task result: ${errorMessage(error)}`;
@@ -1586,15 +1755,25 @@ export default function pocockControl(pi: ExtensionAPI): void {
 		if (pending) {
 			pendingWitnesses.delete(event.toolCallId);
 			return serialize(async () => {
+				const challengeToken = pending.witness.challengeToken;
+				const run = activeFor(runtime);
 				if (
 					event.isError
 					|| (pending.tool === "browser" && event.toolName !== "browser")
 					|| (pending.tool === "xdev" && event.toolName !== "write")
 				) {
-					return toolFailure("Pocock declarative witness execution did not succeed");
+					const message = "Pocock declarative witness execution did not succeed";
+					const failures = countWitnessFailure(pending.sessionId, challengeToken);
+					if (failures >= WITNESS_FAILURE_LIMIT) {
+						const reason =
+							`${message} ${failures} times for challenge ${challengeToken}; the probe is not retried again `
+							+ "and this session is fail-closed until the next authorized Pocock runtime command";
+						failClosed(pi, reason, runtime);
+						return toolFailure(reason);
+					}
+					return toolFailure(`${message} (attempt ${failures} of ${WITNESS_FAILURE_LIMIT} for challenge ${challengeToken})`);
 				}
-				const run = activeFor(runtime);
-				if (!run || isInert(run.card) || vetoReason || run.card.runId !== pending.runId) {
+				if (!run || isInert(run.card) || vetoFor(runtime) || run.card.runId !== pending.runId) {
 					return toolFailure("Pocock declarative witness result does not match the active run");
 				}
 				const request: JsonRecord = {
@@ -1616,6 +1795,8 @@ export default function pocockControl(pi: ExtensionAPI): void {
 					const response = await invokeCore(pi, runtime, "record-evidence", request);
 					const card = requireCard(response, "record-evidence");
 					commitCard(pi, runtime, card, { expectedRunId: run.card.runId });
+					// The challenge is settled, so its failure count is spent.
+					clearWitnessFailures(pending.sessionId, challengeToken);
 					return;
 				} catch (error) {
 					return toolFailure(`Pocock could not record observed browser evidence: ${errorMessage(error)}`);
@@ -1626,7 +1807,7 @@ export default function pocockControl(pi: ExtensionAPI): void {
 		if (event.isError) return;
 		return serialize(async () => {
 			const run = activeFor(runtime);
-			if (!run || isInert(run.card) || vetoReason) return;
+			if (!run || isInert(run.card) || vetoFor(runtime)) return;
 			const binding = uiEvidenceBinding(run.card, event);
 			if (!binding || binding.stage !== "open") return;
 

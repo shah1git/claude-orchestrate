@@ -137,7 +137,10 @@ def normalize_ui_probe(value: Any) -> dict[str, str]:
     fail(not isinstance(kind, str), "evidence_invalid", "witness.probe.kind must be a string")
     fields = {
         "url": ("expected", "kind"),
-        "dom": ("expected", "kind", "selector"),
+        # A dom probe names the page it was read on. Without `href` the probe
+        # says nothing about where `selector` was evaluated, so whatever tab
+        # happened to be open could satisfy any issued target.
+        "dom": ("expected", "href", "kind", "selector"),
     }.get(kind)
     fail(fields is None, "evidence_invalid", "witness.probe.kind is unknown")
     fail(set(value) != set(fields), "evidence_invalid", "witness.probe has unsupported or missing fields")
@@ -308,6 +311,11 @@ def find_active_run(cwd: Path, explicit: str | None) -> dict[str, Any] | None:
 
     active: list[dict[str, Any]] = []
     for path in entries:
+        # `runs/.tmp/` holds in-flight state writes, and a crashed writer can
+        # leave one behind. A hidden entry is never authoritative state, so it
+        # must not brick every later scan of the directory.
+        if path.name.startswith("."):
+            continue
         try:
             is_artifact_directory = not path.is_symlink() and path.is_dir() and path.suffix == ".artifacts"
             is_valid_state_file = not path.is_symlink() and path.is_file() and path.suffix == ".json"
@@ -400,6 +408,9 @@ def retire_runtime_mismatched_run(
                 if isinstance(attempt.get("appliedPatch"), dict)
                 and attempt.get("status") not in {"accepted", "recorded"}
             }
+        # The verdict is deliberately ignored: retirement is a cancellation and
+        # cancellation must be total. Whatever could not be reversed is already
+        # in `rollbackFailed`, which the card projects for the owner.
         rollback_attempt_patches(cwd, active, rollback_ids)
         previous_hash = active["stateHash"]
         active["phase"] = "cancelled"
@@ -418,7 +429,7 @@ def replacement_transaction_path(cwd: Path, explicit: str | None, replacement_ru
 
 def write_replacement_transaction(path: Path, transaction: dict[str, Any]) -> None:
     body = {field: value for field, value in transaction.items() if field != "mac"}
-    body["mac"] = record_mac(body, transaction_auth_key(path, create=True))
+    body["mac"] = record_mac(body, transaction_auth_key(path, create=False))
     write_bytes_atomic(path, (canonical(body) + "\n").encode("utf-8"))
 
 
@@ -706,18 +717,27 @@ def authenticated_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
-def seal_state(state: dict[str, Any], state_path: Path, previous_hash: str | None = None) -> None:
+def seal_state(state: dict[str, Any], state_path: Path, previous_hash: str | None = None, *, create_key: bool = False) -> None:
     if previous_hash is not None:
         state["previousStateHash"] = previous_hash
     state["updatedAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
     state["stateHash"] = digest(public_snapshot(state))
-    key = load_or_create_state_key(state_path, create=True)
+    # Only the birth of a run may mint the state-auth key. Anywhere else a
+    # missing key means the shared secret vanished from under live runs;
+    # minting a fresh one there would silently strand every other run's
+    # witness instead of saying so.
+    key = load_or_create_state_key(state_path, create=create_key)
     state["stateMac"] = hmac.new(key, canonical(authenticated_snapshot(state)).encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def write_state(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    # The temporary file lives beside the runs, not among them: a crashed
+    # writer used to leave `.<run>.json.XXXX` inside `runs/`, and every later
+    # scan refused that directory because the orphan is not a run state.
+    temp_dir = path.parent / ".tmp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f"{path.name}.", dir=temp_dir)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(state, handle, ensure_ascii=False, sort_keys=True, indent=2)
@@ -980,6 +1000,9 @@ def schedule_lens_retry(
         if lens_attempt_count(state, wave_id, lens) >= maximum
     ]
     if exhausted:
+        # The verdict is deliberately ignored: this branch already stops the
+        # run, and the lens exhaustion is the reason the owner needs first.
+        # Anything unprovable is recorded in `rollbackFailed` on the card.
         rollback_attempt_patches(cwd, state, set(wave_attempt_ids(state, wave, "candidateAttemptIds")))
         state["phase"] = "blocked"
         state["blockedReason"] = f"lens retry limit reached for wave {wave_id}: {', '.join(exhausted)}"
@@ -1046,11 +1069,17 @@ def next_actions(state: dict[str, Any]) -> list[str]:
         "sweep_admission": ["admit_sweep", "cancel"],
         "ready": ["prepare", "cancel"],
         "producer_dispatch_pending": ["native_task", "cancel"],
-        "producer_running": ["abandon_dispatch"],
+        # A running dispatch can still be cancelled: the core accepts `cancel`
+        # in every nonterminal phase, and hiding it here left the owner of a
+        # hung dispatch reading a table that offered no way out.
+        "producer_running": ["abandon_dispatch", "cancel"],
         "pregate_pending": ["pregate", "cancel"],
         "lens_prepare_pending": ["prepare_lenses", "cancel"],
         "lens_dispatch_pending": ["native_task", "cancel"],
-        "lens_running": ["abandon_dispatch"],
+        "lens_running": ["abandon_dispatch", "cancel"],
+        # A staged replacement activates itself on the next `start`; until then
+        # cancelling it is the only transition the core will take.
+        REPLACEMENT_STAGING_PHASE: ["cancel"],
         "adjudication_pending": ["adjudicate", "cancel"],
         "repair_pending": ["retry", "cancel"],
         "blocked": ["cancel"],
@@ -1153,6 +1182,9 @@ def card(state: dict[str, Any]) -> dict[str, Any]:
         "nextActions": next_actions(state),
         "configFingerprint": state["configFingerprint"],
         "manifestFingerprint": state["manifestFingerprint"],
+        # ADR-0015 replaced the token ceiling with observation, and observation
+        # only exists where the owner looks: the Card.
+        "tokensSpent": displayed_tokens(state.get("tokensSpent")),
     }
     dispatch = dispatch_card(state)
     if dispatch is not None:
@@ -1193,6 +1225,9 @@ def card(state: dict[str, Any]) -> dict[str, Any]:
     retry_lenses = state.get("retryLensNames", [])
     if retry_lenses:
         result["retryLensNames"] = list(retry_lenses)
+    unrolled = state.get("rollbackFailed")
+    if unrolled:
+        result["rollbackFailed"] = [dict(record) for record in unrolled]
     waves = state.get("waves")
     if isinstance(waves, list) and waves and isinstance(waves[-1], dict):
         collisions = waves[-1].get("reviewerModelCollisions")
@@ -1482,7 +1517,7 @@ def command_start(cwd: Path, explicit_state_dir: str | None, request: dict[str, 
         if active is None:
             with with_lock(lock_path):
                 fail(state_path.exists(), "run_collision", "generated run id already exists")
-                seal_state(state, state_path)
+                seal_state(state, state_path, create_key=True)
                 write_state(state_path, state)
         else:
             state = create_replacement_transaction(
@@ -1540,6 +1575,9 @@ def command_transition(cwd: Path, explicit_state_dir: str | None, request: dict[
                     and attempt.get("status") not in {"accepted", "recorded"}
                 }
             rollback_orphaned_patch_journals(cwd, explicit_state_dir, state)
+            # The verdict is deliberately ignored: cancellation must be total.
+            # A patch we cannot reverse may not hold the run in a nonterminal
+            # phase; it is reported through `rollbackFailed` on the card.
             rollback_attempt_patches(cwd, state, rollback_ids)
             state["phase"] = "cancelled"
             state["blockedReason"] = None
@@ -2865,7 +2903,7 @@ def apply_patch_batch(
             "diffLines": patch["diffLines"],
         })
 
-    auth_key = journal_auth_key(artifact_dir, create=True)
+    auth_key = journal_auth_key(artifact_dir, create=False)
 
     def write_journal(body: dict[str, Any]) -> None:
         body.pop("mac", None)
@@ -2899,7 +2937,7 @@ def apply_patch_batch(
             f"patch application journal does not match this wave: {journal_path}",
         )
         fail(
-            "mac" in observed_journal and not record_mac_valid(observed_journal, auth_key),
+            not record_mac_valid(observed_journal, auth_key),
             "patch_journal_corrupt",
             f"patch application journal authentication witness is invalid: {journal_path}",
         )
@@ -3065,7 +3103,7 @@ def rollback_orphaned_patch_journals(
         write_bytes_atomic(journal_path, (canonical(journal) + "\n").encode("utf-8"))
 
 
-def rollback_attempt_patch(cwd: Path, attempt: dict[str, Any], applied: dict[str, Any]) -> None:
+def revert_attempt_patch(cwd: Path, attempt: dict[str, Any], applied: dict[str, Any]) -> None:
     path = Path(require_text(applied.get("path"), "appliedPatch.path"))
     fail(not path.is_file(), "rollback_failed", f"cannot restore rejected patch; artifact is missing: {path}")
     data = path.read_bytes()
@@ -3083,7 +3121,7 @@ def rollback_attempt_patch(cwd: Path, attempt: dict[str, Any], applied: dict[str
     journal_path = artifact_dir / f"rollback-{rollback_id}.json"
     write_bytes_atomic(patch_path, patch_data)
 
-    auth_key = journal_auth_key(artifact_dir, create=True)
+    auth_key = journal_auth_key(artifact_dir, create=False)
 
     def write_rollback_journal(body: dict[str, Any]) -> None:
         body.pop("mac", None)
@@ -3111,7 +3149,7 @@ def rollback_attempt_patch(cwd: Path, attempt: dict[str, Any], applied: dict[str
             f"patch rollback journal does not match rejected attempt: {journal_path}",
         )
         fail(
-            "mac" in observed_journal and not record_mac_valid(observed_journal, auth_key),
+            not record_mac_valid(observed_journal, auth_key),
             "rollback_journal_corrupt",
             f"patch rollback journal authentication witness is invalid: {journal_path}",
         )
@@ -3157,7 +3195,38 @@ def rollback_attempt_patch(cwd: Path, attempt: dict[str, Any], applied: dict[str
     applied["rolledBackAt"] = dt.datetime.now(dt.timezone.utc).isoformat()
 
 
-def rollback_attempt_patches(cwd: Path, state: dict[str, Any], attempt_ids: set[str]) -> None:
+def unprovable_rollback(attempt: dict[str, Any], applied: dict[str, Any], reason: str) -> list[dict[str, Any]]:
+    """One record per repository path that still carries the rejected patch."""
+    attempt_id = nullable_text(attempt.get("attemptId"))
+    files = applied.get("files")
+    paths = [path for path in files if isinstance(path, str)] if isinstance(files, list) else []
+    return [
+        {"attemptId": attempt_id, "path": path, "reason": reason}
+        for path in (paths or [str(applied.get("path"))])
+    ]
+
+
+def rollback_attempt_patch(cwd: Path, attempt: dict[str, Any], applied: dict[str, Any]) -> list[dict[str, Any]]:
+    """Reverse one applied producer patch, or report why that is unprovable.
+
+    An unprovable rollback used to abort the whole mutation, and `cancel` is
+    exactly the command that must survive a working tree someone else edited:
+    refusing there left the run with no legal move at all. The verdict is
+    returned instead, so the caller records the paths that still carry the
+    rejected postimage and still reaches a terminal or blocked phase. A corrupt
+    rollback journal keeps refusing: that is a tampered record, not a tree the
+    runtime merely cannot prove anything about.
+    """
+    try:
+        revert_attempt_patch(cwd, attempt, applied)
+    except RuntimeFailure as exc:
+        if exc.code not in {"rollback_failed", "rollback_journal_mismatch"}:
+            raise
+        return unprovable_rollback(attempt, applied, exc.message)
+    return []
+
+
+def rollback_attempt_patches(cwd: Path, state: dict[str, Any], attempt_ids: set[str]) -> list[dict[str, Any]]:
     records = []
     for attempt_id in reversed(list(state.get("attempts", {}))):
         if attempt_id not in attempt_ids:
@@ -3166,8 +3235,30 @@ def rollback_attempt_patches(cwd: Path, state: dict[str, Any], attempt_ids: set[
         applied = attempt.get("appliedPatch")
         if isinstance(applied, dict) and not applied.get("rolledBackAt"):
             records.append((attempt, applied))
+    unprovable: list[dict[str, Any]] = []
     for attempt, applied in records:
-        rollback_attempt_patch(cwd, attempt, applied)
+        unprovable.extend(rollback_attempt_patch(cwd, attempt, applied))
+    if unprovable:
+        ledger = state.setdefault("rollbackFailed", [])
+        ledger.extend(record for record in unprovable if record not in ledger)
+    return unprovable
+
+
+# OMP uniquifies agent names inside one session: dispatching a second task
+# under a name already used in this session yields `<name>-2`, `<name>-3`, and
+# so on. Wave/ticket/attempt ordinals make `dispatchName` unique inside a run,
+# but not across runs sharing a session, so the echoed name legitimately
+# carries that host suffix. Anything else is a permuted batch.
+DISPATCH_NAME_UNIQUIFIER_RE = re.compile(r"-\d+")
+
+
+def dispatch_name_matches(observed: Any, expected: Any) -> bool:
+    """True when the host echoed our sealed name, with or without its suffix."""
+    if not isinstance(observed, str) or not isinstance(expected, str) or not expected:
+        return False
+    if observed == expected:
+        return True
+    return observed.startswith(expected) and DISPATCH_NAME_UNIQUIFIER_RE.fullmatch(observed[len(expected):]) is not None
 
 
 def command_record_result(cwd: Path, explicit_state_dir: str | None, request: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
@@ -3215,6 +3306,16 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
                 not isinstance(attempt, dict) or attempt.get("status") != "running",
                 "dispatch_invalid",
                 f"sealed attempt {expected_id} is not running",
+            )
+            # The host names every task in the sealed batch, and it echoes that
+            # name back on the result. Checking it is the only thing that
+            # notices a permuted batch: `attemptId` is a label the adapter
+            # itself writes onto whichever result it happens to be holding.
+            fail(
+                not dispatch_name_matches(raw_result.get("name"), attempt.get("dispatchName")),
+                "dispatch_invalid",
+                f"result carries dispatch name {raw_result.get('name')!r} while sealed attempt {expected_id} "
+                f"was dispatched as {attempt.get('dispatchName')!r}; the settled results are permuted",
             )
 
         if kind == "producer":
@@ -3406,17 +3507,12 @@ def command_record_result(cwd: Path, explicit_state_dir: str | None, request: di
             set_retry_ticket_ids(state, set(wave["failedTicketIds"]))
 
             if successful_producer_ids:
-                # Partial success: the wave moves on, so the failed siblings
-                # never reach the explicit `retry` transition. Route them here
-                # by their own recorded failure kind, or their next attempt
-                # repeats the identical dispatch and burns the retry budget.
-                if failed_producer_ids:
-                    failed_by_ticket = {
-                        str(collection[attempt_id]["ticketId"]): collection[attempt_id]
-                        for attempt_id in failed_producer_ids
-                    }
-                    route_ticket_retry(state, failed_by_ticket, "availability")
-                    route_ticket_retry(state, failed_by_ticket, "capability")
+                # Partial success: the failed siblings are only recorded here.
+                # Availability never moves a slot — OMP owns model replacement —
+                # and a settlement this run could not validate is not treated as
+                # proof that the ticket needs a deeper class. Raising the class
+                # stays with the explicit `retry` and with the two gates that
+                # actually judge the work.
                 state_path, _lock_path = state_paths(cwd, explicit_state_dir, state["runId"])
                 applied_patch = apply_patch_batch(
                     cwd,
@@ -3513,6 +3609,16 @@ def command_record_evidence(cwd: Path, explicit_state_dir: str | None, request: 
             fail(witness["attemptId"] != attempt_ids[0], "evidence_invalid", "witness is bound to another attempt")
             fail(witness["challengeToken"] != token, "evidence_invalid", "witness is bound to another challenge token")
             fail(witness["criterion"] != challenge.get("criterion"), "evidence_invalid", "witness is bound to another criterion")
+            # The probe must read the page the challenge issued. A `url` probe
+            # asserts that page directly; a `dom` probe carries the `href` it
+            # was evaluated on, so a reading taken in some other tab cannot be
+            # offered as evidence for this criterion.
+            probe = witness["probe"]
+            fail(
+                probe["expected" if probe["kind"] == "url" else "href"] != challenge.get("target"),
+                "evidence_invalid",
+                "witness probe is not bound to the issued challenge target",
+            )
             probe_hash = digest(witness["probe"])
             fail(witness["probeHash"] != probe_hash, "evidence_invalid", "witness probeHash does not match the canonical probe")
             witness_id = digest({
@@ -3733,8 +3839,9 @@ def command_pregate(cwd: Path, explicit_state_dir: str | None, request: dict[str
         }
         wave["pregatePassedAttemptIds"] = passed_attempt_ids
         wave["pregateFailedAttemptIds"] = failed_attempt_ids_ordered
+        unprovable_rollbacks: list[dict[str, Any]] = []
         if failed_attempt_ids:
-            rollback_attempt_patches(cwd, state, set(failed_attempt_ids))
+            unprovable_rollbacks = rollback_attempt_patches(cwd, state, set(failed_attempt_ids))
             failed_tickets = set(retry_ticket_ids(state))
             for attempt in attempts:
                 if attempt["attemptId"] not in failed_attempt_ids:
@@ -3743,6 +3850,18 @@ def command_pregate(cwd: Path, explicit_state_dir: str | None, request: dict[str
                 failed_tickets.add(str(attempt["ticketId"]))
                 increment_ticket_failures(state, "qualityFailures", [str(attempt["ticketId"])])
             set_retry_ticket_ids(state, failed_tickets)
+
+        if unprovable_rollbacks:
+            # A rejected patch that cannot be reversed is not something the next
+            # producer can repair: the working tree matches neither image, so
+            # the wave stops for the owner instead of dispatching onto a tree
+            # nobody can describe. The pre-gate verdict above is kept.
+            wave["status"] = "blocked"
+            state["phase"] = "blocked"
+            state["blockedReason"] = "; ".join(
+                f"{record['path']}: {record['reason']}" for record in unprovable_rollbacks
+            )
+            return
 
         if passed_attempt_ids:
             if failed_attempt_ids:
@@ -4044,8 +4163,9 @@ def command_adjudicate(cwd: Path, explicit_state_dir: str | None, request: dict[
 
         accepted_producers = [producer_id for producer_id in passed_ids if producer_id not in failed_producers]
         retry_tickets = retry_ticket_ids(state)
+        unprovable_rollbacks: list[dict[str, Any]] = []
         if failed_producers:
-            rollback_attempt_patches(cwd, state, failed_producers)
+            unprovable_rollbacks = rollback_attempt_patches(cwd, state, failed_producers)
         for producer_id in passed_ids:
             producer = state["attempts"][producer_id]
             if producer_id in failed_producers:
@@ -4068,7 +4188,54 @@ def command_adjudicate(cwd: Path, explicit_state_dir: str | None, request: dict[
             "retryTicketIds": sorted(retry_tickets),
             "reviewerModelCollisions": list(wave.get("reviewerModelCollisions", [])),
         }
+        if unprovable_rollbacks:
+            # The same verdict the pre-gate reaches: a rejected patch that
+            # cannot be reversed leaves a working tree matching neither image,
+            # so no later producer can build a diff on it. The adjudication
+            # record above is kept and the wave stops for the owner instead of
+            # being accepted over somebody else's code.
+            wave["status"] = "blocked"
+            state["phase"] = "blocked"
+            state["blockedReason"] = "; ".join(
+                f"{record['path']}: {record['reason']}" for record in unprovable_rollbacks
+            )
+            return
+
         if accepted_producers:
+            if failed_producers:
+                # Partial acceptance carries the wave forward, so the rejected
+                # tickets never reach the explicit `retry` transition. A
+                # blocking review is a capability verdict; without routing it
+                # here the next attempt repeats the identical dispatch.
+                route_ticket_retry(
+                    state,
+                    {
+                        str(state["attempts"][producer_id]["ticketId"]): state["attempts"][producer_id]
+                        for producer_id in sorted(failed_producers)
+                    },
+                    "capability",
+                )
+                # Exhausted depth is not exhausted work. Every writing ticket
+                # bottoms out at `skilled` — `judgment` is closed to it — so
+                # treating the end of the class ladder as terminal blocked the
+                # run on the first rejection of any write wave and lost lawful
+                # partial acceptance. The attempt budget is what decides.
+                failed_ticket_ids = {
+                    str(state["attempts"][producer_id]["ticketId"]) for producer_id in failed_producers
+                }
+                max_attempts = int(
+                    load_config().get("routing", {}).get("escalation", {}).get("max_attempts_per_subtask", 2)
+                )
+                exhausted = sorted(
+                    ticket_id_value
+                    for ticket_id_value in failed_ticket_ids
+                    if ticket_failure_count(state, ticket_id_value) >= max_attempts
+                )
+                if exhausted:
+                    wave["status"] = "partial_acceptance"
+                    state["phase"] = "blocked"
+                    state["blockedReason"] = f"retry limit reached for: {', '.join(exhausted)}"
+                    return
             wave["status"] = "accepted" if not retry_tickets else "partial_acceptance"
             state["phase"] = "accepted"
             state["blockedReason"] = None
@@ -4089,9 +4256,9 @@ def telemetry_log_path(config: dict[str, Any]) -> Path:
 def recorded_telemetry_keys(config: dict[str, Any], run_id: str) -> set[tuple[str, str]]:
     """One scan of the routing log yields every (run, ticket) PASS key.
 
-    Acceptance records K tickets per wave; the old per-ticket
-    `telemetry_exists` re-read the whole log for each of them (O(K*L)). The
-    set below is built once per accept command.
+    Acceptance records K tickets per wave; a per-ticket existence check re-read
+    the whole log for each of them (O(K*L)). The set below is built once per
+    accept command.
     """
     path = telemetry_log_path(config)
     if not path.is_file():
@@ -4105,10 +4272,6 @@ def recorded_telemetry_keys(config: dict[str, Any], run_id: str) -> set[tuple[st
         if isinstance(row, dict) and row.get("run_id") == run_id and row.get("verdict") == "PASS":
             keys.add((run_id, str(row.get("ticket"))))
     return keys
-
-
-def telemetry_exists(config: dict[str, Any], run_id: str, ticket_id_value: str) -> bool:
-    return (run_id, ticket_id_value) in recorded_telemetry_keys(config, run_id)
 
 
 def command_accept(cwd: Path, explicit_state_dir: str | None, request: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:

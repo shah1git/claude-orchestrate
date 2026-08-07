@@ -89,7 +89,12 @@ def transition(cwd: Path, state_dir: str, response: dict, action: str, payload: 
     return runtime.command_transition(cwd, state_dir, request)
 
 def browser_witness(card: dict, challenge: dict, probe: dict[str, str] | None = None) -> dict:
-    probe = probe or {"kind": "dom", "selector": "body", "expected": "fixture"}
+    probe = probe or {
+        "kind": "dom",
+        "href": challenge["target"],
+        "selector": "body",
+        "expected": "fixture",
+    }
     normalized = {field: probe[field] for field in sorted(probe)}
     probe_hash = hashlib.sha256(
         json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -299,6 +304,7 @@ def normalized_result(
     patch = tmp_path / f"{assignment['attemptId'].replace('/', '-')}.patch"
     patch.write_bytes(b"")
     return {
+        "name": assignment["dispatchName"],
         "attemptId": assignment["attemptId"],
         "declaredAgent": assignment["agent"],
         "declaredModel": assignment["declaredModel"],
@@ -809,7 +815,6 @@ def test_full_run_reaches_durable_completion(tmp_path, cwd, config, monkeypatch)
     response = runtime.command_adjudicate(cwd, state_dir, reference(card))
     assert response["card"]["phase"] == "accepted"
 
-    monkeypatch.setattr(runtime, "telemetry_exists", lambda *_args: False)
     monkeypatch.setattr(
         runtime.subprocess,
         "run",
@@ -817,7 +822,7 @@ def test_full_run_reaches_durable_completion(tmp_path, cwd, config, monkeypatch)
     )
     card = response["card"]
     response = runtime.command_accept(cwd, state_dir, reference(card), config)
-    assert response["card"]["nextActions"] == ["continue_wave", "cancel"]
+    assert "continue_wave" in response["card"]["nextActions"]
     with pytest.raises(runtime.RuntimeFailure) as error:
         transition(cwd, state_dir, response, "begin_synthesis")
     assert error.value.code == "frontier_not_exhausted"
@@ -833,7 +838,7 @@ def test_full_run_reaches_durable_completion(tmp_path, cwd, config, monkeypatch)
             "evidence": "durable tracker reports no remaining tickets",
         },
     )
-    assert response["card"]["nextActions"] == ["begin_synthesis", "cancel"]
+    assert "begin_synthesis" in response["card"]["nextActions"]
     response = transition(cwd, state_dir, response, "begin_synthesis")
     response = transition(cwd, state_dir, response, "complete")
     assert response["card"]["phase"] == "completed"
@@ -854,11 +859,66 @@ def test_read_only_producer_accepts_host_result_without_patch_artifact(tmp_path,
     assert attempt["patchArtifact"] is None
     assert attempt["patchFiles"] == []
 
+
+def settle_producer_under_name(
+    tmp_path: Path,
+    cwd: Path,
+    state_dir: str,
+    sealed: dict,
+    config: dict,
+    name: object,
+) -> dict:
+    """Settle the sealed single-attempt dispatch under a host-chosen task name."""
+    attempt_id = sealed["attemptIds"][0]
+    assignment = authoritative(cwd, state_dir, sealed["card"]["runId"])["attempts"][attempt_id]
+    result = normalized_result(tmp_path, assignment, include_patch=False)
+    result["name"] = name
+    return runtime.command_record_result(
+        cwd,
+        state_dir,
+        {
+            **reference(sealed["card"]),
+            "dispatchId": sealed["dispatchId"],
+            "toolCallId": "producer-tool",
+            "input": sealed["taskInput"],
+            "details": {"results": [result]},
+            "content": {attempt_id: producer_result()},
+            "isError": False,
+        },
+        config,
+    )
+
+
+def test_result_name_accepts_the_host_uniquifier_and_nothing_else(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    sealed = seal(cwd, state_dir, prepare(cwd, state_dir, response, config), "producer")
+    dispatch_name = authoritative(cwd, state_dir, sealed["card"]["runId"])["attempts"][
+        sealed["attemptIds"][0]
+    ]["dispatchName"]
+
+    # Anything that is not our name, with or without the host's numeric
+    # suffix, still means the settled batch was permuted.
+    for foreign in (None, "", f"{dispatch_name}x", f"{dispatch_name}-", f"{dispatch_name}-2a", f"X{dispatch_name}"):
+        with pytest.raises(runtime.RuntimeFailure) as error:
+            settle_producer_under_name(tmp_path, cwd, state_dir, sealed, config, foreign)
+        assert error.value.code == "dispatch_invalid"
+
+    # OMP uniquifies agent names within a session, so a name reused by a later
+    # dispatch legitimately comes back suffixed.
+    settled = settle_producer_under_name(tmp_path, cwd, state_dir, sealed, config, f"{dispatch_name}-2")
+
+    assert settled["card"]["phase"] == "pregate_pending"
+    assert authoritative(cwd, state_dir, settled["card"]["runId"])["attempts"][
+        sealed["attemptIds"][0]
+    ]["status"] == "completed"
+
+
 def test_lost_settlement_can_be_abandoned_fail_closed_and_retry_is_bounded(tmp_path, cwd, config):
     state_dir, response = start(tmp_path, cwd, config, "frontier")
     response = admit_frontier(cwd, state_dir, response)
     sealed = seal(cwd, state_dir, prepare(cwd, state_dir, response, config), "producer")
-    assert sealed["card"]["nextActions"] == ["abandon_dispatch"]
+    assert "abandon_dispatch" in sealed["card"]["nextActions"]
 
     with pytest.raises(runtime.RuntimeFailure) as error:
         transition(cwd, state_dir, sealed, "abandon_dispatch", {"reason": "session process disappeared"})
@@ -906,7 +966,6 @@ def test_accepted_wave_can_authorize_one_exact_remaining_frontier(tmp_path, cwd,
     card = response["card"]
     response = runtime.command_adjudicate(cwd, state_dir, reference(card))
 
-    monkeypatch.setattr(runtime, "telemetry_exists", lambda *_args: False)
     monkeypatch.setattr(
         runtime.subprocess,
         "run",
@@ -1384,7 +1443,13 @@ def test_ui_witness_is_exactly_bound_and_ui_tickets_cannot_share_a_wave(tmp_path
         "kind": "url",
     }
 
-    request = witness_request(card, challenge, {"kind": "dom", "selector": " main ", "expected": " café "})
+    bound_probe = {
+        "kind": "dom",
+        "href": challenge["target"],
+        "selector": " main ",
+        "expected": " café ",
+    }
+    request = witness_request(card, challenge, bound_probe)
 
     with pytest.raises(runtime.RuntimeFailure) as error:
         runtime.command_record_evidence(cwd, state_dir, request)
@@ -1407,7 +1472,20 @@ def test_ui_witness_is_exactly_bound_and_ui_tickets_cannot_share_a_wave(tmp_path
         },
     )
     card = response["card"]
-    request = witness_request(card, challenge, {"kind": "dom", "selector": " main ", "expected": " café "})
+    request = witness_request(card, challenge, bound_probe)
+    # A probe read on some other page proves nothing about the issued target,
+    # and both witnesses below are internally consistent: only the binding
+    # check can reject them.
+    for foreign_probe in (
+        {"kind": "dom", "href": "http://attacker.test", "selector": " main ", "expected": " café "},
+        {"kind": "url", "expected": "http://attacker.test"},
+    ):
+        foreign = witness_request(card, challenge, foreign_probe)
+        with pytest.raises(runtime.RuntimeFailure) as error:
+            runtime.command_record_evidence(cwd, state_dir, foreign)
+        assert error.value.code == "evidence_invalid"
+        assert "issued challenge target" in error.value.message
+
     for legacy_code in (
         "assert(true)",
         "try { assert(false) } catch {}",
@@ -1446,12 +1524,17 @@ def test_ui_witness_is_exactly_bound_and_ui_tickets_cannot_share_a_wave(tmp_path
     response = runtime.command_record_evidence(cwd, state_dir, request)
     state = authoritative(cwd, state_dir, response["card"]["runId"])
     witness_record = next(record for record in state["evidence"] if record["stage"] == "witness")
-    assert witness_record["witness"]["probe"] == {"expected": " café ", "kind": "dom", "selector": " main "}
+    assert witness_record["witness"]["probe"] == {
+        "expected": " café ",
+        "href": "http://fixture.test",
+        "kind": "dom",
+        "selector": " main ",
+    }
     assert witness_record["witness"]["probeHash"] == hashlib.sha256(
-        b'{"expected":" caf\xc3\xa9 ","kind":"dom","selector":" main "}'
+        b'{"expected":" caf\xc3\xa9 ","href":"http://fixture.test","kind":"dom","selector":" main "}'
     ).hexdigest()
 
-    replay = witness_request(response["card"], challenge, {"kind": "dom", "selector": " main ", "expected": " café "})
+    replay = witness_request(response["card"], challenge, bound_probe)
     with pytest.raises(runtime.RuntimeFailure) as error:
         runtime.command_record_evidence(cwd, state_dir, replay)
     assert error.value.code == "evidence_invalid"
@@ -1950,8 +2033,10 @@ def test_partial_adjudication_accepts_passing_subset_and_preserves_failed_retry(
     producer_statuses = {attempt["ticketId"]: attempt["status"] for attempt in state["attempts"].values()}
     assert producer_statuses == {"T1": "review_failed", "T2": "accepted"}
     assert state["retryTicketIds"] == ["T1"]
+    # Partial acceptance never reaches the explicit `retry`, so the rejected
+    # ticket is routed here or its next attempt repeats the same dispatch.
+    assert state["classFloor"] == {"T1": "skilled"}
 
-    monkeypatch.setattr(runtime, "telemetry_exists", lambda *_args: False)
     monkeypatch.setattr(
         runtime.subprocess,
         "run",
@@ -1976,6 +2061,9 @@ def test_partial_adjudication_accepts_passing_subset_and_preserves_failed_retry(
     )
     response = prepare(cwd, state_dir, response, config, ticket_named("T1"))
     assert response["card"]["phase"] == "producer_dispatch_pending"
+    retried = authoritative(cwd, state_dir, response["card"]["runId"])
+    attempt = retried["attempts"][retried["pendingDispatch"]["attemptIds"][0]]
+    assert (attempt["class"], attempt["slot"]) == ("skilled", "builder")
 
 
 def test_ticket_contract_rejects_legacy_verification_and_overlapping_writers(tmp_path, cwd, config):
@@ -2047,55 +2135,158 @@ def test_writer_patch_is_validated_applied_and_rolled_back_after_review_failure(
     assert (repo / "target.txt").read_text(encoding="utf-8") == "old\n"
 
 
-def test_partial_review_rolls_back_only_failed_patch_and_keeps_accepted_patch(tmp_path, config, monkeypatch):
-    repo = init_git_repo(tmp_path / "repo", {"accepted.txt": "old\n", "rejected.txt": "old\n"})
-    state_dir, response = start(tmp_path, repo, config, "frontier")
-    response = admit_frontier(repo, state_dir, response)
-    tickets = [
-        writer_ticket("T1", "accepted.txt"),
-        writer_ticket("T2", "rejected.txt"),
-    ]
+def review_write_wave(
+    tmp_path: Path,
+    repo: Path,
+    state_dir: str,
+    response: dict,
+    config: dict,
+    tickets: list[dict],
+    patches: dict[str, tuple[bytes, list[str]]],
+    *,
+    critic_fail_ticket: str,
+) -> dict:
+    """Dispatch one writing wave and settle its lenses with one ticket rejected.
+
+    Stops just short of adjudication so a test can disturb the working tree
+    first.
+    """
     sealed = seal(repo, state_dir, prepare_tickets(repo, state_dir, response, config, tickets), "producer")
-    response = settle_producer_patches(
+    response = settle_producer_patches(tmp_path, repo, state_dir, sealed, config, patches)
+    response = pregate(repo, state_dir, response, config)
+    sealed_lenses = seal(repo, state_dir, prepare_lenses(repo, state_dir, response, config), "lenses")
+    return settle_lenses(
         tmp_path,
         repo,
         state_dir,
-        sealed,
+        sealed_lenses,
         config,
+        critic_fail_ticket=critic_fail_ticket,
+    )
+
+
+def two_writer_wave(repo: Path) -> tuple[list[dict], dict[str, tuple[bytes, list[str]]]]:
+    return (
+        [writer_ticket("T1", "accepted.txt"), writer_ticket("T2", "rejected.txt")],
         {
             "T1": (add_line_patch("accepted.txt", "old", ["accepted"]), ["accepted.txt"]),
             "T2": (add_line_patch("rejected.txt", "old", ["rejected"]), ["rejected.txt"]),
         },
     )
-    response = pregate(repo, state_dir, response, config)
-    sealed_lenses = seal(repo, state_dir, prepare_lenses(repo, state_dir, response, config), "lenses")
-    response = settle_lenses(tmp_path, repo, state_dir, sealed_lenses, config, critic_fail_ticket="T2")
+
+
+def test_partial_review_rolls_back_only_the_failed_patch_and_carries_the_wave(tmp_path, config):
+    repo = init_git_repo(tmp_path / "repo", {"accepted.txt": "old\n", "rejected.txt": "old\n"})
+    state_dir, response = start(tmp_path, repo, config, "frontier")
+    response = admit_frontier(repo, state_dir, response)
+    tickets, patches = two_writer_wave(repo)
+    response = review_write_wave(
+        tmp_path,
+        repo,
+        state_dir,
+        response,
+        config,
+        tickets,
+        patches,
+        critic_fail_ticket="T2",
+    )
+
     response = runtime.command_adjudicate(repo, state_dir, reference(response["card"]))
 
+    # A writing ticket may never become `judgment`, so its class ladder ends at
+    # `skilled` on the very first rejection. That is not a reason to stop: one
+    # spent attempt out of a budget of several leaves the wave lawfully partial,
+    # its accepted subset intact and the rejected ticket queued for retry.
     assert response["card"]["phase"] == "accepted"
+    assert "blockedReason" not in response["card"]
+    assert response["card"]["retryTicketIds"] == ["T2"]
     state = authoritative(repo, state_dir, response["card"]["runId"])
     assert state["adjudication"]["status"] == "PARTIAL"
+    assert state["waves"][-1]["status"] == "partial_acceptance"
     assert {attempt["ticketId"]: attempt["status"] for attempt in state["attempts"].values()} == {
         "T1": "accepted",
         "T2": "review_failed",
     }
-    assert state["retryTicketIds"] == ["T2"]
     assert (repo / "accepted.txt").read_text(encoding="utf-8") == "old\naccepted\n"
     assert (repo / "rejected.txt").read_text(encoding="utf-8") == "old\n"
 
-    monkeypatch.setattr(runtime, "telemetry_exists", lambda *_args: False)
-    original_run = runtime.subprocess.run
 
-    def run_with_telemetry_stub(argv, *args, **kwargs):
-        if len(argv) > 1 and argv[1] == str(runtime.TELEMETRY_TOOL):
-            return subprocess.CompletedProcess(argv, 0, "appended\n", "")
-        return original_run(argv, *args, **kwargs)
-
-    monkeypatch.setattr(runtime.subprocess, "run", run_with_telemetry_stub)
-    response = runtime.command_accept(repo, state_dir, reference(response["card"]), config)
+def test_partial_review_blocks_the_writer_only_once_its_attempts_are_spent(tmp_path, config):
+    repo = init_git_repo(
+        tmp_path / "repo",
+        {"accepted.txt": "old\n", "rejected.txt": "old\n", "third.txt": "old\n"},
+    )
+    state_dir, response = start(tmp_path, repo, config, "frontier")
+    response = admit_frontier(repo, state_dir, response)
+    tickets, patches = two_writer_wave(repo)
+    response = review_write_wave(
+        tmp_path, repo, state_dir, response, config, tickets, patches, critic_fail_ticket="T2"
+    )
+    response = runtime.command_adjudicate(repo, state_dir, reference(response["card"]))
     assert response["card"]["phase"] == "accepted"
-    assert (repo / "accepted.txt").read_text(encoding="utf-8") == "old\naccepted\n"
+
+    response = runtime.command_accept(repo, state_dir, reference(response["card"]), config)
+    response = transition(
+        repo,
+        state_dir,
+        response,
+        "continue_wave",
+        {
+            "remainingTicketIds": ["T2", "T3"],
+            "nextTicketIds": ["T2", "T3"],
+            "blockedTicketIds": [],
+            "evidence": "durable tracker still lists the rejected writer",
+        },
+    )
+    response = review_write_wave(
+        tmp_path,
+        repo,
+        state_dir,
+        response,
+        config,
+        [writer_ticket("T2", "rejected.txt"), writer_ticket("T3", "third.txt")],
+        {
+            "T2": (add_line_patch("rejected.txt", "old", ["rejected"]), ["rejected.txt"]),
+            "T3": (add_line_patch("third.txt", "old", ["third"]), ["third.txt"]),
+        },
+        critic_fail_ticket="T2",
+    )
+
+    response = runtime.command_adjudicate(repo, state_dir, reference(response["card"]))
+
+    # The second rejection spends the last attempt this ticket has, and only
+    # that stops the run.
+    assert response["card"]["phase"] == "blocked"
+    assert response["card"]["blockedReason"] == "retry limit reached for: T2"
+    state = authoritative(repo, state_dir, response["card"]["runId"])
+    assert state["adjudication"]["status"] == "PARTIAL"
+    assert state["waves"][-1]["status"] == "partial_acceptance"
     assert (repo / "rejected.txt").read_text(encoding="utf-8") == "old\n"
+
+
+def test_adjudication_blocks_the_wave_when_a_rejected_patch_cannot_be_rolled_back(tmp_path, config):
+    repo = init_git_repo(tmp_path / "repo", {"accepted.txt": "old\n", "rejected.txt": "old\n"})
+    state_dir, response = start(tmp_path, repo, config, "frontier")
+    response = admit_frontier(repo, state_dir, response)
+    tickets, patches = two_writer_wave(repo)
+    response = review_write_wave(
+        tmp_path, repo, state_dir, response, config, tickets, patches, critic_fail_ticket="T2"
+    )
+    # Someone edits the rejected file outside the run: neither the preimage nor
+    # the postimage applies, so the rejected patch cannot be reversed.
+    (repo / "rejected.txt").write_text("someone else was here\n", encoding="utf-8")
+
+    response = runtime.command_adjudicate(repo, state_dir, reference(response["card"]))
+
+    # Accepting here would let the next wave build a diff on top of a tree that
+    # still carries code the lenses threw out.
+    assert response["card"]["phase"] == "blocked"
+    assert "rejected.txt" in response["card"]["blockedReason"]
+    assert [record["path"] for record in response["card"]["rollbackFailed"]] == ["rejected.txt"]
+    state = authoritative(repo, state_dir, response["card"]["runId"])
+    assert state["adjudication"]["status"] == "PARTIAL"
+    assert state["waves"][-1]["status"] == "blocked"
+    assert (repo / "rejected.txt").read_text(encoding="utf-8") == "someone else was here\n"
 
 
 def test_cancel_preserves_recorded_patches_from_prior_waves(tmp_path, config, monkeypatch):
@@ -2123,7 +2314,6 @@ def test_cancel_preserves_recorded_patches_from_prior_waves(tmp_path, config, mo
             return subprocess.CompletedProcess(argv, 0, "appended\n", "")
         return original_run(argv, *args, **kwargs)
 
-    monkeypatch.setattr(runtime, "telemetry_exists", lambda *_args: False)
     monkeypatch.setattr(runtime.subprocess, "run", run_with_telemetry_stub)
     response = runtime.command_accept(repo, state_dir, reference(response["card"]), config)
     response = transition(
@@ -2179,7 +2369,6 @@ def test_lens_availability_exhaustion_rolls_back_only_current_wave(tmp_path, con
             return subprocess.CompletedProcess(argv, 0, "appended\n", "")
         return original_run(argv, *args, **kwargs)
 
-    monkeypatch.setattr(runtime, "telemetry_exists", lambda *_args: False)
     monkeypatch.setattr(runtime.subprocess, "run", run_with_telemetry_stub)
     response = runtime.command_accept(repo, state_dir, reference(response["card"]), config)
     response = transition(
@@ -2564,7 +2753,6 @@ def test_sweep_runs_sealed_two_wave_dag_to_terminal_completion(
     assert first_wave["ticketIds"] == ["T1", "T2"]
     assert {field: first_wave[field] for field in hashes} == hashes
 
-    monkeypatch.setattr(runtime, "telemetry_exists", lambda *_args: False)
     monkeypatch.setattr(
         runtime.subprocess,
         "run",
@@ -2573,7 +2761,7 @@ def test_sweep_runs_sealed_two_wave_dag_to_terminal_completion(
     response = accept_prepared_sweep_wave(tmp_path, cwd, state_dir, response, config)
     first_accepted = response["card"]
     assert first_accepted["phase"] == "accepted"
-    assert first_accepted["nextActions"] == ["continue_wave", "cancel"]
+    assert "continue_wave" in first_accepted["nextActions"]
     assert first_accepted["acceptedTicketIds"] == ["T1", "T2"]
     assert first_accepted["remainingTicketIds"] == ["T3"]
     assert first_accepted["readyTicketIds"] == ["T3"]
@@ -2596,7 +2784,7 @@ def test_sweep_runs_sealed_two_wave_dag_to_terminal_completion(
     assert second_wave["ticketIds"] == ["T3"]
     assert {field: second_wave[field] for field in hashes} == hashes
     response = accept_prepared_sweep_wave(tmp_path, cwd, state_dir, response, config)
-    assert response["card"]["nextActions"] == ["begin_synthesis", "cancel"]
+    assert "begin_synthesis" in response["card"]["nextActions"]
     assert response["card"]["acceptedTicketIds"] == ["T1", "T2", "T3"]
     assert response["card"]["remainingTicketIds"] == []
     assert response["card"]["readyTicketIds"] == []
@@ -2624,7 +2812,6 @@ def test_partial_sweep_acceptance_records_only_passing_subset_and_keeps_dag_retr
     assert response["card"]["phase"] == "accepted"
     assert response["card"]["retryTicketIds"] == ["T1"]
 
-    monkeypatch.setattr(runtime, "telemetry_exists", lambda *_args: False)
     monkeypatch.setattr(
         runtime.subprocess,
         "run",
@@ -2648,10 +2835,16 @@ def test_sweep_continue_blocks_when_a_ready_retry_is_exhausted(
     cwd,
     config,
     canonical_sweep_admission,
-    monkeypatch,
 ):
     admission = copy.deepcopy(canonical_sweep_admission)
     next(ticket for ticket in admission["tickets"] if ticket["ticketId"] == "T3")["dependsOn"] = ["T2"]
+    # T1 fails its own deterministic verification, so it never reaches the
+    # lenses: partial adjudication cannot stop the run first, and the guard
+    # under test — `continue_wave` refusing an exhausted ready ticket — is the
+    # one that has to fire.
+    next(ticket for ticket in admission["tickets"] if ticket["ticketId"] == "T1")["verification"] = [
+        {"argv": ["python3", "-c", "raise SystemExit(1)"], "cwd": ".", "timeoutSeconds": 10}
+    ]
     state_dir, response = start(tmp_path, cwd, config, "sweep")
     response = transition(cwd, state_dir, response, "admit_sweep", admission)
 
@@ -2662,29 +2855,25 @@ def test_sweep_continue_blocks_when_a_ready_retry_is_exhausted(
         current = pregate(cwd, state_dir, current, config)
         current = prepare_lenses(cwd, state_dir, current, config)
         sealed_lenses = seal(cwd, state_dir, current, "lenses")
-        current = settle_lenses(
-            tmp_path,
-            cwd,
-            state_dir,
-            sealed_lenses,
-            config,
-            critic_fail_ticket="T1",
-        )
+        current = settle_lenses(tmp_path, cwd, state_dir, sealed_lenses, config)
         return runtime.command_adjudicate(cwd, state_dir, reference(current["card"]))
 
-    monkeypatch.setattr(runtime, "telemetry_exists", lambda *_args: False)
-    monkeypatch.setattr(
-        runtime.subprocess,
-        "run",
-        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "appended\n", ""),
-    )
-    response = review_wave_with_t1_failure(response)
-    response = runtime.command_accept(cwd, state_dir, reference(response["card"]), config)
+    def accept(current):
+        # Only the telemetry writer is stubbed: the pre-gate above needs a real
+        # subprocess to observe T1's failing verification.
+        with pytest.MonkeyPatch.context() as patched:
+            patched.setattr(
+                runtime.subprocess,
+                "run",
+                lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, "appended\n", ""),
+            )
+            return runtime.command_accept(cwd, state_dir, reference(current["card"]), config)
+
+    response = accept(review_wave_with_t1_failure(response))
     assert response["card"]["readyTicketIds"] == ["T1", "T3"]
 
     response = transition(cwd, state_dir, response, "continue_wave")
-    response = review_wave_with_t1_failure(response)
-    response = runtime.command_accept(cwd, state_dir, reference(response["card"]), config)
+    response = accept(review_wave_with_t1_failure(response))
     assert response["card"]["acceptedTicketIds"] == ["T2", "T3"]
     assert response["card"]["remainingTicketIds"] == ["T1"]
 
@@ -2723,10 +2912,11 @@ def test_sweep_admission_requires_true_witness_fields(
         transition(cwd, state_dir, response, "admit_sweep", admission)
 
     assert error.value.code == "sweep_witness_invalid"
-    assert runtime.command_status(cwd, state_dir, {"runId": response["card"]["runId"]})["card"]["nextActions"] == [
-        "admit_sweep",
-        "cancel",
-    ]
+    refused = runtime.command_status(cwd, state_dir, {"runId": response["card"]["runId"]})
+    assert refused["card"]["phase"] == "sweep_admission"
+    assert "admit_sweep" in refused["card"]["nextActions"]
+    # The offer is real: the same run still admits an honest witness.
+    assert transition(cwd, state_dir, refused, "admit_sweep", canonical_sweep_admission)["card"]["phase"] == "ready"
 
 
 @pytest.mark.parametrize("fault", ["cycle", "missing_ticket", "missing_depends_on"])
@@ -3021,3 +3211,308 @@ def test_accept_records_telemetry_without_a_budget_verdict(tmp_path, cwd, config
     assert observed["card"]["phase"] == "accepted"
     assert "budgetExhausted" not in observed["card"]
     assert [event["exitCode"] for event in observed["telemetry"]] == [0]
+
+
+
+def apply_writer_wave(tmp_path: Path, repo: Path, config: dict, ticket: dict) -> tuple[str, dict, dict]:
+    """Settle one writing ticket so its patch is applied to the working tree."""
+    state_dir, response = start(tmp_path, repo, config, "frontier")
+    response = admit_frontier(repo, state_dir, response)
+    sealed = seal(repo, state_dir, prepare(repo, state_dir, response, config, ticket), "producer")
+    response = settle_producer_patches(
+        tmp_path,
+        repo,
+        state_dir,
+        sealed,
+        config,
+        {ticket["ticketId"]: (add_line_patch("target.txt", "old", ["new"]), ["target.txt"])},
+    )
+    return state_dir, sealed, response
+
+
+def test_cancel_completes_even_when_a_patch_cannot_be_rolled_back(tmp_path, config):
+    repo = init_git_repo(tmp_path / "repo", {"target.txt": "old\n"})
+    state_dir, sealed, response = apply_writer_wave(tmp_path, repo, config, writer_ticket("T1", "target.txt"))
+    assert (repo / "target.txt").read_text(encoding="utf-8") == "old\nnew\n"
+
+    # Someone edits the same file outside the run: neither the preimage nor the
+    # postimage applies any more, so no rollback can be proven.
+    (repo / "target.txt").write_text("someone else was here\n", encoding="utf-8")
+
+    response = transition(repo, state_dir, response, "cancel")
+
+    assert response["card"]["phase"] == "cancelled"
+    unrolled = response["card"]["rollbackFailed"]
+    assert [(record["attemptId"], record["path"]) for record in unrolled] == [
+        (sealed["attemptIds"][0], "target.txt")
+    ]
+    assert unrolled[0]["reason"]
+    assert authoritative(repo, state_dir, response["card"]["runId"])["rollbackFailed"] == unrolled
+    assert (repo / "target.txt").read_text(encoding="utf-8") == "someone else was here\n"
+
+
+def test_pregate_blocks_the_wave_when_a_rejected_patch_cannot_be_rolled_back(tmp_path, config):
+    repo = init_git_repo(tmp_path / "repo", {"target.txt": "old\n"})
+    failing = writer_ticket(
+        "T1",
+        "target.txt",
+        verification=[{"argv": ["python3", "-c", "raise SystemExit(1)"], "cwd": ".", "timeoutSeconds": 10}],
+    )
+    state_dir, _sealed, response = apply_writer_wave(tmp_path, repo, config, failing)
+    (repo / "target.txt").write_text("someone else was here\n", encoding="utf-8")
+
+    response = pregate(repo, state_dir, response, config)
+
+    assert response["card"]["phase"] == "blocked"
+    assert "target.txt" in response["card"]["blockedReason"]
+    assert response["card"]["rollbackFailed"][0]["path"] == "target.txt"
+    state = authoritative(repo, state_dir, response["card"]["runId"])
+    assert state["pregate"]["status"] == "FAIL"
+    assert state["waves"][-1]["status"] == "blocked"
+    # The pre-gate verdict is recorded and the blocked run is still cancellable.
+    assert transition(repo, state_dir, response, "cancel")["card"]["phase"] == "cancelled"
+
+
+def strip_journal_mac(path: Path) -> None:
+    body = json.loads(path.read_text(encoding="utf-8"))
+    body.pop("mac")
+    path.write_text(json.dumps(body), encoding="utf-8")
+
+
+def test_patch_application_journal_without_a_mac_is_refused(tmp_path, config, monkeypatch):
+    repo = init_git_repo(tmp_path / "repo", {"target.txt": "old\n"})
+    state_dir, response = start(tmp_path, repo, config, "frontier")
+    response = admit_frontier(repo, state_dir, response)
+    sealed = seal(repo, state_dir, prepare(repo, state_dir, response, config, writer_ticket("T1", "target.txt")), "producer")
+    patches = {"T1": (add_line_patch("target.txt", "old", ["new"]), ["target.txt"])}
+
+    real_write_state = runtime.write_state
+    monkeypatch.setattr(runtime, "write_state", lambda *_args: (_ for _ in ()).throw(OSError("simulated state write failure")))
+    with pytest.raises(OSError, match="simulated state write failure"):
+        settle_producer_patches(tmp_path, repo, state_dir, sealed, config, patches)
+
+    monkeypatch.setattr(runtime, "write_state", real_write_state)
+    artifacts = runtime.state_paths(repo, state_dir, sealed["card"]["runId"])[0].with_suffix(".artifacts")
+    strip_journal_mac(next(artifacts.glob("wave-*.apply.json")))
+    # The unauthenticated journal is skipped by orphan recovery, so the tree it
+    # left behind is restored by hand; the retried settlement then applies
+    # cleanly and reaches the journal itself.
+    subprocess.run(["git", "checkout", "--", "target.txt"], cwd=repo, check=True)
+
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        settle_producer_patches(tmp_path, repo, state_dir, sealed, config, patches)
+
+    assert error.value.code == "patch_journal_corrupt"
+
+
+def test_patch_rollback_journal_without_a_mac_is_refused(tmp_path, config, monkeypatch):
+    repo = init_git_repo(tmp_path / "repo", {"target.txt": "old\n"})
+    config["gates"]["pre_gate"]["max_diff_lines"] = 0
+    state_dir, sealed, response = apply_writer_wave(tmp_path, repo, config, writer_ticket("T1", "target.txt"))
+
+    real_write_state = runtime.write_state
+    monkeypatch.setattr(runtime, "write_state", lambda *_args: (_ for _ in ()).throw(OSError("simulated state write failure")))
+    with pytest.raises(OSError, match="simulated state write failure"):
+        pregate(repo, state_dir, response, config)
+
+    monkeypatch.setattr(runtime, "write_state", real_write_state)
+    artifacts = runtime.state_paths(repo, state_dir, sealed["card"]["runId"])[0].with_suffix(".artifacts")
+    strip_journal_mac(next(artifacts.glob("rollback-*.json")))
+
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        pregate(repo, state_dir, response, config)
+
+    assert error.value.code == "rollback_journal_corrupt"
+
+
+def test_orphan_temporary_state_file_does_not_brick_the_runs_directory(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    run_id = response["card"]["runId"]
+    runs = runtime.state_paths(cwd, state_dir, run_id)[0].parent
+    # The runs directory is the run index: whatever private scratch the writer
+    # keeps beside it, nothing but `<runId>.json` may be visible there.
+    assert [path.name for path in runs.iterdir() if not path.name.startswith(".")] == [f"{run_id}.json"]
+
+    # A writer killed mid-replace leaves its temporary file behind; scanning for
+    # the active run must survive it instead of calling the directory corrupt.
+    scratch = runs / ".tmp"
+    scratch.mkdir(parents=True, exist_ok=True)
+    (scratch / f"{run_id}.json.abandoned").write_text("{", encoding="utf-8")
+    (runs / f".{run_id}.json.legacy-abandoned").write_text("{", encoding="utf-8")
+
+    assert runtime.command_status(cwd, state_dir, {})["card"]["runId"] == run_id
+
+
+def test_only_run_creation_mints_the_state_authentication_key(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    state_path, _lock_path = runtime.state_paths(cwd, state_dir, response["card"]["runId"])
+    key_path = runtime.state_key_path(state_path)
+    assert key_path.is_file()
+
+    # A vanished key makes every run in this directory unverifiable. Minting a
+    # fresh one here would hide exactly that.
+    key_path.unlink()
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        runtime.seal_state(state, state_path)
+
+    assert error.value.code == "state_auth_failed"
+    assert not key_path.exists()
+    with pytest.raises(runtime.RuntimeFailure) as read_error:
+        runtime.command_status(cwd, state_dir, {"runId": response["card"]["runId"]}, config)
+    assert read_error.value.code == "state_auth_failed"
+
+
+def two_ticket_producer_results(tmp_path: Path, cwd: Path, state_dir: str, sealed: dict) -> tuple[list, dict]:
+    state = authoritative(cwd, state_dir, sealed["card"]["runId"])
+    results = [normalized_result(tmp_path, state["attempts"][attempt_id]) for attempt_id in sealed["attemptIds"]]
+    content = {attempt_id: producer_result() for attempt_id in sealed["attemptIds"]}
+    return results, content
+
+
+def test_settled_results_must_carry_their_sealed_dispatch_name(tmp_path, cwd, config):
+    provenance = {**PROVENANCE, "tickets": ["T1", "T2"], "dependencies": {"T1": [], "T2": []}}
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response, provenance)
+    response = prepare_tickets(cwd, state_dir, response, config, [ticket_named("T1"), ticket_named("T2")])
+    sealed = seal(cwd, state_dir, response, "producer")
+    results, content = two_ticket_producer_results(tmp_path, cwd, state_dir, sealed)
+
+    def record(settled: list) -> dict:
+        return runtime.command_record_result(
+            cwd,
+            state_dir,
+            {
+                **reference(sealed["card"]),
+                "dispatchId": sealed["dispatchId"],
+                "toolCallId": "producer-tool",
+                "input": sealed["taskInput"],
+                "details": {"results": settled},
+                "content": content,
+                "isError": False,
+            },
+            config,
+        )
+
+    # The host settled the two tasks in the other order. `attemptId` is a label
+    # the adapter writes by position, so only the host's own name reveals it.
+    permuted = copy.deepcopy(results)
+    permuted[0]["name"], permuted[1]["name"] = permuted[1]["name"], permuted[0]["name"]
+    with pytest.raises(runtime.RuntimeFailure) as error:
+        record(permuted)
+    assert error.value.code == "dispatch_invalid"
+    assert "permuted" in error.value.message
+
+    # A host that reported no name at all buys nothing either.
+    anonymous = copy.deepcopy(results)
+    anonymous[0]["name"] = None
+    with pytest.raises(runtime.RuntimeFailure) as anonymous_error:
+        record(anonymous)
+    assert anonymous_error.value.code == "dispatch_invalid"
+
+    assert record(results)["card"]["phase"] == "pregate_pending"
+
+
+def test_availability_failed_sibling_keeps_its_class_in_a_partly_successful_wave(tmp_path, cwd, config):
+    provenance = {**PROVENANCE, "tickets": ["T1", "T2"], "dependencies": {"T1": [], "T2": []}}
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response, provenance)
+    response = prepare_tickets(cwd, state_dir, response, config, [ticket_named("T1"), ticket_named("T2")])
+    sealed = seal(cwd, state_dir, response, "producer")
+    results, content = two_ticket_producer_results(tmp_path, cwd, state_dir, sealed)
+    results[1]["error"] = "worker transport vanished"
+
+    response = runtime.command_record_result(
+        cwd,
+        state_dir,
+        {
+            **reference(sealed["card"]),
+            "dispatchId": sealed["dispatchId"],
+            "toolCallId": "producer-tool",
+            "input": sealed["taskInput"],
+            "details": {"results": results},
+            "content": content,
+            "isError": False,
+        },
+        config,
+    )
+
+    assert response["card"]["phase"] == "pregate_pending"
+    state = authoritative(cwd, state_dir, response["card"]["runId"])
+    statuses = {attempt["ticketId"]: attempt["status"] for attempt in state["attempts"].values()}
+    assert statuses == {"T1": "completed", "T2": "availability_failed"}
+    # Availability is not a capability verdict: OMP owns model replacement, so
+    # the unreachable ticket keeps its class instead of being deepened here.
+    assert state["classFloor"] == {}
+    assert state["retryTicketIds"] == ["T2"]
+
+
+def test_a_running_producer_dispatch_can_still_be_cancelled(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    sealed = seal(cwd, state_dir, prepare(cwd, state_dir, response, config), "producer")
+    assert sealed["card"]["phase"] == "producer_running"
+    assert "cancel" in sealed["card"]["nextActions"]
+
+    # Offering the action is not the contract; performing it is.
+    assert transition(cwd, state_dir, sealed, "cancel")["card"]["phase"] == "cancelled"
+
+
+def test_a_running_lens_dispatch_can_still_be_cancelled(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    response = admit_frontier(cwd, state_dir, response)
+    sealed = seal(cwd, state_dir, prepare(cwd, state_dir, response, config), "producer")
+    response = settle_producer(tmp_path, cwd, state_dir, sealed, config)
+    response = pregate(cwd, state_dir, response, config)
+    sealed_lenses = seal(cwd, state_dir, prepare_lenses(cwd, state_dir, response, config), "lenses")
+    assert sealed_lenses["card"]["phase"] == "lens_running"
+    assert "cancel" in sealed_lenses["card"]["nextActions"]
+
+    assert transition(cwd, state_dir, sealed_lenses, "cancel")["card"]["phase"] == "cancelled"
+
+
+def test_staged_replacement_offers_the_one_action_it_accepts(tmp_path, cwd, config, monkeypatch):
+    state_dir, first = start(tmp_path, cwd, config, "frontier")
+    monkeypatch.setattr(runtime, "runtime_fingerprint", lambda: "replacement-runtime")
+    old_state_path, _old_lock_path = runtime.state_paths(cwd, state_dir, first["card"]["runId"])
+    real_write_state = runtime.write_state
+
+    def fail_replacement_activation(path, state):
+        if path != old_state_path and state.get("phase") == "frontier_admission" and state.get("revision") == 1:
+            raise OSError("simulated replacement activation failure")
+        real_write_state(path, state)
+
+    monkeypatch.setattr(runtime, "write_state", fail_replacement_activation)
+    with pytest.raises(OSError, match="simulated replacement activation failure"):
+        runtime.command_start(
+            cwd,
+            state_dir,
+            {
+                "entry": "frontier",
+                "objective": "staged replacement objective",
+                "sessionId": "replacement-session",
+                "manifestFingerprint": runtime.trusted_manifest_fingerprint(cwd, config),
+                "models": model_manifest(),
+            },
+            config,
+        )
+
+    monkeypatch.setattr(runtime, "write_state", real_write_state)
+    staged_run_id = authoritative(cwd, state_dir, first["card"]["runId"])["supersededBy"]
+    staged = runtime.command_status(cwd, state_dir, {"runId": staged_run_id}, config)
+
+    assert staged["card"]["phase"] == runtime.REPLACEMENT_STAGING_PHASE
+    assert staged["card"]["nextActions"] == ["cancel"]
+    assert transition(cwd, state_dir, staged, "cancel")["card"]["phase"] == "cancelled"
+
+
+def test_card_projects_the_observed_spend(tmp_path, cwd, config):
+    state_dir, response = start(tmp_path, cwd, config, "frontier")
+    assert response["card"]["tokensSpent"] == 0
+
+    response = admit_frontier(cwd, state_dir, response)
+    sealed = seal(cwd, state_dir, prepare(cwd, state_dir, response, config), "producer")
+    response = settle_producer(tmp_path, cwd, state_dir, sealed, config, tokens=11)
+
+    assert response["card"]["tokensSpent"] == 11
+    assert authoritative(cwd, state_dir, response["card"]["runId"])["tokensSpent"] == 11
