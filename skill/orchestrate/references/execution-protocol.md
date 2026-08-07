@@ -125,7 +125,7 @@ pocock_prepare
         → pocock_prepare
       or accepted producer tickets: pocock_accept
 → pocock_transition(continue_wave) only in the form the current card authorizes:
-  published tickets carry tracker-observed remaining/ready/blocked sets plus evidence;
+  published tickets carry tracker-observed remaining/next/blocked sets plus evidence;
   sweep carries no payload because the runtime-owned sealed DAG computes those sets
 → repeat while work remains; already accepted tickets remain accepted; only an explicit
   empty remaining set authorizes pocock_transition(begin_synthesis) → lead synthesis
@@ -161,9 +161,28 @@ task({
 {
   action: "run",
   name: challengeToken,
-  witness: { version: 1, probe: <нормализуемое декларативное DOM- или URL-наблюдение> }
+  witness: { version: 1, probe: <ровно одна из двух форм ниже> }
 }
 ```
+
+Форма `probe` фиксирована: ключи ровно перечисленные, ни одного лишнего, ни одного
+пропущенного.
+
+- URL-наблюдение — `{"kind":"url","expected":"<точная выданная target>"}`. Значение
+  `expected` обязано посимвольно совпадать с выданной `target` этого challenge.
+- DOM-наблюдение —
+  `{"kind":"dom","href":"<точная выданная target>","selector":"<CSS-селектор>","expected":"<точный ожидаемый textContent>"}`.
+  Значение `href` обязано посимвольно совпадать с выданной `target`; `selector`
+  адресует узел в этом же документе, `expected` — его точный `textContent`.
+
+Любая иная форма — другой `kind`, лишний либо отсутствующий ключ, нестроковое или
+пустое значение — и любое расхождение с выданной `target` отвергаются fail-closed:
+адаптер не запечатывает такую пробу, а ядро отвечает `evidence_invalid`. Привязка к
+`target` существует потому, что проба обязана наблюдать именно выданную цель: `dom`
+без `href` считывается из любой открытой вкладки и потому доказывает лишь то, что
+исполнитель что-то видел. Поэтому сгенерированный адаптером код проверяет
+`location.href === href` и `textContent` селектора одной оценкой: два раздельных
+чтения могли бы разойтись навигацией между ними.
 
 Не передавайте исполняемый `assert` в browser-код. Адаптер сам выполняет
 browser-assert над фактически наблюдённым `probe` и точным выданным
@@ -184,9 +203,10 @@ browser-assert над фактически наблюдённым `probe` и т�
 
 `pocock_pregate` выполняет запечатанные проверки direct-argv и определяет, какие
 попытки Производителей переходят в ревью. `pocock_prepare_lenses` создаёт ровно две
-волновые Линзы — Review и Critic — над точно тем
-подмножеством, которое прошло pre-gate. Волна может сочетать попытки Производителей
-`mechanical`, `skilled` и `judgment` на соответствующих Слотах. Конфигурация делает
+волновые Линзы — Review и Critic, их Слоты объявлены в `omp.lenses.slots.Review` и
+`omp.lenses.slots.Critic`, — над точно тем подмножеством, которое прошло pre-gate.
+Волна может сочетать попытки Производителей `mechanical`, `skilled` и `judgment` на
+соответствующих Слотах. Конфигурация делает
 множества Слотов Производителей и Линз непересекающимися, а Слоты Линз —
 попарно разными. Равенство фактических моделей раздачу не отклоняет: ядро сравнивает
 непрозрачные строки до раздачи и повторно после settlement и записывает совпадения как

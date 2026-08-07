@@ -180,17 +180,24 @@ concentrated in security/auth/transactional work — rounds beyond the caps re-d
 they do not converge; the 2026-07-12 a real project case (several "final reviews" costing
 more than the 210-line feature) is the incident that pinned this.
 
-**Run token spend — observed, never a stop (v45, ADR-0015).** The run's cumulative token
-spend across this run's §7 records is counted and published: the durable run carries it as
-`tokensSpent`, accumulated as each attempt settles, and `tools/telemetry_append.py` prints
-the running total on every append (records land at ticket acceptance, §7). Between appends
-the same arithmetic is available on demand: `tools/telemetry_append.py --check-only --task
-<run>`. Spend is an observation and nothing else: no total ever withholds a dispatch. The
-same durable run retains its accepted tickets, remaining work, observed spend, and attempt
-counters; a later OMP session hydrates that run rather than starting one that forgets what
-was already paid for. What *does* bound the loops is per-ticket:
-`gates.review_loop.full_rounds_max`, the proportionality stop above, and
-`gates.pre_gate.max_diff_lines`.
+**Run token spend — observed, never a stop (v45, ADR-0015; the two figures below were told
+apart in v46).** Two different quantities are both called "spend", and reading one as the
+other mis-states both. `tokensSpent` on the durable run is the run's *whole* observed usage:
+every settled dispatch adds to it — producer attempts, both lenses, and the attempts that
+failed — and the state card publishes it in every phase, so it answers "what has this run
+cost so far". The §7 records are narrower by construction: a row is appended only when a
+producer's ticket is accepted, so summing their `tokens` prices the *accepted deliverables*
+and nothing else. The §7 sum is therefore normally the smaller figure, and the difference
+between the two is precisely the price of review and of failed attempts — which is why the
+calibration question "what does this ticket class cost" is asked of §7, while "what has the
+run spent" is asked of `tokensSpent`. `tools/telemetry_append.py` prints the §7 sum for its
+scope on every append (`spend: 3,045,296 tokens (run_id=pocock-…)`), and the same arithmetic
+is available without appending: `tools/telemetry_append.py --check-only --task <run>`.
+Neither figure is a verdict: no total ever withholds a dispatch. The same durable run
+retains its accepted tickets, remaining work, observed spend, and attempt counters; a later
+OMP session hydrates that run rather than starting one that forgets what was already paid
+for. What *does* bound the loops is per-ticket: `gates.review_loop.full_rounds_max`, the
+proportionality stop above, and `gates.pre_gate.max_diff_lines`.
 
 Why the run-level fuse existed and why it is gone. It was grounded twice over: the
 2026-07-17 neighbour-project incident — an overnight loop with no external budget spun to
@@ -294,11 +301,11 @@ The complexity→tier rubric ships a priori; this log makes it empirical. The le
 appends one record per **delegated** ticket to `telemetry/routing-log.jsonl` in the
 skill directory — **at the moment the ticket's final verdict lands** (gate accepted,
 FAIL declared, MISROUTE voided), not batched at the end of the session. Two reasons,
-both paid for in telemetry: the run's observed spend (§3) is only a live figure if the sum
+both paid for in telemetry: the accepted-deliverable sum of §3 is only a live figure if it
 exists *during* the run, and a mid-run session death loses no records (the v20 resume-pack
 logic then reads an honest log). Every append goes through `tools/telemetry_append.py` —
 the tool is the §7 contract made executable (field names, the seven-value verdict
-vocabulary, the config stamp) and the running spend total in one write path; hand-appended
+vocabulary, the config stamp) and the running §7 total in one write path; hand-appended
 lines are how the vocabulary drifted three times. Step 5 then verifies completeness —
 every delegated ticket has its row — and appends the run-summary record. The file is
 data, not doctrine — read it for recalibration, never load it into a ticket.
