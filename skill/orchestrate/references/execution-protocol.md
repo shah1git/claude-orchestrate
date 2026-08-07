@@ -56,6 +56,47 @@ OMP-сессиями. Его счётчики попыток и наблюдён
 Терминальные фазы runtime — только `completed` и `cancelled`; `complete` является
 именем перехода, а не фазой.
 
+## Payload переходов
+
+`pocock_transition` принимает ссылку на Карточку (`runId`, `revision`, `stateHash`),
+`action` и, где он требуется, `payload`. Имена полей payload проверяет ядро: они
+перечислены ниже целиком. Не подбирайте ключ по смыслу — незнакомое поле не
+читается вовсе, а отсутствие требуемого отклоняет переход с машинным кодом.
+
+- `record_triage`, `record_clarification`, `record_plan` — непустой объект с
+  фактическим содержанием шага; ядро сохраняет его как есть.
+- `approve_plan` — непустой объект, содержащий **либо** `approved: true` (именно
+  булево `true`), **либо** `decision: "approve"` или `"approved"` (регистр не
+  важен). Ничего иного ядро одобрением не считает: `approvedByOwner`,
+  `ownerApproval`, вложенный `approval` дают `approval_missing`. Это подтверждение
+  владельца, полученное на явно показанном плане, а не самоодобрение Головы.
+- `publish_tickets` — provenance: `durable: true` либо `published: true`; непустые
+  строки `tracker`, `spec`, `approval`; непустые `tickets` и `dependencies`,
+  называющие опубликованные записи. Иначе `provenance_missing`.
+- `admit_frontier` — тот же provenance. В исключительном случае недоступного
+  трекера вместо него допускается `trackerUnavailable: true` (или
+  `localTracker: true`) с непустыми `ownerAttestation` и `unavailableReason`.
+- `admit_sweep` — запечатанный ledger: только `witness` и `tickets` в форме,
+  заданной Головой `/orchestrate-sweep`; отдельных полей зависимостей,
+  планировщика или фронтира не существует.
+- `retry` — необязателен. `diagnosis` — одно из `effort`, `capability`,
+  `availability`, `clarification`; без него ядро берёт записанный `lastFailureKind`.
+- `continue_wave` для опубликованного фронтира — `remainingTicketIds`,
+  `nextTicketIds`, `blockedTicketIds` как массивы уникальных непустых строк, где
+  remaining равен объединению next и blocked, а next и blocked не пересекаются,
+  плюс непустая строка `evidence`.
+- `continue_wave` и `begin_synthesis` в Прогоне `sweep` — payload запрещён
+  (`sweep_payload_forbidden`): наборы вычисляет запечатанный DAG.
+- `begin_synthesis` и `complete` — без payload.
+- `abandon_dispatch` — `confirmedLostSettlement: true` и непустой `reason`.
+- `cancel` — без payload; для Прогона `sweep` вне фазы `sweep_admission` допустим
+  ровно один ключ: `{"reason": "…"}`.
+
+Порядок фазы `preparation` жёсткий: `record_triage` → `record_clarification` →
+`record_plan` → `approve_plan` → `publish_tickets`. Ядро принимает только следующий
+шаг последовательности, любой другой — `illegal_transition`. Какой шаг сейчас
+законен, всегда видно в `nextActions` текущей Карточки.
+
 ## Исполнительный цикл
 
 После публикации, а для другой Головы — после её допуска, используйте этот цикл,

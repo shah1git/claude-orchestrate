@@ -21,6 +21,10 @@ into a second policy engine.
 До первой мутации runtime прочитайте
 [единый протокол исполнения](references/execution-protocol.md). После допуска
 Pocock-прогона следуйте ему без исключений; прямой путь в этот протокол не входит.
+Читайте его точным путём — `skill://orchestrate/references/execution-protocol.md`
+либо `skill/orchestrate/references/execution-protocol.md` в репозитории. Шаблоны
+вида `skill://orchestrate/**` инструменты поиска отклоняют: внутренние URL
+принимают только точный путь.
 
 ## Triage before `pocock_enter`
 
@@ -61,7 +65,11 @@ Pocock-прогона следуйте ему без исключений; пр�
    ```
 
    Supply each transition's factual payload: the triage judgment, clarified decisions,
-   plan, explicit user approval, and published-ticket provenance respectively.
+   plan, explicit user approval, and published-ticket provenance respectively. The
+   accepted keys of every payload are listed in
+   [«Payload переходов»](references/execution-protocol.md#payload-переходов); never
+   guess a key. In particular `approve_plan` accepts only `{"approved": true}` or
+   `{"decision": "approve"}`, and it records the user's approval, not your own.
 3. During clarification, resolve facts from the repository before asking the user. Ask
    dependent questions one at a time, stop when further answers cannot change the plan
    or a ticket, and preserve the agreed vocabulary, scope, and observable success
