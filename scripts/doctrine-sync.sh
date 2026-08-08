@@ -1,73 +1,27 @@
 #!/usr/bin/env bash
 # managed-by: rikanv-doctrine
 #
-# doctrine-sync.sh — синхронизация доктрины RikaNV + сигнал об изменении.
+# doctrine-sync.sh — доверенная подготовка checkout доктрины.
 #
-# Канонический скрипт. Потребители подключают его один раз (npm-скрипт, CI,
-# команда агенту) и запускают явной командой владельца — авто-запуск на
-# git-hook упразднён (ADR-0021). Инструкция по подключению — ONBOARDING.md
-# §«Сигнал об изменении доктрины».
+# Канонический низкоуровневый модуль. Обычный вызов совместим с прежней
+# командой, но передаётся в `doctrine-session.sh start`: sync не подтверждает
+# прочтение и никогда не записывает `.doctrine-version`. После статуса
+# `PREPARED`/`READING_REQUIRED` прочитай объявленные документы и выполни
+# `doctrine-session.sh acknowledge <revisions.prepared>`.
 #
-# Что делает:
-#   - нет клона      → в режиме sync клонирует доктрину постоянно; в режиме
-#                      --check — см. ниже (клона на CI-раннере обычно нет, это
-#                      штатная ситуация, а не ошибка);
-#   - есть клон      → git fetch, затем (ТОЛЬКО в режиме sync) git merge --ff-only;
-#   - версия выросла → печатает дельту CHANGELOG.md, список изменённых файлов и
-#                      ОТДЕЛЬНО выделяет hard-файлы (их нужно перечитать);
-#   - запоминает «увиденную» ревизию в файле-маркере потребителя (только sync;
-#                      --check маркер принципиально не трогает).
+# `--check` сохранён для CI: он получает доверенную вершину, но не двигает
+# checkout и не меняет marker. Внутренний вызов session использует этот модуль
+# для единственного доверенного fast-forward.
 #
-# Почему маркер, а не «последний pull»: потребителю важно не «что-то пришло», а
-# «изменилось ли то, на что я опираюсь, с тех пор как я последний раз сверялся».
-# Маркер хранит ревизию, на которой потребитель сверился; всё, что выше неё, —
-# непросмотренная дельта.
-#
-# Режимы:
-#   (по умолчанию)  синхронизировать: fetch + merge --ff-only (или первый
-#                   клон), показать дельту, обновить маркер. exit 0.
-#   --check         проверить и показать; не менять checkout и маркер. `fetch`
-#                   обновляет object database и отдельный trust ref клона,
-#                   поэтому режим не называется полностью немутирующим.
-#                   Для CI/cron. Если постоянного клона нет вовсе, но есть
-#                   закоммиченный потребителем маркер .doctrine-version —
-#                   типичный случай для CI-раннера: доктрина лежит в
-#                   .gitignore потребителя, поэтому actions/checkout никогда
-#                   её не восстанавливает — скрипт клонирует доктрину во
-#                   ВРЕМЕННЫЙ каталог (mktemp -d, удаляется по выходу через
-#                   trap) только ради сверки, постоянный клон не создаёт.
-#
-# Карта кодов возврата (на неё завязан сгенерированный CI-workflow — см.
-# doctrine-subscribe.sh; меняешь код здесь — синхронно правь генератор):
-#   0  — актуально / синхронизировано, непросмотренной дельты нет;
-#   2  — ошибка использования (неизвестный флаг);
-#   10 — потребитель отстал и в дельте есть hard-файл. Единственный код, по
-#        которому CI-workflow открывает issue;
-#   11 — ТОЛЬКО в --check: маркер .doctrine-version отсутствует. Это НЕ
-#        «отстал» (10), а «сверяться не с чем» — типичная причина: подписка
-#        настроена, но маркер не закоммитили;
-#   12 — checkout изменился уже после успешного trust-check, поэтому
-#        git merge --ff-only не применился. Это race/локальная мутация во
-#        время sync; скрипт её не чинит сам;
-#   13 — каталог доктрины существует, но НЕ является самостоятельным клоном
-#        с identity-маркером `.rikanv-doctrine-id`:
-#        git-контекст из него резолвится в родительский репозиторий (типовой
-#        случай — пустой или битый doctrine/.git в throwaway-worktree
-#        потребителя). Скрипт не делает НИЧЕГО — иначе fetch/merge/rev-parse
-#        ушли бы в репозиторий потребителя, и маркер получил бы его SHA.
-#   14 — потребитель отстал, но дельта состоит только из soft/derived-файлов;
-#        CI сообщает это в логе, но не открывает issue о hard-изменении.
-#   15 — marker невалиден либо его SHA не принадлежит актуальной истории
-#        доктрины; классифицировать дельту как hard или soft нельзя, нужна
-#        полная ручная сверка, marker автоматически не перезаписывается.
-#  124 — clone/fetch превысил DOCTRINE_NETWORK_TIMEOUT_SECONDS.
+# Карта кодов `--check` (на неё завязан legacy CI):
+#   0 — актуально; 2 — ошибка использования; 10 — hard-дельта;
+#   11 — отсутствует marker; 12 — checkout изменился во время ff-only;
+#   13 — недоверенный checkout; 14 — только soft/derived-дельта;
+#   15 — marker невалиден или вне доверенной истории; 124 — timeout Git.
 #
 # Переменные окружения:
-#   DOCTRINE_REPO_URL   адрес репо (по умолчанию https://github.com/shah1git/rikanv-doctrine.git)
-#   DOCTRINE_BRANCH     ветка (по умолчанию main)
-#   DOCTRINE_SEEN_FILE  файл-маркер (по умолчанию .doctrine-version в текущем каталоге)
-#   DOCTRINE_NETWORK_TIMEOUT_SECONDS сетевой порог Git (по умолчанию 120 с):
-#                       HTTP low-speed timeout и SSH connect/keepalive.
+#   DOCTRINE_REPO_URL, DOCTRINE_BRANCH, DOCTRINE_SEEN_FILE,
+#   DOCTRINE_NETWORK_TIMEOUT_SECONDS — см. `doctrine-session.sh`.
 #
 # Использование:
 #   bash doctrine-sync.sh [DOCTRINE_DIR] [--check] [--status-json]
@@ -180,6 +134,14 @@ for arg in "$@"; do
     *)       DOCTRINE_DIR="$arg" ;;
   esac
 done
+
+# Старый прямой вызов остаётся точкой входа, но больше не может подтвердить
+# ревизию сам. Session владеет pending-состоянием и единственным atomic
+# продвижением marker в acknowledge. Внутренний вызов ниже нужен session для
+# подготовительного ff-only и не должен рекурсивно делегироваться обратно.
+if [ "$MODE" = "sync" ] && [ "${DOCTRINE_SESSION_INTERNAL:-0}" != "1" ]; then
+  exec bash "$script_dir/doctrine-session.sh" start "$DOCTRINE_DIR" --status-json
+fi
 
 REPO_URL="${DOCTRINE_REPO_URL:-https://github.com/shah1git/rikanv-doctrine.git}"
 BRANCH="${DOCTRINE_BRANCH:-main}"
@@ -420,6 +382,12 @@ trusted_doctrine_checkout() {
   remote_git -C "$trust_tmp" fetch --quiet --no-tags -- "$REPO_URL" \
     "+refs/heads/$BRANCH:$tracking_ref" || fetch_rc=$?
   if [ "$fetch_rc" -ne 0 ]; then
+    # Session передаёт private metadata-файл. Только неудача фактического
+    # trust-fetch разрешает ей ограниченный offline fallback; trust/integrity
+    # ошибки никогда не помечаются как сеть.
+    if [ -n "${DOCTRINE_SESSION_FAILURE_FILE:-}" ]; then
+      printf '%s\n' network >"$DOCTRINE_SESSION_FAILURE_FILE"
+    fi
     rm -rf -- "$trust_root"
     trust_error="не удалось получить доверенную ветку $BRANCH из origin"
     trust_infra_failure=1
@@ -436,7 +404,6 @@ trusted_doctrine_checkout() {
     trust_infra_rc=1
     return 1
   fi
-  rm -rf -- "$trust_root"
   if ! git -C "$dir" merge-base --is-ancestor HEAD "$tracking_ref" 2>/dev/null; then
     trust_error="HEAD не происходит из актуальной доверенной ветки origin/$BRANCH"
     return 1
@@ -536,7 +503,7 @@ if [ "$doctrine_repo_present" -ne 1 ]; then
     # чем, это отдельный код 11, а не «отстал».
     if [ ! -f "$SEEN_FILE" ]; then
       warn "Доктрина не подключена и маркер $SEEN_FILE отсутствует — сверяться не с чем."
-      warn "Запусти sync без --check локально (создаст маркер) и закоммить $SEEN_FILE."
+      warn "Запусти doctrine-session.sh start, прочитай подготовленные документы и выполни acknowledge."
       exit 11
     fi
     bold "Постоянного клона нет — временно клонирую доктрину для сверки"
@@ -622,7 +589,7 @@ fi
 # Ревизия, на которой потребитель сверился в прошлый раз.
 if [ "$MODE" = "check" ] && [ -z "$old_rev" ]; then
   warn "Маркер $SEEN_FILE отсутствует — определить непросмотренную дельту нельзя."
-  warn "Запусти sync без --check и закоммить созданный маркер."
+  warn "Запусти doctrine-session.sh start, затем подтвердить подготовленную ревизию через acknowledge."
   exit 11
 fi
 
@@ -728,12 +695,13 @@ fi
 
 if [ "$MODE" = "check" ]; then
   if [ -n "${hard:-}" ]; then
-    warn "Потребитель отстал: в дельте есть hard-файлы. Запусти sync и сверь затронутое."
+    warn "Потребитель отстал: в дельте есть hard-файлы. Запусти doctrine-session.sh start и сверь затронутое."
     exit 10
   fi
   warn "Потребитель отстал, но дельта содержит только soft/derived-файлы."
   exit 14
 fi
 
-echo "$new_rev" > "$SEEN_FILE"
-bold "Маркер обновлён ($SEEN_FILE → $new_ver). Сверься с изменениями выше."
+# Подтверждение marker намеренно принадлежит только session acknowledge.
+# Успешная подготовка оставляет `.doctrine-version` без изменений.
+bold "Ревизия подготовлена без изменения marker; продолжи через doctrine-session.sh acknowledge."
